@@ -1,0 +1,76 @@
+# Default values for ack-secret-manager.
+# This is a YAML-formatted file.
+# Declare variables to be passed into your templates.
+
+# Environment variables to set on deployment pod
+command:
+  backend: alicloud-kms
+  reconcilePeriod: 5s
+  tokenRotationPeriod: 120s
+# watchamespaces:
+# excludeamespaces:
+
+env:
+  REGION_ID: cn-hangzhou
+  WATCH_NAMESPACE:
+  OPERATOR_NAME: ack-secret-manager
+
+#envVarsFromSecret:
+#  ACCESS_KEY_ID:
+#    secretKeyRef: alibaba-credentials
+#    key: id
+#  SECRET_ACCESS_KEY:
+#    secretKeyRef: alibaba-credentials
+#    key: key
+#  ALICLOUD_ROLE_ARN:
+#    secretKeyRef: alibaba-credentials
+#    key: key
+#  ALICLOUD_ROLE_SESSION_NAME:
+#    secretKeyRef: alibaba-credentials
+#    key: key
+#  ALICLOUD_ROLE_SESSION_EXPIRATION:
+#    secretKeyRef: alibaba-credentials
+#    key: key
+
+rbac:
+  # Specifies whether RBAC resources should be created
+  create: true
+
+serviceAccount:
+  # Specifies whether a service account should be created
+  create: true
+  # Specifies annotations for this service account
+  annotations: {}
+  # The name of the service account to use.
+  # If not set and create is true, a name is generated using the fullname template
+  name:
+
+replicaCount: 2
+
+image:
+  repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager
+  tag: v0.0.1
+  pullPolicy: Always
+
+nameOverride: ""
+fullnameOverride: ""
+
+podAnnotations: {}
+podLabels: {}
+
+securityContext: {}
+  # fsGroup: 65534
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 2000m
+    memory: 2G
+
+nodeSelector: {}
+
+tolerations: []
+
+affinity: {}
