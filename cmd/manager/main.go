@@ -42,8 +42,9 @@ func main() {
 
 	backendCfg := backend.Config{}
 
-	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only vault supported")
+	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue secretdefinition events")
+	flag.StringVar(&backendCfg.Region, "region", "cn-hangzhou", "Region id, change it according to where the cluster deployed")
 	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
@@ -128,7 +129,7 @@ func main() {
 		Backend:              *backendClient,
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
-		Log:                  ctrl.Log.WithName("controllers").WithName("SecretDefinition"),
+		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
 		Ctx:                  ctx,
 		ReconciliationPeriod: reconcilePeriod,
 		WatchNamespaces:      watchNs,
@@ -139,9 +140,9 @@ func main() {
 	}
 	// +kubebuilder:scaffold:builder
 
-	log.Info("starting manager")
+	log.Info("starting ack-secret-manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
-		log.Error(err, "problem running manager")
+		log.Error(err, "failed to run manager")
 		os.Exit(1)
 	}
 }

@@ -34,6 +34,7 @@ spec:
             - --backend={{ .Values.command.backend }}
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
+            - --region={{ .Values.command.region }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

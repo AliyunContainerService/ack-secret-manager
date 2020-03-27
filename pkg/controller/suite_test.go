@@ -2,18 +2,16 @@ package controller
 
 import (
 	"context"
-	"encoding/base64"
 	"errors"
 	"path/filepath"
-	"reflect"
-	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/"
+	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"k8s.io/client-go/rest"
 
 	corev1 "k8s.io/api/core/v1"
@@ -49,7 +47,7 @@ func newFakeBackend(fakeSecrets []fakeBackendSecret) fakeBackend {
 	}
 }
 
-func (f fakeBackend) GetSecret(path string, key string) (string, error) {
+func (f fakeBackend) GetSecret(key string, queryCondition *backend.SecretQueryCondition) (string, error) {
 	for _, fakeSecret := range f.fakeSecrets {
 		if fakeSecret.Key == key {
 			return fakeSecret.Content, nil
@@ -105,7 +103,7 @@ var _ = BeforeSuite(func(done Done) {
 
 	r = &ExternalSecretReconciler{
 		Backend: newFakeBackend([]fakeBackendSecret{
-			{"secret/data/pathtosecret1", "value", "bG9yZW0gaXBzdW0gZG9ybWEK"},
+			{"secret/data/pathtosecret1", "value"},
 		}),
 		Client:               k8sClient,
 		APIReader:            k8sClient,

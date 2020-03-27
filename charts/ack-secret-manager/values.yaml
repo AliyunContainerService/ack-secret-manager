@@ -7,11 +7,11 @@ command:
   backend: alicloud-kms
   reconcilePeriod: 5s
   tokenRotationPeriod: 120s
+  region: cn-hangzhou
 # watchamespaces:
 # excludeamespaces:
 
 env:
-  REGION_ID: cn-hangzhou
   WATCH_NAMESPACE:
   OPERATOR_NAME: ack-secret-manager
 

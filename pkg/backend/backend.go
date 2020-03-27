@@ -20,12 +20,9 @@ func init() {
 
 // Config including configuration from all kinds of backend
 type Config struct {
-	BackendTimeout      time.Duration
 	KMSEndpoint         string
-	RoleArn             string
 	AccessKeyID         string
 	AccessKeySecret     string
-	MaxTokenTTL         int64
 	TokenRotationPeriod time.Duration
 	Region              string
 }

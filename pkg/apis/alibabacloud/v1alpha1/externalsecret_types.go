@@ -25,7 +25,7 @@ type DataSource struct {
 	Key          string `json:"key"`
 	Name         string `json:"name"`
 	VersionStage string `json:"versionStage,omitempty"`
-	VersionId    string `json:"versionStage,omitempty"`
+	VersionId    string `json:"versionId,omitempty"`
 }
 
 // SecretDefinitionStatus defines the observed state of SecretDefinition

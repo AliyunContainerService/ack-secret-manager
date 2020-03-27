@@ -78,11 +78,6 @@ func ignoreNotFoundError(err error) error {
 	return err
 }
 
-// isNotMarkedForRemoval will determine if the ExternalSecret object has been marked to be deleted
-func isNotMarkedForRemoval(externalSec api.ExternalSecret) bool {
-	return externalSec.ObjectMeta.DeletionTimestamp.IsZero()
-}
-
 // getDesiredData reads the content from the Datasource for later comparison
 func (r *ExternalSecretReconciler) getDesiredData(dataList []api.DataSource) (map[string][]byte, error) {
 	desiredData := make(map[string][]byte)
@@ -92,6 +87,7 @@ func (r *ExternalSecretReconciler) getDesiredData(dataList []api.DataSource) (ma
 			VersionId:    data.VersionId,
 			VersionStage: data.VersionStage,
 		}
+		r.Log.Info("checking...", "backend", r.Backend)
 		externalSecData, err := r.Backend.GetSecret(data.Key, &queryCondition)
 		if err != nil {
 			r.Log.Error(err, "unable to read secret from backend", "key", data.Key, "query", queryCondition)
