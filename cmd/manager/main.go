@@ -5,27 +5,38 @@ import (
 	"flag"
 	"fmt"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/operator-framework/operator-sdk/pkg/k8sutil"
+	"github.com/operator-framework/operator-sdk/pkg/restmapper"
+	corev1 "k8s.io/api/core/v1"
+	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"os"
 	"runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client/config"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"strings"
 	"time"
 
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis"
+	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller"
 	"github.com/AliyunContainerService/ack-secret-manager/version"
 
-	"github.com/operator-framework/operator-sdk/pkg/k8sutil"
 	"github.com/operator-framework/operator-sdk/pkg/leader"
-	"github.com/operator-framework/operator-sdk/pkg/restmapper"
 	sdkVersion "github.com/operator-framework/operator-sdk/version"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 )
 
-var log = logf.Log.WithName("cmd")
+var (
+	scheme = k8sruntime.NewScheme()
+	log    = logf.Log.WithName("cmd")
+)
+
+func init() {
+	corev1.AddToScheme(scheme)
+	apis.AddToScheme(scheme)
+	// +kubebuilder:scaffold:scheme
+}
 
 func printVersion() {
 	log.Info(fmt.Sprintf("Operator Version: %s", version.Version))
@@ -36,6 +47,7 @@ func printVersion() {
 
 func main() {
 	var reconcilePeriod time.Duration
+	var enableLeaderElection bool
 	var selectedBackend string
 	var watchNamespaces string
 	var excludeNamespaces string
@@ -43,6 +55,8 @@ func main() {
 	backendCfg := backend.Config{}
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
+	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true,
+		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue secretdefinition events")
 	flag.StringVar(&backendCfg.Region, "region", "cn-hangzhou", "Region id, change it according to where the cluster deployed")
 	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
@@ -60,7 +74,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// Get a config to talk to the apiserver
+	//Get a config to talk to the apiserver
 	cfg, err := config.GetConfig()
 	if err != nil {
 		log.Error(err, "")
@@ -85,6 +99,14 @@ func main() {
 	}
 
 	// Create a new Cmd to provide shared dependencies and start components
+	//mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	//	LeaderElection:     enableLeaderElection,
+	//})
+	//if err != nil {
+	//	log.Error(err, "failed to start manager")
+	//	os.Exit(1)
+	//}
+
 	mgr, err := manager.New(cfg, manager.Options{
 		Namespace:      namespace,
 		MapperProvider: restmapper.NewDynamicRESTMapper,
@@ -96,17 +118,17 @@ func main() {
 
 	log.Info("Registering Components.")
 
-	// Setup Scheme for all resour ces
+	// Setup Scheme for all resources
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
 		log.Error(err, "")
 		os.Exit(1)
 	}
 
-	// Setup all Controllers
-	if err := controller.AddToManager(mgr); err != nil {
-		log.Error(err, "")
-		os.Exit(1)
-	}
+	//// Setup all Controllers
+	//if err := controller.AddToManager(mgr); err != nil {
+	//	log.Error(err, "")
+	//	os.Exit(1)
+	//}
 
 	nsSlice := func(ns string) []string {
 		trimmed := strings.Trim(strings.TrimSpace(ns), "\"")
@@ -124,7 +146,7 @@ func main() {
 			watchNs[ns] = false
 		}
 	}
-
+	log.Info("backendClient is:", "backendClient", &backendClient)
 	err = (&controller.ExternalSecretReconciler{
 		Backend:              *backendClient,
 		Client:               mgr.GetClient(),

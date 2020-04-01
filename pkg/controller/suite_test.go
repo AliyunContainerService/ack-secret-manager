@@ -4,19 +4,19 @@ import (
 	"context"
 	"errors"
 	"path/filepath"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"testing"
 	"time"
 
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
 
-	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis"
+	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"k8s.io/client-go/rest"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/envtest"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -74,7 +74,7 @@ var _ = BeforeSuite(func(done Done) {
 
 	By("bootstrapping test environment")
 	testEnv = &envtest.Environment{
-		CRDDirectoryPaths: []string{filepath.Join("..", "config", "crd", "bases")},
+		CRDDirectoryPaths: []string{filepath.Join("..", "config", "crd")},
 	}
 
 	cfg, err := testEnv.Start()
@@ -83,8 +83,6 @@ var _ = BeforeSuite(func(done Done) {
 
 	scheme := runtime.NewScheme()
 	corev1.AddToScheme(scheme)
-	apis.AddToScheme(scheme)
-
 	err = apis.AddToScheme(scheme)
 	Expect(err).ToNot(HaveOccurred())
 
@@ -101,6 +99,10 @@ var _ = BeforeSuite(func(done Done) {
 	k8sClient, err = client.New(cfg, client.Options{Scheme: scheme})
 	Expect(err).ToNot(HaveOccurred())
 
+	// Setup Scheme for all resources
+	err = apis.AddToScheme(mgr.GetScheme())
+	Expect(err).ToNot(HaveOccurred())
+
 	r = &ExternalSecretReconciler{
 		Backend: newFakeBackend([]fakeBackendSecret{
 			{"secret/data/pathtosecret1", "value"},
@@ -112,8 +114,6 @@ var _ = BeforeSuite(func(done Done) {
 		ReconciliationPeriod: 1 * time.Second,
 	}
 	err = r.SetupWithManager(mgr)
-	//Expect(err).ToNot(HaveOccurred())*/
-
 	Expect(err).ToNot(HaveOccurred())
 
 	close(done)

@@ -49,14 +49,18 @@ func NewBackendClient(ctx context.Context, backend string, cfg Config) (*Client,
 	}
 	switch backend {
 	case alicloud_secretmanager:
-		client, err := newKMSClient(log, cfg)
+		aliClient := newKMSClient(log, cfg)
+		err = setConfig(aliClient)
 		if err != nil {
+			log.Error(err, "failed to set config for alicloud kms client")
 			return nil, err
 		}
 		//loop to refresh the client credential
 		if cfg.AccessKeyID == "" && cfg.AccessKeySecret == "" {
-			client.pullForCreds(ctx)
+			aliClient.pullForCreds(ctx)
 		}
+		client = aliClient
+		log.Info("NewBackendClient finish", "client", client, "aliClient.kmsClient", aliClient.kmsClient)
 	}
 	return &client, err
 }

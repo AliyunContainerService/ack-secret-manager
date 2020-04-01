@@ -8,6 +8,7 @@ command:
   reconcilePeriod: 5s
   tokenRotationPeriod: 120s
   region: cn-hangzhou
+  enableLeaderElection: true
 # watchamespaces:
 # excludeamespaces:
 

@@ -3,6 +3,10 @@ package v1alpha1
 import (
 	. "github.com/onsi/ginkgo"
 	. "github.com/onsi/gomega"
+	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/envtest"
 
 	"golang.org/x/net/context"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -16,6 +20,9 @@ var _ = Describe("SecretDefinition", func() {
 	var (
 		key              types.NamespacedName
 		created, fetched *ExternalSecret
+		cfg              *rest.Config
+		k8sClient        client.Client
+		testEnv          *envtest.Environment
 	)
 
 	BeforeEach(func() {
@@ -47,12 +54,12 @@ var _ = Describe("SecretDefinition", func() {
 					Name: "foo",
 					Type: "Opaque",
 					Data: []DataSource{
-						DataSource{
+						{
 							Key:          "test",
 							Name:         "foo",
 							VersionStage: "v1test",
 						},
-						DataSource{
+						{
 							Key:          "test2",
 							Name:         "foo2",
 							VersionStage: "v2test",
@@ -60,6 +67,14 @@ var _ = Describe("SecretDefinition", func() {
 					},
 				},
 			}
+			var err error
+			cfg, err = testEnv.Start()
+			Expect(err).ToNot(HaveOccurred())
+			Expect(cfg).ToNot(BeNil())
+
+			k8sClient, err = client.New(cfg, client.Options{Scheme: scheme.Scheme})
+			Expect(err).ToNot(HaveOccurred())
+			Expect(k8sClient).ToNot(BeNil())
 
 			By("creating an API obj")
 			Expect(k8sClient.Create(context.TODO(), created)).To(Succeed())

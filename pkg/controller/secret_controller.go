@@ -87,7 +87,6 @@ func (r *ExternalSecretReconciler) getDesiredData(dataList []api.DataSource) (ma
 			VersionId:    data.VersionId,
 			VersionStage: data.VersionStage,
 		}
-		r.Log.Info("checking...", "backend", r.Backend)
 		externalSecData, err := r.Backend.GetSecret(data.Key, &queryCondition)
 		if err != nil {
 			r.Log.Error(err, "unable to read secret from backend", "key", data.Key, "query", queryCondition)
@@ -128,7 +127,7 @@ func (r *ExternalSecretReconciler) upsertSecret(externalSec *api.ExternalSecret,
 			Labels: map[string]string{
 				"lastUpdatedAt": time.Now().Format(timestampFormat),
 			},
-			Name: externalSec.Spec.Name,
+			Name: externalSec.Name,
 		},
 		Data: data,
 	}
@@ -178,7 +177,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		return ctrl.Result{}, ignoreNotFoundError(err)
 	}
 
-	secretName := externalSec.Spec.Name
+	secretName := externalSec.Name
 	secretNamespace := externalSec.Namespace
 
 	// check if deletionTimestamp set
@@ -210,7 +209,6 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	}
 	// Get data from the secret source of truth
 	desiredData, err := r.getDesiredData(externalSec.Spec.Data)
-
 	if err != nil {
 		log.Error(err, "unable to get desired state for secret")
 		return ctrl.Result{}, err
@@ -218,7 +216,6 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 
 	// Get the actual secret from Kubernetes
 	currentData, err := r.getCurrentData(secretNamespace, secretName)
-
 	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "unable to get current state of secret")
 		return ctrl.Result{}, ignoreNotFoundError(err)
