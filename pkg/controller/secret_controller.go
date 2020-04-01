@@ -176,7 +176,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		log.Error(err, fmt.Sprintf("could not get ExternalSecret '%s'", req.NamespacedName))
 		return ctrl.Result{}, ignoreNotFoundError(err)
 	}
-
+	log.Info("reconcile start", "externalSec", externalSec)
 	secretName := externalSec.Name
 	secretNamespace := externalSec.Namespace
 
@@ -215,6 +215,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	}
 
 	// Get the actual secret from Kubernetes
+	log.Info(fmt.Sprintf("get current secret data", "secretNamespace", secretNamespace, "secretName", secretName))
 	currentData, err := r.getCurrentData(secretNamespace, secretName)
 	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "unable to get current state of secret")
