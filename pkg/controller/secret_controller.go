@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
@@ -48,26 +49,6 @@ type ExternalSecretReconciler struct {
 	Ctx                  context.Context
 	WatchNamespaces      map[string]bool
 	ReconciliationPeriod time.Duration
-}
-
-// Helper functions to check and remove string from a slice of strings.
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
-func removeString(slice []string, s string) (result []string) {
-	for _, item := range slice {
-		if item == s {
-			continue
-		}
-		result = append(result, item)
-	}
-	return
 }
 
 // Ignore not found errors
@@ -159,7 +140,7 @@ func (r *ExternalSecretReconciler) shouldWatch(externalSecNamespace string) bool
 
 // AddFinalizerIfNotPresent will check if finalizerName is the finalizers slice
 func (r *ExternalSecretReconciler) AddFinalizerIfNotPresent(externalSec *api.ExternalSecret, finalizerName string) error {
-	if !containsString(externalSec.ObjectMeta.Finalizers, finalizerName) {
+	if !utils.Contains(externalSec.ObjectMeta.Finalizers, finalizerName) {
 		externalSec.ObjectMeta.Finalizers = append(externalSec.ObjectMeta.Finalizers, finalizerName)
 		return r.Update(r.Ctx, externalSec)
 	}
@@ -176,7 +157,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		log.Error(err, fmt.Sprintf("could not get ExternalSecret '%s'", req.NamespacedName))
 		return ctrl.Result{}, ignoreNotFoundError(err)
 	}
-
+	log.Info("reconcile start", "externalSec", externalSec)
 	secretName := externalSec.Name
 	secretNamespace := externalSec.Namespace
 
@@ -215,6 +196,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	}
 
 	// Get the actual secret from Kubernetes
+	log.Info("get current secret data", "secretNamespace", secretNamespace, "secretName", secretName)
 	currentData, err := r.getCurrentData(secretNamespace, secretName)
 	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "unable to get current state of secret")
@@ -260,8 +242,12 @@ func (r *ExternalSecretReconciler) addFinalizer(logger logr.Logger, es *api.Exte
 }
 
 // SetupWithManager will register the controller
-func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCount int) error {
+	options := controller.Options{
+		MaxConcurrentReconciles: reconcileCount,
+		Reconciler:              r,
+	}
+	return ctrl.NewControllerManagedBy(mgr).WithOptions(options).
 		For(&api.ExternalSecret{}).
 		Complete(r)
 }

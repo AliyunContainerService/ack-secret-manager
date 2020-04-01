@@ -47,6 +47,7 @@ func printVersion() {
 
 func main() {
 	var reconcilePeriod time.Duration
+	var reconcileCount int
 	var enableLeaderElection bool
 	var selectedBackend string
 	var watchNamespaces string
@@ -57,7 +58,9 @@ func main() {
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true,
 		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
+	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue secretdefinition events")
+	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
 	flag.StringVar(&backendCfg.Region, "region", "cn-hangzhou", "Region id, change it according to where the cluster deployed")
 	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
@@ -155,7 +158,7 @@ func main() {
 		Ctx:                  ctx,
 		ReconciliationPeriod: reconcilePeriod,
 		WatchNamespaces:      watchNs,
-	}).SetupWithManager(mgr)
+	}).SetupWithManager(mgr, reconcileCount)
 	if err != nil {
 		log.Error(err, "unable to create controller", "controller", "SecretDefinition")
 		os.Exit(1)
