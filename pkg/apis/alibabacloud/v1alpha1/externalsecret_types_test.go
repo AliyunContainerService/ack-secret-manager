@@ -16,7 +16,7 @@ import (
 // These tests are written in BDD-style using Ginkgo framework. Refer to
 // http://onsi.github.io/ginkgo to learn more.
 
-var _ = Describe("SecretDefinition", func() {
+var _ = Describe("ExternalSecret", func() {
 	var (
 		key              types.NamespacedName
 		created, fetched *ExternalSecret

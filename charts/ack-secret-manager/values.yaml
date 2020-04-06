@@ -6,6 +6,7 @@
 command:
   backend: alicloud-kms
   reconcilePeriod: 5s
+  reconcileCount: 1
   tokenRotationPeriod: 120s
   region: cn-hangzhou
   enableLeaderElection: true

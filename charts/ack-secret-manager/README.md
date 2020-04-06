@@ -1,13 +1,9 @@
-# 💂 Kubernetes External Secrets
+# ACK Secret Manager
 
-[Kubernetes External Secrets](https://github.com/godaddy/kubernetes-external-secrets) allows you to use external secret management systems (*e.g.*, [AWS Secrets Manager](https://aws.amazon.com/secrets-manager/)) to securely add secrets in Kubernetes. Read more about the design and motivation for Kubernetes External Secrets on the [GoDaddy Engineering Blog](https://godaddy.github.io/2019/04/16/kubernetes-external-secrets/).
+[Ack Secret Manager](https://github.com/acs/ack-secret-manager) allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) to securely add secrets in Kubernetes. 
 
-## TL;DR;
+ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) into a Pod using a declarative API similar to the native Secret one.
 
-```bash
-$ helm repo add external-secrets https://godaddy.github.io/kubernetes-external-secrets/
-$ helm install external-secrets/kubernetes-external-secrets
-```
 
 ## Prerequisites
 
@@ -15,46 +11,57 @@ $ helm install external-secrets/kubernetes-external-secrets
 
 ## Installing the Chart
 
-To install the chart with the release named `my-release`:
+**1.** You are the authorized user of [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152001.htm?spm=a2c63.p38356.b99.33.120e4107vpBRBO)
+ 
+**2.** Attach KMS RAM policy on target worker role
 
-```bash
-$ helm install --name my-release external-secrets/kubernetes-external-secrets
-```
+ - access the target cluster's detail page in [Container Service console](https://cs.console.aliyun.com/)
+ - click the target ram role named **KubernetesWorkerRole-xxxxxxxxxxxxxxx** and access into RAM Roles page
+ - add kms RAM policy below into the policy bind to the worker role.
+ 
+ ```
+         {
+            "Action": [
+                "kms:GetSecretValue"
+            ],
+            "Resource": [
+                "*"
+            ],
+            "Effect": "Allow"
+        }
+ ```
 
-> **Tip:** A namespace can be specified by the `Helm` option '`--namespace kube-external-secrets`'
+**3.** * Log on to the      Container Service console.
 
-To install the chart with [AWS IAM Roles for Service Accounts](https://docs.aws.amazon.com/eks/latest/userguide/iam-roles-for-service-accounts.html):
-
-```bash
-$ helm install --name my-release --set securityContext.fsGroup=65534 --set serviceAccount.annotations."eks\.amazonaws\.com/role-arn"='arn:aws:iam::111111111111:role/ROLENAME' external-secrets/kubernetes-external-secrets
-```
+* In the left-side navigation page, choose **Marketplace > App Catalog**. Select the **ack-secret-manager** application, click it and access into application page, then choose **Create** to add the component.
 
 ## Uninstalling the Chart
 
-To uninstall/delete the deployment:
+1. Log on to the [Container Service console](https://cs.console.aliyun.com/).
+2. In the left-side      navigation pane, choose **Applications      > Publish** and click the **Releases**      tab. On the ** Releases** tab page,      locate the row that named **ack-secret-manager**, and click **Delete**.
 
-```bash
-helm delete my-release
-```
 
 ## Configuration
 
-The following table lists the configurable parameters of the `kubernetes-external-secrets` chart and their default values.
+The following table lists the configurable parameters of the `ack-secret-manager` chart and their default values.
 
 | Parameter                            | Description                                                  | Default                                                 |
 | ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
-| `env.AWS_REGION`                     | Set AWS_REGION in Deployment Pod                             | `us-west-2`                                             |
-| `env.LOG_LEVEL`                           | Set the application log level                                | `info`                                                  |
-| `env.METRICS_PORT`                        | Specify the port for the prometheus metrics server           | `3001`                                                  |
-| `env.ROLE_PERMITTED_ANNOTATION`           | Specify the annotation key where to lookup the role arn permission boundaries | `iam.amazonaws.com/permitted`          |
-| `env.POLLER_INTERVAL_MILLISECONDS`   | Set POLLER_INTERVAL_MILLISECONDS in Deployment Pod           | `10000`                                                 |
-| `env.VAULT_ADDR`                          | Endpoint for the Vault backend, if using Vault               | `http://127.0.0.1:8200                                  |
-| `env.DISABLE_POLLING`                          | Disables backend polling and only updates secrets when ExternalSecret is modified, setting this to any value will disable polling               | `nil`                                  |
-| `envVarsFromSecret.AWS_ACCESS_KEY_ID`     | Set AWS_ACCESS_KEY_ID (from a secret) in Deployment Pod      |                                                         |
-| `envVarsFromSecret.AWS_SECRET_ACCESS_KEY` | Set AWS_SECRET_ACCESS_KEY (from a secret) in Deployment Pod  |                                                         |
-| `image.repository`                   | kubernetes-external-secrets Image name                       | `godaddy/kubernetes-external-secrets`                   |
-| `image.tag`                          | kubernetes-external-secrets Image tag | `2.2.1`                                                 |
-| `image.pullPolicy`                   | Image pull policy                                            | `IfNotPresent`                                          |
+| `env.WATCH_NAMESPACE`                     | Set the namespaces operator watch（empty value means all-namespaces）                    |                                           |
+| `envVarsFromSecret.ACCESS_KEY_ID`     | Set ACCESS_KEY_ID (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set SECRET_ACCESS_KEY (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set ALICLOUD_ROLE_ARN (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set ALICLOUD_ROLE_SESSION_NAME (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set ALICLOUD_ROLE_SESSION_EXPIRATION (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`                                                  |
+| `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                                                  |
+| `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`          |
+| `command.tokenRotationPeriod`   | Polling interval to check token expiration time.           | `120s`                                                 |
+| `command.region `                          | Disables backend polling and only updates secrets when ExternalSecret is modified, setting this to any value will disable polling               | `cn-hangzhou`                                  |
+| `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     |   true                                                      |
+| `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager`                   |
+| `image.tag`                          | ack-secret-manager Image tag | `v0.0.1`                                                 |
+| `image.pullPolicy`                   | Image pull policy                                            | `Always`                                          |
 | `nameOverride`                   | Override the name of app                                            | `nil`                                          |
 | `fullnameOverride`                   | Override the full name of app                                            | `nil`                                          |
 | `rbac.create`                        | Create & use RBAC resources                                  | `true`                                                  |
@@ -70,42 +77,33 @@ The following table lists the configurable parameters of the `kubernetes-externa
 | `affinity`                           | Affinity for pod assignment                                  | `{}`                                                    |
 | `resources`                          | Pod resource requests & limits                               | `{}`                                                    |
 
-Specify each parameter using the `--set key=value[,key=value]` argument to `helm install`. For example,
 
-```bash
-helm install external-secrets/kubernetes-external-secrets --name my-releases \
---set env.POLLER_INTERVAL_MILLISECONDS='300000' \
---set podAnnotations."iam\.amazonaws\.com/role"='Name-Of-IAM-Role-With-SecretManager-Access'
-```
-
-Alternatively, a YAML file that specifies the values for the parameters can be provided while installing the chart. For example,
-
-```bash
-helm install external-secrets/kubernetes-external-secrets --name my-release -f values.yaml
-```
-
-> **Tip**: You can use the default [values.yaml](https://github.com/godaddy/kubernetes-external-secrets/blob/master/charts/kubernetes-external-secrets/values.yaml)
+> **Tip**: You can find the ack-secret-manager release in ACK  edit the param at the **Parameters** tab in    or use the default [values.yaml](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/charts/ack-secret-manager/values.yaml)
 
 ## Add a secret
 
-Add your secret data to your backend. For example, AWS Secrets Manager:
+Add your secret data to your Secret Manager 
 
 ```
-aws secretsmanager create-secret --name hello-service/password --secret-string "1234"
+aliyun kms CreateSecret --SecretName test --SecretData 1234 --VersionId v1
+
 ```
+
+> **Tip**: In current Secret Manager still in public preview status, it will open to use soon, thanks for your patient.
 
 and then create a `hello-service-external-secret.yml` file:
 
 ```yml
-apiVersion: 'kubernetes-client.io/v1'
+apiVersion: 'alibabacloud.com/v1alpha1'
 kind: ExternalSecret
 metadata:
   name: hello-service
 spec:
-  backendType: secretsManager
+  backendType: alicloud-kms
   data:
-    - key: hello-service/password
+    - key: test
       name: password
+  versionStage: ACSCurrent
 ```
 
 Save the file and run:
@@ -117,7 +115,7 @@ kubectl apply -f hello-service-external-secret.yml
 Wait a few minutes and verify that the associated `Secret` has been created:
 
 ```sh
-kubectl get secret hello-service -o=yaml
+kubectl get secret hello-service -oyaml
 ```
 
 The `Secret` created by the controller should look like:
@@ -131,7 +129,3 @@ type: Opaque
 data:
   password: MTIzNA==
 ```
-
-## Further Information
-
-For more in-depth documentation of usage, please see the [Kubernetes External Secrets repo](https://github.com/godaddy/kubernetes-external-secrets)

@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
@@ -48,26 +49,6 @@ type ExternalSecretReconciler struct {
 	Ctx                  context.Context
 	WatchNamespaces      map[string]bool
 	ReconciliationPeriod time.Duration
-}
-
-// Helper functions to check and remove string from a slice of strings.
-func containsString(slice []string, s string) bool {
-	for _, item := range slice {
-		if item == s {
-			return true
-		}
-	}
-	return false
-}
-
-func removeString(slice []string, s string) (result []string) {
-	for _, item := range slice {
-		if item == s {
-			continue
-		}
-		result = append(result, item)
-	}
-	return
 }
 
 // Ignore not found errors
@@ -102,12 +83,13 @@ func (r *ExternalSecretReconciler) getCurrentData(namespace string, name string)
 	reader := r.APIReader
 	data := make(map[string][]byte)
 	secret := &corev1.Secret{}
+	r.Log.Info("getCurrentData for", "ns", namespace, "name", name)
 	err := reader.Get(r.Ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      name,
 	}, secret)
 	if err != nil {
-		r.Log.Error(err, "failed to get secret from ")
+		r.Log.Error(err, "failed to get current secret")
 		return data, err
 	}
 	data = secret.Data
@@ -159,7 +141,7 @@ func (r *ExternalSecretReconciler) shouldWatch(externalSecNamespace string) bool
 
 // AddFinalizerIfNotPresent will check if finalizerName is the finalizers slice
 func (r *ExternalSecretReconciler) AddFinalizerIfNotPresent(externalSec *api.ExternalSecret, finalizerName string) error {
-	if !containsString(externalSec.ObjectMeta.Finalizers, finalizerName) {
+	if !utils.Contains(externalSec.ObjectMeta.Finalizers, finalizerName) {
 		externalSec.ObjectMeta.Finalizers = append(externalSec.ObjectMeta.Finalizers, finalizerName)
 		return r.Update(r.Ctx, externalSec)
 	}
@@ -176,10 +158,10 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		log.Error(err, fmt.Sprintf("could not get ExternalSecret '%s'", req.NamespacedName))
 		return ctrl.Result{}, ignoreNotFoundError(err)
 	}
-	log.Info("reconcile start", "externalSec", externalSec)
 	secretName := externalSec.Name
 	secretNamespace := externalSec.Namespace
-
+	log = log.WithValues("secret", fmt.Sprintf("%s/%s", secretNamespace, secretName))
+	r.Log.Info("externalSec info", "secretName", secretName, "secretNamespace", secretNamespace)
 	// check if deletionTimestamp set
 	isSecretMarkedToBeDeleted := externalSec.GetDeletionTimestamp() != nil
 	if isSecretMarkedToBeDeleted {
@@ -187,11 +169,18 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 			// exec the clean work in secretFinalizer
 			// do not delete Finalizer if clean failed, the clean work will exec in next reconcile
 			if err := r.finalizeExternalSecret(log, secretNamespace, secretName); err != nil {
+				log.Error(err, "failed to clean secret")
 				return reconcile.Result{RequeueAfter: r.ReconciliationPeriod}, err
 			}
 
 			// 删除secretFinalizer，当Finalizers列表被清空时资源删除
+			log.Info("removing finalizer", "currentFinalizers", externalSec.GetFinalizers())
 			externalSec.SetFinalizers(utils.Remove(externalSec.GetFinalizers(), secretFinalizer))
+			err := r.Update(context.TODO(), externalSec)
+			if err != nil {
+				log.Error(err, "failed to update externalSec when clean finalizers")
+				return reconcile.Result{}, err
+			}
 
 		}
 		return reconcile.Result{}, nil
@@ -207,7 +196,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		log.Info(fmt.Sprintf("ignoring unwatch ns %s", secretNamespace), "watched_namespaces", r.WatchNamespaces)
 		return ctrl.Result{}, nil
 	}
-	// Get data from the secret source of truth
+	// Get data from the secret source of truthrou't
 	desiredData, err := r.getDesiredData(externalSec.Spec.Data)
 	if err != nil {
 		log.Error(err, "unable to get desired state for secret")
@@ -215,7 +204,6 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	}
 
 	// Get the actual secret from Kubernetes
-	log.Info(fmt.Sprintf("get current secret data", "secretNamespace", secretNamespace, "secretName", secretName))
 	currentData, err := r.getCurrentData(secretNamespace, secretName)
 	if err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "unable to get current state of secret")
@@ -224,21 +212,21 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 
 	eq := reflect.DeepEqual(desiredData, currentData)
 	if !eq {
-		log.Info("found secret need to update", "namespace", secretNamespace, "name", secretName)
+		log.Info("found secret need to update")
 		if err := r.upsertSecret(externalSec, desiredData); err != nil {
 			log.Error(err, "failed to update secret", "namespace", secretNamespace, "name", secretName)
 			//reconcile again
 			return ctrl.Result{}, err
 		}
-		log.Info("secret update finished", "namespace", secretNamespace, "name", secretName)
+		log.Info("secret update finished")
 	}
 
-	return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, nil
+	return ctrl.Result{Requeue: false}, nil
 }
 
 func (r *ExternalSecretReconciler) finalizeExternalSecret(log logr.Logger, secretNamespace, secretName string) error {
 
-	log.Info("Successfully finalized memcached")
+	log.Info("Successfully finalized external secret")
 	if err := r.deleteSecret(secretNamespace, secretName); err != nil && !errors.IsNotFound(err) {
 		log.Error(err, "unable to delete secret", "namespace", secretNamespace, "name", secretName)
 		return err
@@ -261,8 +249,12 @@ func (r *ExternalSecretReconciler) addFinalizer(logger logr.Logger, es *api.Exte
 }
 
 // SetupWithManager will register the controller
-func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager) error {
-	return ctrl.NewControllerManagedBy(mgr).
+func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCount int) error {
+	options := controller.Options{
+		MaxConcurrentReconciles: reconcileCount,
+		Reconciler:              r,
+	}
+	return ctrl.NewControllerManagedBy(mgr).WithOptions(options).WithEventFilter(getWatchPredicateForExternalSecret()).
 		For(&api.ExternalSecret{}).
 		Complete(r)
 }
