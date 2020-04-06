@@ -28,7 +28,7 @@ type DataSource struct {
 	VersionId    string `json:"versionId,omitempty"`
 }
 
-// SecretDefinitionStatus defines the observed state of SecretDefinition
+// ExternalSecretStatus defines the observed state of ExternalSecret
 type ExternalSecretStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file

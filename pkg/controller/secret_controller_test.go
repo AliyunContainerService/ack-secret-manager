@@ -104,7 +104,7 @@ var _ = Describe("SecretsManager", func() {
 
 	})
 
-	Context("SecretDefinitionReconciler.Reconcile", func() {
+	Context("ExternalSecretReconciler.Reconcile", func() {
 		It("Create a externalsecret and read the secret", func() {
 			err := r.Create(context.Background(), sd)
 			fmt.Printf("err: %v", err)
@@ -150,7 +150,7 @@ var _ = Describe("SecretsManager", func() {
 			Expect(res).To(Equal(reconcile.Result{}))
 		})
 	})
-	Context("SecretDefinitionReconciler.upsertSecret", func() {
+	Context("ExternalSecretReconciler.upsertSecret", func() {
 		It("Upsert a secret twice should not raise an error", func() {
 			decodedBytes, _ := base64.StdEncoding.DecodeString(encodedValue)
 			err := r.upsertSecret(sd, map[string][]byte{"foo": decodedBytes})
