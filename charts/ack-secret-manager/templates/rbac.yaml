@@ -24,7 +24,7 @@ rules:
   - apiGroups: ["apiextensions.k8s.io"]
     resources: ["customresourcedefinitions"]
     resourceNames: ["externalsecrets.alibabacloud.com"]
-    verbs: ["get", "update"]
+    verbs: ["get", "update", "delete"]
   - apiGroups: ["alibabacloud.com"]
     resources: ["externalsecrets"]
     verbs: ["create", "delete", "get", "list", "patch", "update", "watch"]

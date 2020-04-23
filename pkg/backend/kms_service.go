@@ -1,3 +1,18 @@
+/*
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package backend
 
 import (
@@ -9,7 +24,6 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials/providers"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/kms"
 	"github.com/go-logr/logr"
-	"github.com/golang/glog"
 	"os"
 	"reflect"
 	"sync"
@@ -64,8 +78,6 @@ func setConfig(c *client) error {
 	if err != nil {
 		return err
 	}
-	c.logger.Info("get last credential", "lastCreds", lastCreds)
-
 
 	clientConfig := sdk.NewConfig()
 	clientConfig.Scheme = "https"
@@ -88,11 +100,11 @@ func (c *client) pullForCreds(ctx context.Context) {
 		for {
 			select {
 			case <-ctx.Done():
-				glog.Warningf("stopping the pulling channel")
+				c.logger.Info("stopping the pulling channel")
 				return
 			case <-ticker.C:
 				if err := c.checkCredentials(c.provider); err != nil {
-					glog.Warningf("unable to retrieve current credentials, error: %v", err)
+					c.logger.Error(err, "unable to retrieve current credentials")
 				}
 			}
 		}
@@ -150,7 +162,7 @@ func (c *client) GetSecret(key string, queryCondition *SecretQueryCondition) (st
 		c.logger.Error(err, "not support binary type yet", "key", key)
 		return data, utils.BackendSecretTypeNotSupportError{ErrType: utils.EmptySecretKeyErrorType, Key: key}
 	}
-	c.logger.Info("got secret data from kms service", "key", key, "response", response)
+	c.logger.Info("got secret data from kms service", "key", key)
 	data = response.SecretData
 	return data, nil
 }

@@ -1,9 +1,11 @@
 DOCKER_REGISTRY ?= "registry.cn-hangzhou.aliyuncs.com/acs"
 BINARY_NAME=ack-secret-manager
+CLEANUP_NAME=ack-secret-manager-cleanup
 SECRET_MANAGER_VERSION=v0.0.1
 GO111MODULE=on
 # Image URL to use all building/pushing image targets
 IMG = ${DOCKER_REGISTRY}/${BINARY_NAME}:${SECRET_MANAGER_VERSION}
+CLEANUP_IMG = ${DOCKER_REGISTRY}/${CLEANUP_NAME}:${SECRET_MANAGER_VERSION}
 # Produce CRDs that work back to Kubernetes 1.11 (no version conversion)
 CRD_OPTIONS ?= "crd:trivialVersions=true"
 
@@ -32,6 +34,10 @@ build-all:
 build-image:
 	CGO_ENABLED=0  go build -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
 	docker build --build-arg SECRET_MANAGER_VERSION=${SECRET_MANAGER_VERSION} -t ${IMG} .
+
+build-cleanup-image:
+	CGO_ENABLED=0  go build -o build/bin/$(CLEANUP_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cleanup
+	docker build -f cleanup/Dockerfile --build-arg SECRET_MANAGER_VERSION=${SECRET_MANAGER_VERSION} -t ${CLEANUP_IMG} .
 
 # Run tests
 test: generate fmt vet manifests

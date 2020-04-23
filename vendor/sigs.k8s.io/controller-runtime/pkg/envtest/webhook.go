@@ -375,13 +375,9 @@ func readWebhooks(path string) ([]runtime.Object, []runtime.Object, error) {
 				return nil, nil, err
 			}
 
-			const (
-				admissionregv1      = "admissionregistration.k8s.io/v1beta1"
-				admissionregv1beta1 = "admissionregistration.k8s.io/v1"
-			)
 			switch {
 			case generic.Kind == "MutatingWebhookConfiguration":
-				if generic.APIVersion != admissionregv1beta1 && generic.APIVersion != admissionregv1 {
+				if generic.APIVersion != "v1beta1" && generic.APIVersion != "v1" {
 					return nil, nil, fmt.Errorf("only v1beta1 and v1 are supported right now for MutatingWebhookConfiguration (name: %s)", generic.Name)
 				}
 				hook := &unstructured.Unstructured{}
@@ -390,7 +386,7 @@ func readWebhooks(path string) ([]runtime.Object, []runtime.Object, error) {
 				}
 				mutHooks = append(mutHooks, hook)
 			case generic.Kind == "ValidatingWebhookConfiguration":
-				if generic.APIVersion != admissionregv1beta1 && generic.APIVersion != admissionregv1 {
+				if generic.APIVersion != "v1beta1" && generic.APIVersion != "v1" {
 					return nil, nil, fmt.Errorf("only v1beta1 and v1 are supported right now for ValidatingWebhookConfiguration (name: %s)", generic.Name)
 				}
 				hook := &unstructured.Unstructured{}

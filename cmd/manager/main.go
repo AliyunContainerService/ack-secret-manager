@@ -5,23 +5,16 @@ import (
 	"flag"
 	"fmt"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-	"github.com/operator-framework/operator-sdk/pkg/k8sutil"
-	"github.com/operator-framework/operator-sdk/pkg/restmapper"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"os"
 	"runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client/config"
-	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"strings"
 	"time"
 
 	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller"
 	"github.com/AliyunContainerService/ack-secret-manager/version"
-
-	"github.com/operator-framework/operator-sdk/pkg/leader"
-	sdkVersion "github.com/operator-framework/operator-sdk/version"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -42,7 +35,6 @@ func printVersion() {
 	log.Info(fmt.Sprintf("Operator Version: %s", version.Version))
 	log.Info(fmt.Sprintf("Go Version: %s", runtime.Version()))
 	log.Info(fmt.Sprintf("Go OS/Arch: %s/%s", runtime.GOOS, runtime.GOARCH))
-	log.Info(fmt.Sprintf("Version of operator-sdk: %v", sdkVersion.Version))
 }
 
 func main() {
@@ -70,27 +62,6 @@ func main() {
 
 	printVersion()
 
-	namespace, err := k8sutil.GetWatchNamespace()
-	if err != nil {
-		log.Error(err, "Failed to get watch namespace")
-		os.Exit(1)
-	}
-
-	//Get a config to talk to the apiserver
-	cfg, err := config.GetConfig()
-	if err != nil {
-		log.Error(err, "")
-		os.Exit(1)
-	}
-
-	ctx := context.TODO()
-	// Become the leader before proceeding
-	err = leader.Become(ctx, "ack-secret-manager-lock")
-	if err != nil {
-		log.Error(err, "")
-		os.Exit(1)
-	}
-
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
@@ -101,20 +72,12 @@ func main() {
 	}
 
 	// Create a new Cmd to provide shared dependencies and start components
-	//mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-	//	LeaderElection:     enableLeaderElection,
-	//})
-	//if err != nil {
-	//	log.Error(err, "failed to start manager")
-	//	os.Exit(1)
-	//}
-
-	mgr, err := manager.New(cfg, manager.Options{
-		Namespace:      namespace,
-		MapperProvider: restmapper.NewDynamicRESTMapper,
+	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+		Scheme:         scheme,
+		LeaderElection: enableLeaderElection,
 	})
 	if err != nil {
-		log.Error(err, "")
+		log.Error(err, "unable to start manager")
 		os.Exit(1)
 	}
 
