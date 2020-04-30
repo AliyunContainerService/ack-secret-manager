@@ -1,3 +1,18 @@
+/*
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
 package main
 
 import (
@@ -39,8 +54,11 @@ func printVersion() {
 
 func main() {
 	var reconcilePeriod time.Duration
+	var rotationInterval time.Duration
 	var reconcileCount int
+	var disablePolling bool
 	var enableLeaderElection bool
+	var leaderElectionNamespace string
 	var selectedBackend string
 	var watchNamespaces string
 	var excludeNamespaces string
@@ -50,6 +68,10 @@ func main() {
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true,
 		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
+	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", ""+
+		"Namespace used to perform leader election. Only used if leader election is enabled")
+	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
+	flag.BoolVar(&disablePolling, "disable-polling", false, "Disable auto polling external secret from kms.")
 	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
@@ -73,8 +95,10 @@ func main() {
 
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:         scheme,
-		LeaderElection: enableLeaderElection,
+		Scheme:                  scheme,
+		LeaderElection:          enableLeaderElection,
+		LeaderElectionNamespace: leaderElectionNamespace,
+		LeaderElectionID:        "ack-secret-manager-leader-election",
 	})
 	if err != nil {
 		log.Error(err, "unable to start manager")
@@ -112,7 +136,7 @@ func main() {
 		}
 	}
 	log.Info("backendClient is:", "backendClient", &backendClient)
-	err = (&controller.ExternalSecretReconciler{
+	esReconciler := controller.ExternalSecretReconciler{
 		Backend:              *backendClient,
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
@@ -120,12 +144,19 @@ func main() {
 		Ctx:                  ctx,
 		ReconciliationPeriod: reconcilePeriod,
 		WatchNamespaces:      watchNs,
-	}).SetupWithManager(mgr, reconcileCount)
+		RotationInterval:     rotationInterval,
+	}
+	err = (&esReconciler).SetupWithManager(mgr, reconcileCount)
 	if err != nil {
 		log.Error(err, "unable to create controller", "controller", "ExternalSecret")
 		os.Exit(1)
 	}
-	// +kubebuilder:scaffold:builder
+
+	//not start auto sync job if disable polling
+	if !disablePolling {
+		esReconciler.InitSecretStore()
+		go esReconciler.SecretRotationJob()
+	}
 
 	log.Info("starting ack-secret-manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

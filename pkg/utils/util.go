@@ -18,6 +18,8 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
 	"regexp"
 	"time"
 )
@@ -77,4 +79,21 @@ func Remove(list []string, s string) []string {
 		}
 	}
 	return list
+}
+
+// getKubernetesClients returns all the required clients(token CRD client and origin k8s cli) to communicate with
+func GetKubernetesClients() (dynamic.Interface, error) {
+	var err error
+	var cfg *rest.Config
+
+	cfg, err = rest.InClusterConfig()
+	if err != nil {
+		return nil, fmt.Errorf("error loading kubernetes configuration inside cluster, "+
+			"check app is running outside kubernetes cluster or run in development mode: %s", err)
+	}
+	client, err := dynamic.NewForConfig(cfg)
+	if err != nil {
+		return nil, err
+	}
+	return client, nil
 }

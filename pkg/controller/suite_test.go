@@ -104,9 +104,10 @@ var _ = BeforeSuite(func(done Done) {
 	// +kubebuilder:scaffold:scheme
 
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Scheme:             scheme,
-		MetricsBindAddress: ":8181",
-		LeaderElection:     false,
+		Scheme:                  scheme,
+		LeaderElection:          true,
+		LeaderElectionNamespace: "default",
+		LeaderElectionID:        "ack-secret-manager-leader-election",
 	})
 	Expect(err).ToNot(HaveOccurred())
 	Expect(mgr).ToNot(BeNil())

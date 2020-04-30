@@ -17,15 +17,18 @@ package controller
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sync"
 	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
@@ -49,7 +52,19 @@ type ExternalSecretReconciler struct {
 	Ctx                  context.Context
 	WatchNamespaces      map[string]bool
 	ReconciliationPeriod time.Duration
+	RotationInterval     time.Duration // Key rotation job running interval.
+	rotationTicker       *time.Ticker
+	secrets              sync.Map  // secrets map is the cache for secrets.
+	closing              chan bool // close channel.
 }
+
+var (
+	externalSecretGRV = schema.GroupVersionResource{
+		Group:    "alibabacloud.com",
+		Version:  "v1alpha1",
+		Resource: "externalsecrets",
+	}
+)
 
 // Ignore not found errors
 func ignoreNotFoundError(err error) error {
@@ -160,7 +175,8 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 	}
 	secretName := externalSec.Name
 	secretNamespace := externalSec.Namespace
-	log = log.WithValues("secret", fmt.Sprintf("%s/%s", secretNamespace, secretName))
+	secretIndex := fmt.Sprintf("%s/%s", secretNamespace, secretName)
+	log = log.WithValues("secret", secretIndex)
 	r.Log.Info("externalSec info", "secretName", secretName, "secretNamespace", secretNamespace)
 	// check if deletionTimestamp set
 	isSecretMarkedToBeDeleted := externalSec.GetDeletionTimestamp() != nil
@@ -172,8 +188,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 				log.Error(err, "failed to clean secret")
 				return reconcile.Result{RequeueAfter: r.ReconciliationPeriod}, err
 			}
-
-			// 删除secretFinalizer，当Finalizers列表被清空时资源删除
+			// remove secretFinalizer
 			log.Info("removing finalizer", "currentFinalizers", externalSec.GetFinalizers())
 			externalSec.SetFinalizers(utils.Remove(externalSec.GetFinalizers(), secretFinalizer))
 			err := r.Update(context.TODO(), externalSec)
@@ -181,7 +196,7 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 				log.Error(err, "failed to update externalSec when clean finalizers")
 				return reconcile.Result{}, err
 			}
-
+			r.secrets.Delete(secretIndex)
 		}
 		return reconcile.Result{}, nil
 	}
@@ -196,31 +211,12 @@ func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, err
 		log.Info(fmt.Sprintf("ignoring unwatch ns %s", secretNamespace), "watched_namespaces", r.WatchNamespaces)
 		return ctrl.Result{}, nil
 	}
-	// Get data from the secret source of truthrou't
-	desiredData, err := r.getDesiredData(externalSec.Spec.Data)
-	if err != nil {
-		log.Error(err, "unable to get desired state for secret")
-		return ctrl.Result{}, err
+	_, syncErr := r.syncIfNeedUpdate(externalSec)
+	if syncErr != nil {
+		return ctrl.Result{}, syncErr
 	}
-
-	// Get the actual secret from Kubernetes
-	currentData, err := r.getCurrentData(secretNamespace, secretName)
-	if err != nil && !errors.IsNotFound(err) {
-		log.Error(err, "unable to get current state of secret")
-		return ctrl.Result{}, ignoreNotFoundError(err)
-	}
-
-	eq := reflect.DeepEqual(desiredData, currentData)
-	if !eq {
-		log.Info("found secret need to update")
-		if err := r.upsertSecret(externalSec, desiredData); err != nil {
-			log.Error(err, "failed to update secret", "namespace", secretNamespace, "name", secretName)
-			//reconcile again
-			return ctrl.Result{}, err
-		}
-		log.Info("secret update finished")
-	}
-
+	r.secrets.Store(secretIndex, externalSec)
+	log.Info("update secret store", "index", secretIndex)
 	return ctrl.Result{Requeue: false}, nil
 }
 
@@ -257,4 +253,112 @@ func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 	return ctrl.NewControllerManagedBy(mgr).WithOptions(options).WithEventFilter(getWatchPredicateForExternalSecret()).
 		For(&api.ExternalSecret{}).
 		Complete(r)
+}
+
+//secretRotationJob refresh the secret if updated in kms secret-manager
+func (r *ExternalSecretReconciler) SecretRotationJob() {
+	r.Log.Info("begin polling job", "polling interval", r.RotationInterval)
+	r.closing = make(chan bool)
+	r.rotationTicker = time.NewTicker(r.RotationInterval)
+	for {
+		select {
+		case <-r.rotationTicker.C:
+			r.rotate()
+		case <-r.closing:
+			if r.rotationTicker != nil {
+				r.rotationTicker.Stop()
+			}
+		}
+	}
+}
+
+func (r *ExternalSecretReconciler) rotate() {
+	r.Log.Info("rotate job running")
+
+	var secretMap sync.Map
+	wg := sync.WaitGroup{}
+	r.secrets.Range(func(k interface{}, v interface{}) bool {
+		es := v.(*api.ExternalSecret)
+		r.Log.Info("rotate checking secret", "index", k)
+		// Re-generate secret if update in kms secret-manager.
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			updated, _ := r.syncIfNeedUpdate(es)
+			if updated {
+				secretMap.Store(fmt.Sprintf("%s/%s", es.Namespace, es.Name), es)
+			}
+		}()
+		return true
+	})
+
+	wg.Wait()
+	secretMap.Range(func(k interface{}, v interface{}) bool {
+		secretIndex := k.(string)
+		r.Log.Info("sync secret store", "index", secretIndex)
+		es, ok := v.(*api.ExternalSecret)
+		if !ok {
+			return true
+		}
+		r.secrets.Store(secretIndex, es)
+		return true
+	})
+}
+
+func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSecret) (bool, error) {
+	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
+	log := r.Log.WithValues("secret", esIndex)
+
+	// Get data from the secret source
+	desiredData, err := r.getDesiredData(externalSec.Spec.Data)
+	if err != nil {
+		log.Error(err, "unable to get desired state for secret when sync")
+		return false, err
+	}
+
+	// Get the actual secret from Kubernetes
+	currentData, err := r.getCurrentData(externalSec.Namespace, externalSec.Name)
+	if err != nil && !errors.IsNotFound(err) {
+		log.Error(err, "unable to get current state of secret when sync")
+		return false, ignoreNotFoundError(err)
+	}
+
+	eq := reflect.DeepEqual(desiredData, currentData)
+	if !eq {
+		log.Info("found secret need to update")
+		if err := r.upsertSecret(externalSec, desiredData); err != nil {
+			log.Error(err, "failed to update secret")
+			return false, err
+		}
+		log.Info("secret has sync from external backend")
+		return true, nil
+	}
+	return false, nil
+}
+
+func (r *ExternalSecretReconciler) InitSecretStore() error {
+	k8sCli, err := utils.GetKubernetesClients()
+	if err != nil {
+		r.Log.Error(err, "failed to get external secret clientset")
+	}
+
+	esList, err := k8sCli.Resource(externalSecretGRV).Namespace("").List(metav1.ListOptions{})
+	if err != nil {
+		r.Log.Error(err, "failed to list all external secrets")
+		return err
+	}
+
+	//add existing secret into reconciler secret map
+	for _, esObj := range esList.Items {
+		esIndex := fmt.Sprintf("%s/%s", esObj.GetNamespace(), esObj.GetName())
+		r.Log.Info("init secret store", "key", esIndex)
+		esBytes, _ := esObj.MarshalJSON()
+		es := &api.ExternalSecret{}
+		if err := json.Unmarshal(esBytes, &es); err != nil {
+			r.Log.Error(err, "failed to unmarshal externalsecret during init secret store")
+			continue
+		}
+		r.secrets.Store(esIndex, es)
+	}
+	return nil
 }

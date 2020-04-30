@@ -2,6 +2,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: {{ include "ack-secret-manager.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
   labels:
     app.kubernetes.io/name: {{ include "ack-secret-manager.name" . }}
     helm.sh/chart: {{ include "ack-secret-manager.chart" . }}
@@ -33,9 +34,12 @@ spec:
             - ack-secret-manager
             - --backend={{ .Values.command.backend }}
             - --enable-leader-election={{ .Values.command.enableLeaderElection }}
+            - --leader-election-namespace={{ .Values.command.leaderElectionNamespace }}
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --reconcile-count={{ .Values.command.reconcileCount }}
             - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
+            - --polling-interval={{ .Values.command.pollingInterval }}
+            - --disable-polling={{ .Values.command.disablePolling }}
             - --region={{ .Values.command.region }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
