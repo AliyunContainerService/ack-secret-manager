@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ack-secret-manager
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      name: ack-secret-manager
+  template:
+    metadata:
+      labels:
+        name: ack-secret-manager
+    spec:
+      serviceAccountName: ack-secret-manager
+      containers:
+        - name: ack-secret-manager
+          # Replace this with the built image name
+          image: REPLACE_IMAGE
+          command:
+          - ack-secret-manager
+          imagePullPolicy: Always
+          env:
+            - name: WATCH_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: OPERATOR_NAME
+              value: "ack-secret-manager"

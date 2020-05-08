@@ -1,0 +1,37 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: ack-cleanup-external-secrets
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    "helm.sh/hook": pre-delete
+    "helm.sh/hook-delete-policy": "hook-succeeded"
+    "helm.sh/hook-delete-policy": "hook-failed"
+    "helm.sh/hook-delete-policy": "before-hook-creation"
+  labels:
+    app: {{ include "ack-secret-manager.name" . }}
+    chart: {{ include "ack-secret-manager.chart" . }}
+    release: {{ .Release.Name }}
+    heritage: {{ .Release.Service }}
+spec:
+  template:
+    metadata:
+      name: ack-cleanup-external-secrets
+      labels:
+        app: {{ include "ack-secret-manager.name" . }}
+        chart: {{ include "ack-secret-manager.chart" . }}
+        heritage: {{ .Release.Service }}
+        release: {{ .Release.Name }}
+    spec:
+      serviceAccountName: {{ include "ack-secret-manager.serviceAccountName" . }}
+      containers:
+        - name: external-secrets-cleanup
+          command:
+            - ack-secret-manager-cleanup
+          image: "{{ .Values.cleanupImage.repository }}:{{ .Values.cleanupImage.tag }}"
+          imagePullPolicy: {{ .Values.cleanupImage.pullPolicy }}
+      restartPolicy: OnFailure
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
