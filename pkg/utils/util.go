@@ -18,14 +18,19 @@ package utils
 import (
 	"errors"
 	"fmt"
+	"io/ioutil"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"net/http"
 	"regexp"
 	"time"
 )
 
 const (
-	BinaryType = "binary"
+	BinaryType   = "binary"
+	METADATA_URL = "http://100.100.100.200/latest/meta-data/"
+	REGIONID_TAG = "region-id"
+	RAM          = "ram/"
 )
 
 var clusterIDPattern = regexp.MustCompile(`^c[0-9a-z]{32}$`)
@@ -96,4 +101,33 @@ func GetKubernetesClients() (dynamic.Interface, error) {
 		return nil, err
 	}
 	return client, nil
+}
+
+// GetMetaData get metadata
+func GetMetaData(resource string) (int, string, error) {
+	resp, err := http.Get(METADATA_URL + resource)
+	if err != nil {
+		return http.StatusInternalServerError, "", err
+	}
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	return resp.StatusCode, string(body), err
+}
+
+// GetRegion Get regionid
+func GetRegion() (string, error) {
+	_, regionId, err := GetMetaData(REGIONID_TAG)
+	if err != nil {
+		return "", err
+	}
+	return regionId, nil
+}
+
+// CheckInstanceRam check if instance not bind workerrole
+func CheckInstanceRam() (bool, error) {
+	status, _, err := GetMetaData(RAM)
+	if err != nil {
+		return false, fmt.Errorf("received %d getting instance role", status)
+	}
+	return true, nil
 }

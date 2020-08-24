@@ -8,7 +8,7 @@ command:
   reconcilePeriod: 5s
   reconcileCount: 1
   tokenRotationPeriod: 120s
-  region: cn-hangzhou
+  region:
   enableLeaderElection: true
   leaderElectionNamespace: kube-system
   disablePolling: false
@@ -69,7 +69,7 @@ podAnnotations: {}
 podLabels: {}
 
 securityContext: {}
-  # fsGroup: 65534
+# fsGroup: 65534
 
 resources:
   requests:
