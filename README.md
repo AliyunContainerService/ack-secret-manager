@@ -1,7 +1,5 @@
 # ACK Secret Manager
 
-[![Go Report Card](https://goreportcard.com/badge/github.com/AliyunContainerService/ack-secret-manager)](https://goreportcard.com/report/github.com/AliyunContainerService/ack-secret-manager)
-
 ACK Secret Manager allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2) to securely add secrets in Kubernetes. 
 
 ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) into a Pod using a declarative API similar to the native Secret one.
@@ -35,7 +33,8 @@ ACK Secret Manager provide the same use experience as [kubernetes-external-secre
 
 **3.** * Log on to the      Container Service console.
 
-* In the left-side navigation page, choose **Marketplace > App Catalog**. Select the **ack-secret-manager** application, click it and access into application page, then choose **Create** to add the component.
+* In the left-side navigation page, choose **Marketplace > App Catalog**. Select the **ack-secret-manager** application, click it and access into application page, then modify the chart configuration values in **Parameters** tab, please find parameters description below  
+* Select the target cluster and click **Create** button to add the component.
 
 ## Uninstalling the Chart
 
@@ -50,16 +49,16 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | Parameter                            | Description                                                  | Default                                                 |
 | ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
 | `env.WATCH_NAMESPACE`                     | Set the namespaces operator watch（empty value means all-namespaces）                    |                                           |
-| `envVarsFromSecret.ACCESS_KEY_ID`     | Set ACCESS_KEY_ID (from secret alibaba-credentials) in Deployment Pod      |                                                         |
-| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set SECRET_ACCESS_KEY (from secret alibaba-credentials) in Deployment Pod      |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set ALICLOUD_ROLE_ARN (from secret alibaba-credentials) in Deployment Pod      |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set ALICLOUD_ROLE_SESSION_NAME (from secret alibaba-credentials) in Deployment Pod      |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set ALICLOUD_ROLE_SESSION_EXPIRATION (from secret alibaba-credentials) in Deployment Pod      |                                                         |
+| `envVarsFromSecret.ACCESS_KEY_ID`     | Set ACCESS_KEY_ID for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster     |                                                         |
+| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set SECRET_ACCESS_KEY for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster       |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set ALICLOUD_ROLE_ARN for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster       |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set ALICLOUD_ROLE_SESSION_NAME for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                                                         |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set ALICLOUD_ROLE_SESSION_EXPIRATION for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                                                         |
 | `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`                                                  |
 | `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                                                  |
 | `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`          |
 | `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                                                 |
-| `command.region `                          | Disables backend polling and only updates secrets when ExternalSecret is modified, setting this to any value will disable polling               | `cn-hangzhou`                                  |
+| `command.region `                          | The region id where you want to pull the secret from             |                                 |
 | `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     |   true                                                      |
 | `command.leaderElectionNamespace `     | Namespace used to perform leader election. Only used if leader election is enabled.    |   `kube-system`                                                   |
 | `command.disablePolling `     | Disable auto polling external secret from kms.     |   false                                                      |

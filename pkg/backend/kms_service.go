@@ -33,6 +33,7 @@ import (
 const (
 	// https protocol.
 	Https           = "https"
+	HangZhou        = "cn-hangzhou"
 	AccessKeyId     = "ACCESS_KEY_ID"
 	AccessKeySecret = "ACCESS_KEY_SECRET"
 )
@@ -49,6 +50,15 @@ type client struct {
 
 func newKMSClient(log logr.Logger, cfg Config) *client {
 	region := cfg.Region
+	instanceRegion, err := utils.GetRegion()
+	if err != nil {
+		log.Error(err, "failed to get region from meta server")
+	}
+	//replace default region with real value
+	if region == "" && instanceRegion != region {
+		log.Info("refine the default region", "region", instanceRegion)
+		region = instanceRegion
+	}
 	//init client
 	client := client{
 		tokenRotationPeriod: cfg.TokenRotationPeriod,
@@ -70,7 +80,14 @@ func setConfig(c *client) error {
 	credentialChain := []providers.Provider{
 		providers.NewConfigurationCredentialProvider(credConfig),
 		providers.NewEnvCredentialProvider(),
-		providers.NewInstanceMetadataProvider(),
+	}
+	//there is no ecs instance role for ask cluster worker, only support pass-in ak or ram role
+	withInstanceRole, err := utils.CheckInstanceRam()
+	if err != nil {
+		c.logger.Info("skip add instance role provider into credential chain for ask cluster", "err", err)
+	}
+	if withInstanceRole {
+		credentialChain = append(credentialChain, providers.NewInstanceMetadataProvider())
 	}
 	credProvider := providers.NewChainProvider(credentialChain)
 	//Do an initial credential fetch because we want to err right away if we can't even get a first set.
