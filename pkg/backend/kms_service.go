@@ -22,6 +22,7 @@ import (
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
 	aliCloudAuth "github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth"
 	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials/providers"
+	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/aliyun/alibaba-cloud-sdk-go/services/kms"
 	"github.com/go-logr/logr"
 	"os"
@@ -32,10 +33,19 @@ import (
 
 const (
 	// https protocol.
-	Https           = "https"
-	HangZhou        = "cn-hangzhou"
-	AccessKeyId     = "ACCESS_KEY_ID"
-	AccessKeySecret = "ACCESS_KEY_SECRET"
+	Https                         = "https"
+	HangZhou                      = "cn-hangzhou"
+	AccessKeyId                   = "ACCESS_KEY_ID"
+	AccessKeySecret               = "ACCESS_KEY_SECRET"
+	REJECTED_THROTTLING           = "Rejected.Throttling"
+	SERVICE_UNAVAILABLE_TEMPORARY = "ServiceUnavailableTemporary"
+	INTERNAL_FAILURE              = "InternalFailure"
+	MAX_RETRY_TIMES               = 5
+)
+
+var (
+	BACKOFF_DEFAULT_RETRY_INTERVAL = time.Second
+	BACKOFF_DEFAULT_CAPACITY       = time.Duration(10) * time.Second
 )
 
 type client struct {
@@ -169,12 +179,24 @@ func (c *client) GetSecret(key string, queryCondition *SecretQueryCondition) (st
 	}
 	c.credLock.RLock()
 	defer c.credLock.RUnlock()
-
 	response, err := c.kmsClient.GetSecretValue(request)
-	if err != nil {
-		c.logger.Error(err, "failed to get secret value from kms", "key", key)
-		return data, err
+	for retryTimes := 1; retryTimes < MAX_RETRY_TIMES; retryTimes++ {
+		if err != nil {
+			if !judgeNeedRetry(err) {
+				c.logger.Error(err, "failed to get secret value from kms", "key", key)
+				return data, err
+			} else {
+				time.Sleep(getWaitTimeExponential(retryTimes))
+				response, err = c.kmsClient.GetSecretValue(request)
+				if err != nil && retryTimes == MAX_RETRY_TIMES-1 {
+					c.logger.Error(err, "failed to get secret value from kms", "key", key)
+					return data, err
+				}
+			}
+		}
+		break
 	}
+
 	if response.SecretDataType == utils.BinaryType {
 		c.logger.Error(err, "not support binary type yet", "key", key)
 		return data, utils.BackendSecretTypeNotSupportError{ErrType: utils.EmptySecretKeyErrorType, Key: key}
@@ -182,4 +204,21 @@ func (c *client) GetSecret(key string, queryCondition *SecretQueryCondition) (st
 	c.logger.Info("got secret data from kms service", "key", key)
 	data = response.SecretData
 	return data, nil
+}
+
+func judgeNeedRetry(err error) bool {
+	respErr, is := err.(*sdkErr.ClientError)
+	if is && (respErr.ErrorCode() == REJECTED_THROTTLING || respErr.ErrorCode() == SERVICE_UNAVAILABLE_TEMPORARY || respErr.ErrorCode() == INTERNAL_FAILURE) {
+		return true
+	}
+	return false
+}
+
+func getWaitTimeExponential(retryTimes int) time.Duration {
+	sleepInterval := time.Duration(math.Pow(2, float64(retryTimes))) * BACKOFF_DEFAULT_RETRY_INTERVAL
+	if sleepInterval >= BACKOFF_DEFAULT_CAPACITY {
+		return BACKOFF_DEFAULT_CAPACITY
+	} else {
+		return sleepInterval
+	}
 }
