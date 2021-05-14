@@ -15,9 +15,9 @@ ACK Secret Manager provide the same use experience as [kubernetes-external-secre
  
 **2.** Attach KMS RAM policy on target worker role
 
- - access the target cluster's detail page in [Container Service console](https://cs.console.aliyun.com/)
- - click the target ram role named **KubernetesWorkerRole-xxxxxxxxxxxxxxx** and access into RAM Roles page
- - add kms RAM policy below into the policy bind to the worker role.
+ - Access the target cluster's detail page in [Container Service console](https://cs.console.aliyun.com/)
+ - Click the target ram role named **KubernetesWorkerRole-xxxxxxxxxxxxxxx** and access into RAM Roles page
+ - Add kms RAM policy below into the policy bind to the worker role.
  
  ```
          {
