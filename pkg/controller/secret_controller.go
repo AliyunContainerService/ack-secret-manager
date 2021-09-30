@@ -41,6 +41,7 @@ import (
 const (
 	timestampFormat = "2006-01-02T15.04.05Z"
 	secretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
+	pollingDelayTime = 3 // seconds
 )
 
 // ExternalSecretReconciler reconciles a ExternalSecret object
@@ -289,6 +290,11 @@ func (r *ExternalSecretReconciler) rotate() {
 				secretMap.Store(fmt.Sprintf("%s/%s", es.Namespace, es.Name), es)
 			}
 		}()
+
+		// Prevent error `Rejected.Throttling` from KMS API
+		r.Log.Info(fmt.Sprintf("Wait %d seconds before executing next secret.", pollingDelayTime))
+		time.Sleep(pollingDelayTime * time.Second)
+
 		return true
 	})
 
