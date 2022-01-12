@@ -16,7 +16,6 @@ limitations under the License.
 package v1alpha1
 
 import (
-	"k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -27,13 +26,8 @@ import (
 type ExternalSecretSpec struct {
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
-	Name        string       `json:"name"`
-	Type        string       `json:"type,omitempty"`
-	BackendType string       `json:"backendType"`
-	RoleArn     string       `json:"roleArn,omitempty"`
 	Data        []DataSource `json:"data,omitempty"`
-	DataFrom    string       `json:"dataFrom,omitempty"`
-	Template    v1.Secret    `json:"template,omitempty"`
+	Type        string       `json:"type,omitempty"`
 }
 
 type DataSource struct {
