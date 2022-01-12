@@ -1,8 +1,8 @@
 # ACK Secret Manager
 
-ACK Secret Manager allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2) to securely add secrets in Kubernetes. 
+ACK Secret Manager allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm) to securely add secrets in Kubernetes. 
 
-ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) into a Pod using a declarative API similar to the native Secret one.
+ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html) into a Pod using a declarative API similar to the native Secret one.
 
 
 ## Prerequisites
@@ -11,7 +11,7 @@ ACK Secret Manager provide the same use experience as [kubernetes-external-secre
 
 ## Installing the Chart
 
-**1.** You are the authorized user of [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2)
+**1.** You are the authorized user of [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm)
  
 **2.** Attach KMS RAM policy on target worker role
 
@@ -64,7 +64,7 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | `command.disablePolling `     | Disable auto polling external secret from kms.     |   false                                                      |
 | `command.pollingInterval `     | How often the controller will sync existing secret from kms.     |   `120s`                                                      |
 | `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager`                   |
-| `image.tag`                          | ack-secret-manager Image tag | `v0.1.0`                                                 |
+| `image.tag`                          | ack-secret-manager Image tag | `v0.2.0`                                                 |
 | `image.pullPolicy`                   | Image pull policy                                            | `Always`                                          |
 | `nameOverride`                   | Override the name of app                                            | `nil`                                          |
 | `fullnameOverride`                   | Override the full name of app                                            | `nil`                                          |
@@ -103,11 +103,10 @@ kind: ExternalSecret
 metadata:
   name: hello-service
 spec:
-  backendType: alicloud-kms
   data:
     - key: test
       name: password
-  versionStage: ACSCurrent
+      versionStage: ACSCurrent
 ```
 
 Save the file and run:

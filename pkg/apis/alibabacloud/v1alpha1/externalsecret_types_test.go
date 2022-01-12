@@ -51,7 +51,6 @@ var _ = Describe("ExternalSecret", func() {
 					Namespace: "default",
 				},
 				Spec: ExternalSecretSpec{
-					Name: "foo",
 					Type: "Opaque",
 					Data: []DataSource{
 						{

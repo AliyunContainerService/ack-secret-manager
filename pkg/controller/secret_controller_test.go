@@ -42,7 +42,6 @@ var _ = Describe("SecretsManager", func() {
 				Name:      "externalsec-test",
 			},
 			Spec: apis.ExternalSecretSpec{
-				Name: "secret-test",
 				Type: "Opaque",
 				Data: []apis.DataSource{
 					{
@@ -65,7 +64,6 @@ var _ = Describe("SecretsManager", func() {
 				Name:      "externalsec-beckend-secret-not-found",
 			},
 			Spec: apis.ExternalSecretSpec{
-				Name: "secret-backend-secret-not-found",
 				Type: "Opaque",
 				Data: []apis.DataSource{
 					{
@@ -83,7 +81,6 @@ var _ = Describe("SecretsManager", func() {
 				Name:      "externalsec-excluded-ns",
 			},
 			Spec: apis.ExternalSecretSpec{
-				Name: "sexternalsec-excluded-ns",
 				Type: "Opaque",
 				Data: []apis.DataSource{
 					{
