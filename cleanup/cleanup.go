@@ -17,7 +17,6 @@ package main
 
 import (
 	"fmt"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	"github.com/golang/glog"
 	apiextensionsclient "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -63,6 +62,15 @@ func getKubernetesClients() (dynamic.Interface, apiextensionsclient.Interface, e
 	return client, apiCli, nil
 }
 
+func removeFromList(list []string, s string) []string {
+	for i, v := range list {
+		if v == s {
+			list = append(list[:i], list[i+1:]...)
+		}
+	}
+	return list
+}
+
 func main() {
 	k8sCli, apiCli, err := getKubernetesClients()
 	if err != nil {
@@ -80,7 +88,7 @@ func main() {
 		// clean finalizer first
 		name := externalSecret.GetName()
 		glog.Infof("removing external secret %s", name)
-		externalSecret.SetFinalizers(utils.Remove(externalSecret.GetFinalizers(), secretFinalizer))
+		externalSecret.SetFinalizers(removeFromList(externalSecret.GetFinalizers(), secretFinalizer))
 
 		_, err := k8sCli.Resource(externalSecretGRV).Namespace(externalSecret.GetNamespace()).Update(&externalSecret, metav1.UpdateOptions{})
 		if err != nil {
