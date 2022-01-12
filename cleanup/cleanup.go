@@ -102,14 +102,14 @@ func main() {
 	}
 
 	//delete ExternalSecret crd
-	err = apiCli.ApiextensionsV1beta1().CustomResourceDefinitions().Delete(crdName, &metav1.DeleteOptions{})
+	err = apiCli.ApiextensionsV1().CustomResourceDefinitions().Delete(crdName, &metav1.DeleteOptions{})
 	if err != nil {
 		glog.Fatalf("failed to delete external secrets crd, err: %v", err)
 	}
 	//ensure the crd cleanup
 	retryNum := 0
 	for ; retryNum < maxRetryNum; retryNum++ {
-		_, err = apiCli.ApiextensionsV1beta1().CustomResourceDefinitions().Get(crdName, metav1.GetOptions{})
+		_, err = apiCli.ApiextensionsV1().CustomResourceDefinitions().Get(crdName, metav1.GetOptions{})
 		if err != nil && apierrors.IsNotFound(err) {
 			glog.Infof("finish cleanup external secrets")
 			return
