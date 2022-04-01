@@ -46,40 +46,40 @@ ACK Secret Manager provide the same use experience as [kubernetes-external-secre
 
 The following table lists the configurable parameters of the `ack-secret-manager` chart and their default values.
 
-| Parameter                            | Description                                                  | Default                                                 |
-| ------------------------------------ | ------------------------------------------------------------ | ------------------------------------------------------- |
-| `env.WATCH_NAMESPACE`                     | Set the namespaces operator watch（empty value means all-namespaces）                    |                                           |
-| `envVarsFromSecret.ACCESS_KEY_ID`     | Set ACCESS_KEY_ID for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster     |                                                         |
-| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set SECRET_ACCESS_KEY for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster       |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set ALICLOUD_ROLE_ARN for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster       |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set ALICLOUD_ROLE_SESSION_NAME for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                                                         |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set ALICLOUD_ROLE_SESSION_EXPIRATION for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                                                         |
-| `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`                                                  |
-| `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                                                  |
-| `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`          |
-| `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                                                 |
-| `command.region `                          | The region id where you want to pull the secret from             |                                 |
-| `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     |   true                                                      |
-| `command.leaderElectionNamespace `     | Namespace used to perform leader election. Only used if leader election is enabled.    |   `kube-system`                                                   |
-| `command.disablePolling `     | Disable auto polling external secret from kms.     |   false                                                      |
-| `command.pollingInterval `     | How often the controller will sync existing secret from kms.     |   `120s`                                                      |
-| `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager`                   |
-| `image.tag`                          | ack-secret-manager Image tag | `v0.2.0`                                                 |
-| `image.pullPolicy`                   | Image pull policy                                            | `Always`                                          |
-| `nameOverride`                   | Override the name of app                                            | `nil`                                          |
-| `fullnameOverride`                   | Override the full name of app                                            | `nil`                                          |
-| `rbac.create`                        | Create & use RBAC resources                                  | `true`                                                  |
-| `securityContext.fsGroup`            | Security context for the container                           | `{}`                                                    |
-| `serviceAccount.create`              | Whether a new service account name should be created.        | `true`                                                  |
-| `serviceAccount.name`                | Service account to be used.                                  | automatically generated                                 |
-| `serviceAccount.annotations`         | Annotations to be added to service account                   | `nil`                                                   |
-| `podAnnotations`                     | Annotations to be added to pods                              | `{}`                                                    |
-| `podLabels`                          | Additional labels to be added to pods                        | `{}`                                                    |
-| `replicaCount`                       | Number of replicas                                           | `1`                                                     |
-| `nodeSelector`                       | node labels for pod assignment                               | `{}`                                                    |
-| `tolerations`                        | List of node taints to tolerate (requires Kubernetes >= 1.6) | `[]`                                                    |
-| `affinity`                           | Affinity for pod assignment                                  | `{}`                                                    |
-| `resources`                          | Pod resource requests & limits                               | `{}`                                                    |
+| Parameter                            | Description                                                  | Default                  |
+| ------------------------------------ | ------------------------------------------------------------ |--------------------------|
+| `env.WATCH_NAMESPACE`                     | Set the namespaces operator watch（empty value means all-namespaces）                    |                          |
+| `envVarsFromSecret.ACCESS_KEY_ID`     | Set ACCESS_KEY_ID for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster     |                          |
+| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set SECRET_ACCESS_KEY for initializing Alibaba Cloud SDK client, require when deploying on ASK cluster       |                          |
+| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set ALICLOUD_ROLE_ARN for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster       |                          |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set ALICLOUD_ROLE_SESSION_NAME for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                          |
+| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set ALICLOUD_ROLE_SESSION_EXPIRATION for initializing Alibaba Cloud SDK client, optional when deploying on ASK cluster      |                          |
+| `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`           |
+| `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                     |
+| `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`                      |
+| `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                   |
+| `command.region `                          | The region id where you want to pull the secret from             |                          |
+| `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     | true                     |
+| `command.leaderElectionNamespace `     | Namespace used to perform leader election. Only used if leader election is enabled.    | `kube-system`            |
+| `command.disablePolling `     | Disable auto polling external secret from kms.     | false                    |
+| `command.pollingInterval `     | How often the controller will sync existing secret from kms.     | `120s`                   |
+| `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager` |
+| `image.tag`                          | ack-secret-manager Image tag | `v0.3.0`                 |
+| `image.pullPolicy`                   | Image pull policy                                            | `Always`                 |
+| `nameOverride`                   | Override the name of app                                            | `nil`                    |
+| `fullnameOverride`                   | Override the full name of app                                            | `nil`                    |
+| `rbac.create`                        | Create & use RBAC resources                                  | `true`                   |
+| `securityContext.fsGroup`            | Security context for the container                           | `{}`                     |
+| `serviceAccount.create`              | Whether a new service account name should be created.        | `true`                   |
+| `serviceAccount.name`                | Service account to be used.                                  | automatically generated  |
+| `serviceAccount.annotations`         | Annotations to be added to service account                   | `nil`                    |
+| `podAnnotations`                     | Annotations to be added to pods                              | `{}`                     |
+| `podLabels`                          | Additional labels to be added to pods                        | `{}`                     |
+| `replicaCount`                       | Number of replicas                                           | `1`                      |
+| `nodeSelector`                       | node labels for pod assignment                               | `{}`                     |
+| `tolerations`                        | List of node taints to tolerate (requires Kubernetes >= 1.6) | `[]`                     |
+| `affinity`                           | Affinity for pod assignment                                  | `{}`                     |
+| `resources`                          | Pod resource requests & limits                               | `{}`                     |
 
 
 > **Tip**: You can find the ack-secret-manager release in ACK  edit the param at the **Parameters** tab in    or use the default [values.yaml](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/charts/ack-secret-manager/values.yaml)

@@ -54,12 +54,12 @@ replicaCount: 2
 
 image:
   repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.2.0
+  tag: v0.3.0
   pullPolicy: Always
 
 cleanupImage:
   repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager-cleanup
-  tag: v0.2.0
+  tag: v0.3.0
   pullPolicy: Always
 
 nameOverride: ""

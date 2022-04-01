@@ -1,7 +1,7 @@
 DOCKER_REGISTRY ?= "registry.cn-hangzhou.aliyuncs.com/acs"
 BINARY_NAME=ack-secret-manager-cleanup
 DIR_NAME=ack-secret-manager
-SECRET_MANAGER_VERSION=v0.2.0
+SECRET_MANAGER_VERSION=v0.3.0
 GO111MODULE=on
 # Image URL to use all building/pushing image targets
 IMG = ${DOCKER_REGISTRY}/${BINARY_NAME}:${SECRET_MANAGER_VERSION}
