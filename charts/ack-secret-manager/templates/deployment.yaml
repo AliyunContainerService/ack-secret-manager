@@ -66,14 +66,6 @@ spec:
                 name: {{ $value.secretKeyRef | quote }}
                 key: {{ $value.key | quote }}
           {{- end }}
-          {{- with .Values.filesFromSecret }}
-          volumeMounts:
-          {{- range $key, $value := . }}
-          - name: {{ $key }}
-            mountPath: {{ $value.mountPath }}
-            readOnly: true
-          {{- end }}
-          {{- end }}
       {{- with .Values.securityContext }}
       securityContext:
         {{- toYaml . | nindent 8 }}
