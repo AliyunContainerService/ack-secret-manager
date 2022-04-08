@@ -26,16 +26,22 @@ env:
 #    key: id
 #  SECRET_ACCESS_KEY:
 #    secretKeyRef: alibaba-credentials
-#    key: key
+#    key: secret
 #  ALICLOUD_ROLE_ARN:
 #    secretKeyRef: alibaba-credentials
-#    key: key
+#    key: rolearn
 #  ALICLOUD_ROLE_SESSION_NAME:
 #    secretKeyRef: alibaba-credentials
-#    key: key
+#    key: rolesessionname
 #  ALICLOUD_ROLE_SESSION_EXPIRATION:
 #    secretKeyRef: alibaba-credentials
-#    key: key
+#    key: rolesessionexpiration
+#  ALICLOUD_OIDC_PROVIDER_ARN:
+#    secretKeyRef: alibaba-credentials
+#    key: oidcproviderarn
+#  ALICLOUD_OIDC_TOKEN_FILE:
+#    secretKeyRef: alibaba-credentials
+#    key: oidctokenfile
 
 rbac:
   # Specifies whether RBAC resources should be created
