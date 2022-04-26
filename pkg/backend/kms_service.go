@@ -39,6 +39,8 @@ const (
 	AKAuthType                    = "access_key"
 	EcsRamRoleAuthType            = "ecs_ram_role"
 	OidcAuthType                  = "oidc_role_arn"
+	oidcRoleSessionName           = "ack-secret-manager"
+	oidcTokenFilePath             = "/var/run/secrets/tokens/ack-secret-manager"
 	defaultKmsDomain              = "kms-vpc.%s.aliyuncs.com"
 )
 
@@ -83,19 +85,20 @@ func (c *client) setKMSClient() error {
 
 	var cred credentials.Credential
 	var err error
-	if roleArn != "" && roleSessionName != "" {
+	if roleArn != "" {
 		//prefer to use rrsa oidc auth type
 		if oidcArn != "" && oidcTokenFile != "" {
 			config := new(credentials.Config).
 				SetType(OidcAuthType).
 				SetOIDCProviderArn(oidcArn).
-				SetOIDCTokenFilePath(oidcTokenFile).
+				SetOIDCTokenFilePath(oidcTokenFilePath).
 				SetRoleArn(roleArn).
-				SetRoleSessionName(roleSessionName)
+				SetRoleSessionName(oidcRoleSessionName)
 			cred, err = credentials.NewCredential(config)
 			if err != nil {
 				return err
 			}
+			c.logger.Info("Using oidc rrsa auth..", "roleArn", roleArn, "oidcArn", oidcArn, "oidcTokenFile", oidcTokenFile)
 		}
 		//check if ram_role_arn auth type
 		if accessKey != "" && accessSecretKey != "" {
@@ -117,6 +120,7 @@ func (c *client) setKMSClient() error {
 			if err != nil {
 				return err
 			}
+			c.logger.Info("Using ram role arn auth..", "roleArn", roleArn, "roleSessionName", roleSessionName)
 		}
 	}
 	//check to use access_key auth mode
@@ -129,13 +133,17 @@ func (c *client) setKMSClient() error {
 		if err != nil {
 			return err
 		}
+		c.logger.Info("Using ak/sk auth..")
 	}
 	//choose ecs ram role auth mode at last
-	config := new(credentials.Config).
-		SetType(EcsRamRoleAuthType)
-	cred, err = credentials.NewCredential(config)
-	if err != nil {
-		return err
+	if cred == nil {
+		config := new(credentials.Config).
+			SetType(EcsRamRoleAuthType)
+		cred, err = credentials.NewCredential(config)
+		if err != nil {
+			return err
+		}
+		c.logger.Info("Using ecs ram role auth..")
 	}
 	if cred != nil {
 		endpoint := fmt.Sprintf(defaultKmsDomain, c.region)

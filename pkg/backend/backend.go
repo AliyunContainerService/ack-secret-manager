@@ -70,6 +70,7 @@ func NewBackendClient(ctx context.Context, backend string, cfg Config) (*Client,
 			log.Error(err, "failed to init alibaba cloud kms client")
 			return nil, err
 		}
+		client = aliClient
 		log.Info("NewBackendClient finish", "client", client, "aliClient.kmsClient", aliClient.kmsClient)
 	}
 	return &client, err
