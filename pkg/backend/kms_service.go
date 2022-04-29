@@ -77,7 +77,6 @@ func newKMSClient(log logr.Logger, cfg Config) *client {
 func (c *client) setKMSClient() error {
 	roleArn := os.Getenv("ALICLOUD_ROLE_ARN")
 	oidcArn := os.Getenv("ALICLOUD_OIDC_PROVIDER_ARN")
-	oidcTokenFile := os.Getenv("ALICLOUD_OIDC_TOKEN_FILE")
 	accessKey := os.Getenv("ACCESS_KEY_ID")
 	accessSecretKey := os.Getenv("SECRET_ACCESS_KEY")
 	roleSessionName := os.Getenv("ALICLOUD_ROLE_SESSION_NAME")
@@ -87,7 +86,7 @@ func (c *client) setKMSClient() error {
 	var err error
 	if roleArn != "" {
 		//prefer to use rrsa oidc auth type
-		if oidcArn != "" && oidcTokenFile != "" {
+		if oidcArn != "" {
 			config := new(credentials.Config).
 				SetType(OidcAuthType).
 				SetOIDCProviderArn(oidcArn).
@@ -98,7 +97,7 @@ func (c *client) setKMSClient() error {
 			if err != nil {
 				return err
 			}
-			c.logger.Info("Using oidc rrsa auth..", "roleArn", roleArn, "oidcArn", oidcArn, "oidcTokenFile", oidcTokenFile)
+			c.logger.Info("Using oidc rrsa auth..", "roleArn", roleArn, "oidcArn", oidcArn)
 		}
 		//check if ram_role_arn auth type
 		if accessKey != "" && accessSecretKey != "" {
