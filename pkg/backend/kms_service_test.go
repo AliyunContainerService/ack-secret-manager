@@ -23,7 +23,7 @@ func TestAliKmsServiceClient(t *testing.T) {
 	client := newKMSClient(logger, backendCfg)
 	t.Logf("client is %v", client)
 
-	err := setConfig(client)
+	err := client.setKMSClient()
 	if err != nil {
 		t.Fatal(err)
 	}
