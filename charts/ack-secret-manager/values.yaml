@@ -39,13 +39,14 @@ env:
 #  ALICLOUD_OIDC_PROVIDER_ARN:
 #    secretKeyRef: alibaba-credentials
 #    key: oidcproviderarn
-#  ALICLOUD_OIDC_TOKEN_FILE:
-#    secretKeyRef: alibaba-credentials
-#    key: oidctokenfile
 
 rbac:
   # Specifies whether RBAC resources should be created
   create: true
+
+rrsa:
+  # Specifies whether using rrsa and enalbe sa token volume projection, default is false
+  enable: false
 
 serviceAccount:
   # Specifies whether a service account should be created
