@@ -16,6 +16,7 @@ limitations under the License.
 package backend
 
 import (
+	"errors"
 	"fmt"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
@@ -26,6 +27,7 @@ import (
 	"github.com/go-logr/logr"
 	"math"
 	"os"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"strconv"
 	"time"
 )
@@ -49,10 +51,140 @@ var (
 	BACKOFF_DEFAULT_CAPACITY       = time.Duration(10) * time.Second
 )
 
+var klog = logf.Log.WithName("kms_service")
+
 type client struct {
 	kmsClient *kms.Client
 	region    string
 	logger    logr.Logger
+}
+
+type getCredential interface {
+	NewCredential() (credentials.Credential, error)
+}
+
+type chainedCred interface {
+	getCredential
+	authNext(chainedCred) chainedCred
+}
+
+type chainedAuth struct {
+	cred getCredential
+	next chainedCred
+}
+
+func (ch *chainedAuth) authNext(next chainedCred) chainedCred {
+	ch.next = next
+	return next
+}
+
+func (ch *chainedAuth) NewCredential() (credentials.Credential, error) {
+	cred, err := ch.cred.NewCredential()
+	if err != nil {
+		return nil, err
+	}
+	if cred != nil {
+		return cred, nil
+	}
+	if ch.next != nil {
+		return ch.next.NewCredential()
+	}
+	return nil, errors.New("empty credential")
+}
+
+type oidcRoleAuth struct{ *authConfig }
+
+func (c *oidcRoleAuth) NewCredential() (credentials.Credential, error) {
+	//prefer to use rrsa oidc auth type
+	if c.oidcArn == "" || c.roleArn == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(OidcAuthType).
+		SetOIDCProviderArn(c.oidcArn).
+		SetOIDCTokenFilePath(oidcTokenFilePath).
+		SetRoleArn(c.roleArn).
+		SetRoleSessionName(oidcRoleSessionName)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using oidc rrsa auth..", "roleArn", c.roleArn, "oidcArn", c.oidcArn)
+	}
+	return cred, err
+}
+
+type ramRoleAuth struct{ *authConfig }
+
+func (c *ramRoleAuth) NewCredential() (credentials.Credential, error) {
+	//check if ram_role_arn auth type
+	if c.accessKey == "" || c.accessSecretKey == "" || c.roleSessionName == "" || c.roleArn == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(RamRoleARNAuthType).
+		SetAccessKeyId(c.accessKey).
+		SetAccessKeySecret(c.accessSecretKey).
+		SetRoleArn(c.roleArn).
+		SetRoleSessionName(c.roleSessionName)
+	if c.roleSessionExpiration != "" {
+		rseInt, err := strconv.Atoi(c.roleSessionExpiration)
+		if err != nil {
+			klog.Error(err, "failed to parse given roleSessionExpiration", "value", c.roleSessionExpiration)
+		} else {
+			config.SetRoleSessionExpiration(rseInt)
+		}
+	}
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ram role arn auth..", "roleArn", c.roleArn, "roleSessionName", c.roleSessionName)
+	}
+	return cred, err
+}
+
+type akAuth struct{ *authConfig }
+
+func (c *akAuth) NewCredential() (credentials.Credential, error) {
+	if c.accessKey == "" || c.accessSecretKey == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(AKAuthType).
+		SetAccessKeyId(c.accessKey).
+		SetAccessKeySecret(c.accessSecretKey)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ak/sk auth..")
+	}
+	return cred, err
+}
+
+type ecsRoleAuth struct{ *authConfig }
+
+func (c *ecsRoleAuth) NewCredential() (credentials.Credential, error) {
+	//use ecs ramrole auth type default if no auth config given
+	config := new(credentials.Config).
+		SetType(EcsRamRoleAuthType)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ecs ram role auth..")
+	}
+	return cred, err
+}
+
+type authConfig struct {
+	roleArn               string
+	oidcArn               string
+	accessKey             string
+	accessSecretKey       string
+	roleSessionName       string
+	roleSessionExpiration string
+}
+
+func getKMSAuthCred(aConfig *authConfig) (credentials.Credential, error) {
+	root := chainedAuth{cred: &oidcRoleAuth{authConfig: aConfig}}
+	root.authNext(&chainedAuth{cred: &ramRoleAuth{authConfig: aConfig}}).
+		authNext(&chainedAuth{cred: &akAuth{authConfig: aConfig}}).
+		authNext(&chainedAuth{cred: &ecsRoleAuth{authConfig: aConfig}})
+	return root.NewCredential()
 }
 
 func newKMSClient(log logr.Logger, cfg Config) *client {
@@ -75,74 +207,18 @@ func newKMSClient(log logr.Logger, cfg Config) *client {
 }
 
 func (c *client) setKMSClient() error {
-	roleArn := os.Getenv("ALICLOUD_ROLE_ARN")
-	oidcArn := os.Getenv("ALICLOUD_OIDC_PROVIDER_ARN")
-	accessKey := os.Getenv("ACCESS_KEY_ID")
-	accessSecretKey := os.Getenv("SECRET_ACCESS_KEY")
-	roleSessionName := os.Getenv("ALICLOUD_ROLE_SESSION_NAME")
-	roleSessionExpiration := os.Getenv("ALICLOUD_ROLE_SESSION_EXPIRATION")
-
-	var cred credentials.Credential
-	var err error
-	if roleArn != "" {
-		//prefer to use rrsa oidc auth type
-		if oidcArn != "" {
-			config := new(credentials.Config).
-				SetType(OidcAuthType).
-				SetOIDCProviderArn(oidcArn).
-				SetOIDCTokenFilePath(oidcTokenFilePath).
-				SetRoleArn(roleArn).
-				SetRoleSessionName(oidcRoleSessionName)
-			cred, err = credentials.NewCredential(config)
-			if err != nil {
-				return err
-			}
-			c.logger.Info("Using oidc rrsa auth..", "roleArn", roleArn, "oidcArn", oidcArn)
-		}
-		//check if ram_role_arn auth type
-		if accessKey != "" && accessSecretKey != "" {
-			config := new(credentials.Config).
-				SetType(RamRoleARNAuthType).
-				SetAccessKeyId(accessKey).
-				SetAccessKeySecret(accessSecretKey).
-				SetRoleArn(roleArn).
-				SetRoleSessionName(roleSessionName)
-			if roleSessionExpiration != "" {
-				rseInt, err := strconv.Atoi(roleSessionExpiration)
-				if err != nil {
-					c.logger.Error(err, "failed to parse given roleSessionExpiration", "value", roleSessionExpiration)
-				} else {
-					config.SetRoleSessionExpiration(rseInt)
-				}
-			}
-			cred, err = credentials.NewCredential(config)
-			if err != nil {
-				return err
-			}
-			c.logger.Info("Using ram role arn auth..", "roleArn", roleArn, "roleSessionName", roleSessionName)
-		}
+	authEnvs := &authConfig{
+		roleArn:               os.Getenv("ALICLOUD_ROLE_ARN"),
+		oidcArn:               os.Getenv("ALICLOUD_OIDC_PROVIDER_ARN"),
+		accessKey:             os.Getenv("ACCESS_KEY_ID"),
+		accessSecretKey:       os.Getenv("SECRET_ACCESS_KEY"),
+		roleSessionName:       os.Getenv("ALICLOUD_ROLE_SESSION_NAME"),
+		roleSessionExpiration: os.Getenv("ALICLOUD_ROLE_SESSION_EXPIRATION"),
 	}
-	//check to use access_key auth mode
-	if accessKey != "" && accessSecretKey != "" {
-		config := new(credentials.Config).
-			SetType(AKAuthType).
-			SetAccessKeyId(accessKey).
-			SetAccessKeySecret(accessSecretKey)
-		cred, err = credentials.NewCredential(config)
-		if err != nil {
-			return err
-		}
-		c.logger.Info("Using ak/sk auth..")
-	}
-	//choose ecs ram role auth mode at last
-	if cred == nil {
-		config := new(credentials.Config).
-			SetType(EcsRamRoleAuthType)
-		cred, err = credentials.NewCredential(config)
-		if err != nil {
-			return err
-		}
-		c.logger.Info("Using ecs ram role auth..")
+	//get ram auth credential
+	cred, err := getKMSAuthCred(authEnvs)
+	if err != nil {
+		return err
 	}
 	if cred != nil {
 		endpoint := fmt.Sprintf(defaultKmsDomain, c.region)
