@@ -2,7 +2,7 @@
 
 # ACK Secret Manager
 
-[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导致到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
+[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导入到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
 
 
