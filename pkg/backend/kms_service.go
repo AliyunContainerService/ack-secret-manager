@@ -16,123 +16,222 @@ limitations under the License.
 package backend
 
 import (
-	"context"
+	"errors"
 	"fmt"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
-	"github.com/aliyun/alibaba-cloud-sdk-go/sdk"
-	aliCloudAuth "github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth"
-	"github.com/aliyun/alibaba-cloud-sdk-go/sdk/auth/credentials/providers"
-	"github.com/aliyun/alibaba-cloud-sdk-go/services/kms"
+	openapi "github.com/alibabacloud-go/darabonba-openapi/client"
+	kms "github.com/alibabacloud-go/kms-20160120/v2/client"
+	"github.com/alibabacloud-go/tea/tea"
+	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
+	"github.com/aliyun/credentials-go/credentials"
 	"github.com/go-logr/logr"
+	"math"
 	"os"
-	"reflect"
-	"sync"
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+	"strconv"
 	"time"
 )
 
 const (
-	// https protocol.
-	Https           = "https"
-	AccessKeyId     = "ACCESS_KEY_ID"
-	AccessKeySecret = "ACCESS_KEY_SECRET"
+	REJECTED_THROTTLING           = "Rejected.Throttling"
+	SERVICE_UNAVAILABLE_TEMPORARY = "ServiceUnavailableTemporary"
+	INTERNAL_FAILURE              = "InternalFailure"
+	MAX_RETRY_TIMES               = 5
+	RamRoleARNAuthType            = "ram_role_arn"
+	AKAuthType                    = "access_key"
+	EcsRamRoleAuthType            = "ecs_ram_role"
+	OidcAuthType                  = "oidc_role_arn"
+	oidcRoleSessionName           = "ack-secret-manager"
+	oidcTokenFilePath             = "/var/run/secrets/tokens/ack-secret-manager"
+	defaultKmsDomain              = "kms-vpc.%s.aliyuncs.com"
 )
 
+var (
+	BACKOFF_DEFAULT_RETRY_INTERVAL = time.Second
+	BACKOFF_DEFAULT_CAPACITY       = time.Duration(10) * time.Second
+)
+
+var klog = logf.Log.WithName("kms_service")
+
 type client struct {
-	kmsClient           *kms.Client
-	provider            providers.Provider
-	region              string
-	lastCreds           aliCloudAuth.Credential
-	credLock            *sync.RWMutex //share the latest credentials across goroutines.
-	tokenRotationPeriod time.Duration
-	logger              logr.Logger
+	kmsClient *kms.Client
+	region    string
+	logger    logr.Logger
+}
+
+type getCredential interface {
+	NewCredential() (credentials.Credential, error)
+}
+
+type chainedCred interface {
+	getCredential
+	authNext(chainedCred) chainedCred
+}
+
+type chainedAuth struct {
+	cred getCredential
+	next chainedCred
+}
+
+func (ch *chainedAuth) authNext(next chainedCred) chainedCred {
+	ch.next = next
+	return next
+}
+
+func (ch *chainedAuth) NewCredential() (credentials.Credential, error) {
+	cred, err := ch.cred.NewCredential()
+	if err != nil {
+		return nil, err
+	}
+	if cred != nil {
+		return cred, nil
+	}
+	if ch.next != nil {
+		return ch.next.NewCredential()
+	}
+	return nil, errors.New("empty credential")
+}
+
+type oidcRoleAuth struct{ *authConfig }
+
+func (c *oidcRoleAuth) NewCredential() (credentials.Credential, error) {
+	//prefer to use rrsa oidc auth type
+	if c.oidcArn == "" || c.roleArn == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(OidcAuthType).
+		SetOIDCProviderArn(c.oidcArn).
+		SetOIDCTokenFilePath(oidcTokenFilePath).
+		SetRoleArn(c.roleArn).
+		SetRoleSessionName(oidcRoleSessionName)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using oidc rrsa auth..", "roleArn", c.roleArn, "oidcArn", c.oidcArn)
+	}
+	return cred, err
+}
+
+type ramRoleAuth struct{ *authConfig }
+
+func (c *ramRoleAuth) NewCredential() (credentials.Credential, error) {
+	//check if ram_role_arn auth type
+	if c.accessKey == "" || c.accessSecretKey == "" || c.roleSessionName == "" || c.roleArn == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(RamRoleARNAuthType).
+		SetAccessKeyId(c.accessKey).
+		SetAccessKeySecret(c.accessSecretKey).
+		SetRoleArn(c.roleArn).
+		SetRoleSessionName(c.roleSessionName)
+	if c.roleSessionExpiration != "" {
+		rseInt, err := strconv.Atoi(c.roleSessionExpiration)
+		if err != nil {
+			klog.Error(err, "failed to parse given roleSessionExpiration", "value", c.roleSessionExpiration)
+		} else {
+			config.SetRoleSessionExpiration(rseInt)
+		}
+	}
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ram role arn auth..", "roleArn", c.roleArn, "roleSessionName", c.roleSessionName)
+	}
+	return cred, err
+}
+
+type akAuth struct{ *authConfig }
+
+func (c *akAuth) NewCredential() (credentials.Credential, error) {
+	if c.accessKey == "" || c.accessSecretKey == "" {
+		return nil, nil
+	}
+	config := new(credentials.Config).
+		SetType(AKAuthType).
+		SetAccessKeyId(c.accessKey).
+		SetAccessKeySecret(c.accessSecretKey)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ak/sk auth..")
+	}
+	return cred, err
+}
+
+type ecsRoleAuth struct{ *authConfig }
+
+func (c *ecsRoleAuth) NewCredential() (credentials.Credential, error) {
+	//use ecs ramrole auth type default if no auth config given
+	config := new(credentials.Config).
+		SetType(EcsRamRoleAuthType)
+	cred, err := credentials.NewCredential(config)
+	if cred != nil {
+		klog.Info("Using ecs ram role auth..")
+	}
+	return cred, err
+}
+
+type authConfig struct {
+	roleArn               string
+	oidcArn               string
+	accessKey             string
+	accessSecretKey       string
+	roleSessionName       string
+	roleSessionExpiration string
+}
+
+func getKMSAuthCred(aConfig *authConfig) (credentials.Credential, error) {
+	root := chainedAuth{cred: &oidcRoleAuth{authConfig: aConfig}}
+	root.authNext(&chainedAuth{cred: &ramRoleAuth{authConfig: aConfig}}).
+		authNext(&chainedAuth{cred: &akAuth{authConfig: aConfig}}).
+		authNext(&chainedAuth{cred: &ecsRoleAuth{authConfig: aConfig}})
+	return root.NewCredential()
 }
 
 func newKMSClient(log logr.Logger, cfg Config) *client {
 	region := cfg.Region
+	instanceRegion, err := utils.GetRegion()
+	if err != nil {
+		log.Error(err, "failed to get region from meta server")
+	}
+	//replace default region with real value
+	if region == "" && instanceRegion != region {
+		log.Info("refine the default region", "region", instanceRegion)
+		region = instanceRegion
+	}
 	//init client
 	client := client{
-		tokenRotationPeriod: cfg.TokenRotationPeriod,
-		logger:              log,
-		region:              region,
-		credLock:            new(sync.RWMutex),
+		logger: log,
+		region: region,
 	}
 	return &client
 }
 
-func setConfig(c *client) error {
-	if c.region == "" {
-		return nil
+func (c *client) setKMSClient() error {
+	authEnvs := &authConfig{
+		roleArn:               os.Getenv("ALICLOUD_ROLE_ARN"),
+		oidcArn:               os.Getenv("ALICLOUD_OIDC_PROVIDER_ARN"),
+		accessKey:             os.Getenv("ACCESS_KEY_ID"),
+		accessSecretKey:       os.Getenv("SECRET_ACCESS_KEY"),
+		roleSessionName:       os.Getenv("ALICLOUD_ROLE_SESSION_NAME"),
+		roleSessionExpiration: os.Getenv("ALICLOUD_ROLE_SESSION_EXPIRATION"),
 	}
-	credConfig := &providers.Configuration{}
-	credConfig.AccessKeyID = os.Getenv(AccessKeyId)
-	credConfig.AccessKeySecret = os.Getenv(AccessKeySecret)
-
-	credentialChain := []providers.Provider{
-		providers.NewConfigurationCredentialProvider(credConfig),
-		providers.NewEnvCredentialProvider(),
-		providers.NewInstanceMetadataProvider(),
-	}
-	credProvider := providers.NewChainProvider(credentialChain)
-	//Do an initial credential fetch because we want to err right away if we can't even get a first set.
-	lastCreds, err := credProvider.Retrieve()
+	//get ram auth credential
+	cred, err := getKMSAuthCred(authEnvs)
 	if err != nil {
 		return err
 	}
-
-	clientConfig := sdk.NewConfig()
-	clientConfig.Scheme = "https"
-	kclient, err := kms.NewClientWithOptions(c.region, clientConfig, lastCreds)
-	if err != nil {
-		return fmt.Errorf("failed to init kms client, err: %v", err)
-	}
-
-	c.kmsClient = kclient
-	c.provider = credProvider
-	c.lastCreds = lastCreds
-	return nil
-}
-
-//refresh the client credential if ak not set
-func (c *client) pullForCreds(ctx context.Context) {
-	go func(ctx context.Context) {
-		ticker := time.NewTicker(c.tokenRotationPeriod)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				c.logger.Info("stopping the pulling channel")
-				return
-			case <-ticker.C:
-				if err := c.checkCredentials(c.provider); err != nil {
-					c.logger.Error(err, "unable to retrieve current credentials")
-				}
-			}
+	if cred != nil {
+		endpoint := fmt.Sprintf(defaultKmsDomain, c.region)
+		client, err := kms.NewClient(&openapi.Config{
+			Endpoint:   tea.String(endpoint),
+			RegionId:   tea.String(c.region),
+			Credential: cred,
+		})
+		if err != nil {
+			return err
 		}
-	}(ctx)
-}
-
-func (c *client) checkCredentials(credProvider providers.Provider) error {
-	c.logger.Info("checking for new credentials")
-	currentCreds, err := credProvider.Retrieve()
-	if err != nil {
-		return err
+		c.kmsClient = client
 	}
-	// need DeepEqual for refresh lastCreds
-	if reflect.DeepEqual(currentCreds, c.lastCreds) {
-		return nil
-	}
-	c.logger.Info("credentials rotate")
-	c.lastCreds = currentCreds
-
-	clientConfig := sdk.NewConfig()
-	clientConfig.Scheme = "https"
-	kclient, err := kms.NewClientWithOptions(c.region, clientConfig, currentCreds)
-	if err != nil {
-		return fmt.Errorf("failed to init kms client, err: %v", err)
-	}
-	c.credLock.Lock()
-	defer c.credLock.Unlock()
-	c.kmsClient = kclient
 	return nil
 }
 
@@ -141,28 +240,55 @@ func (c *client) GetSecret(key string, queryCondition *SecretQueryCondition) (st
 	if key == "" {
 		return data, utils.EmptySecretKeyError{ErrType: utils.EmptySecretKeyErrorType}
 	}
-	request := kms.CreateGetSecretValueRequest()
-	request.Scheme = Https
-	request.SecretName = key
+	request := &kms.GetSecretValueRequest{
+		SecretName: tea.String(key),
+	}
 	if queryCondition.VersionId != "" {
-		request.VersionId = queryCondition.VersionId
+		request.VersionId = tea.String(queryCondition.VersionId)
 	}
 	if queryCondition.VersionStage != "" {
-		request.VersionStage = queryCondition.VersionStage
+		request.VersionStage = tea.String(queryCondition.VersionStage)
 	}
-	c.credLock.RLock()
-	defer c.credLock.RUnlock()
-
 	response, err := c.kmsClient.GetSecretValue(request)
-	if err != nil {
-		c.logger.Error(err, "failed to get secret value from kms", "key", key)
-		return data, err
+	for retryTimes := 1; retryTimes < MAX_RETRY_TIMES; retryTimes++ {
+		if err != nil {
+			if !judgeNeedRetry(err) {
+				c.logger.Error(err, "failed to get secret value from kms", "key", key)
+				return data, err
+			} else {
+				time.Sleep(getWaitTimeExponential(retryTimes))
+				response, err = c.kmsClient.GetSecretValue(request)
+				if err != nil && retryTimes == MAX_RETRY_TIMES-1 {
+					c.logger.Error(err, "failed to get secret value from kms", "key", key)
+					return data, err
+				}
+			}
+		}
+		break
 	}
-	if response.SecretDataType == utils.BinaryType {
+
+	if *response.Body.SecretDataType == utils.BinaryType {
 		c.logger.Error(err, "not support binary type yet", "key", key)
 		return data, utils.BackendSecretTypeNotSupportError{ErrType: utils.EmptySecretKeyErrorType, Key: key}
 	}
 	c.logger.Info("got secret data from kms service", "key", key)
-	data = response.SecretData
+	data = *response.Body.SecretData
 	return data, nil
+}
+
+func judgeNeedRetry(err error) bool {
+	respErr, is := err.(*sdkErr.ClientError)
+	if is && (respErr.ErrorCode() == REJECTED_THROTTLING || respErr.ErrorCode() == SERVICE_UNAVAILABLE_TEMPORARY || respErr.ErrorCode() == INTERNAL_FAILURE) {
+		return true
+	}
+	return false
+}
+
+func getWaitTimeExponential(retryTimes int) time.Duration {
+	sleepInterval := time.Duration(math.Pow(2, float64(retryTimes))) * BACKOFF_DEFAULT_RETRY_INTERVAL
+	if sleepInterval >= BACKOFF_DEFAULT_CAPACITY {
+		return BACKOFF_DEFAULT_CAPACITY
+	} else {
+		return sleepInterval
+	}
 }

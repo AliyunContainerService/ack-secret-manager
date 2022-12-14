@@ -46,33 +46,30 @@ spec:
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           env:
-          - name: POD_NAME
-            valueFrom:
-              fieldRef:
-                fieldPath: metadata.name
-          - name: WATCH_NAMESPACE
-            value: {{ .Values.env.WATCH_NAMESPACE }}
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WATCH_NAMESPACE
+              value: {{ .Values.env.WATCH_NAMESPACE }}
           {{- range $name, $value := .Values.env }}
           {{- if not (empty $value) }}
-          - name: {{ $name | quote }}
-            value: {{ $value | quote }}
+            - name: {{ $name | quote }}
+              value: {{ $value | quote }}
           {{- end }}
           {{- end }}
-          # Params for env vars populated from k8s secrets
+            # Params for env vars populated from k8s secrets
           {{- range $key, $value := .Values.envVarsFromSecret }}
-          - name: {{ $key }}
-            valueFrom:
-              secretKeyRef:
-                name: {{ $value.secretKeyRef | quote }}
-                key: {{ $value.key | quote }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $value.secretKeyRef | quote }}
+                  key: {{ $value.key | quote }}
           {{- end }}
-          {{- with .Values.filesFromSecret }}
+          {{- if .Values.rrsa.enable }}
           volumeMounts:
-          {{- range $key, $value := . }}
-          - name: {{ $key }}
-            mountPath: {{ $value.mountPath }}
-            readOnly: true
-          {{- end }}
+          - mountPath: /var/run/secrets/tokens
+            name: {{ template "ack-secret-manager.serviceAccountName" . }}
           {{- end }}
       {{- with .Values.securityContext }}
       securityContext:
@@ -90,11 +87,13 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.filesFromSecret }}
       volumes:
-      {{- range $key, $value := . }}
-      - name: {{ $key }}
-        secret:
-          secretName: {{ $value.secret }}
-      {{- end }}
+      {{- if .Values.rrsa.enable }}
+      - name: {{ template "ack-secret-manager.serviceAccountName" . }}
+        projected:
+          sources:
+          - serviceAccountToken:
+              path: ack-secret-manager
+              expirationSeconds: 7200
+              audience: "sts.aliyuncs.com"
       {{- end }}
