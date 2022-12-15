@@ -88,6 +88,20 @@ func (r *ExternalSecretReconciler) getDesiredData(dataList []api.DataSource) (ma
 			r.Log.Error(err, "unable to read secret from backend", "key", data.Key, "query", queryCondition)
 			return nil, err
 		}
+		//parse json if jmes format defined in spec.data
+		if len(data.JMESPath) > 0 {
+			r.Log.Info("parse jmes format", "key", data.Key, "jmes", data.JMESPath)
+			jsonDataMap, err := getJsonSecrets(data.JMESPath, externalSecData, data.Key)
+			if err != nil {
+				r.Log.Error(err, "failed to parse jmes format", "key", data.Key, "jmes", data.JMESPath)
+			} else if len(jsonDataMap) > 0 {
+				//use parsed k-value in target secret
+				for k, v := range jsonDataMap {
+					desiredData[k] = []byte(v)
+				}
+				continue
+			}
+		}
 		desiredData[data.Name] = []byte(externalSecData)
 	}
 	return desiredData, err
