@@ -177,7 +177,7 @@ func (r *ExternalSecretReconciler) AddFinalizerIfNotPresent(externalSec *api.Ext
 	return nil
 }
 
-func (r *ExternalSecretReconciler) Reconcile(req ctrl.Request) (ctrl.Result, error) {
+func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("ExternalSecret", req.NamespacedName)
 
 	externalSec := &api.ExternalSecret{}
@@ -356,7 +356,7 @@ func (r *ExternalSecretReconciler) InitSecretStore() error {
 		r.Log.Error(err, "failed to get external secret clientset")
 	}
 
-	esList, err := k8sCli.Resource(externalSecretGRV).Namespace("").List(metav1.ListOptions{})
+	esList, err := k8sCli.Resource(externalSecretGRV).Namespace("").List(context.TODO(), metav1.ListOptions{})
 	if err != nil {
 		r.Log.Error(err, "failed to list all external secrets")
 		return err

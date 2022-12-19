@@ -106,7 +106,7 @@ var _ = Describe("SecretsManager", func() {
 			err := r.Create(context.Background(), sd)
 			fmt.Printf("err: %v", err)
 			Expect(err).To(BeNil())
-			res, err2 := r.Reconcile(reconcile.Request{
+			res, err2 := r.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: sd.Namespace,
 					Name:      sd.Name,
@@ -123,7 +123,7 @@ var _ = Describe("SecretsManager", func() {
 		It("Create a externalSecret with a secret not deployed in the backend", func() {
 			err := r.Create(context.Background(), sdBackendSecretNotFound)
 			Expect(err).To(BeNil())
-			res, err2 := r.Reconcile(reconcile.Request{
+			res, err2 := r.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: sdBackendSecretNotFound.Namespace,
 					Name:      sdBackendSecretNotFound.Name,
@@ -136,7 +136,7 @@ var _ = Describe("SecretsManager", func() {
 			r2 := getReconciler()
 			r2.WatchNamespaces = map[string]bool{sdExcludedNs.Namespace: false}
 			err := r.Create(context.Background(), sdExcludedNs)
-			res, err2 := r.Reconcile(reconcile.Request{
+			res, err2 := r.Reconcile(context.Background(), reconcile.Request{
 				NamespacedName: types.NamespacedName{
 					Namespace: sdExcludedNs.Namespace,
 					Name:      sdExcludedNs.Name,
