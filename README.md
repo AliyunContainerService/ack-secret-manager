@@ -59,14 +59,12 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session expiration for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
 | `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
 | `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
-| rrsa.enable | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false |
+| `rrsa.enable` | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false |
 | `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`           |
 | `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                     |
 | `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`                      |
 | `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                   |
 | `command.region `                          | The region id where you want to pull the secret from             |                          |
-| `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     | true                     |
-| `command.leaderElectionNamespace `     | Namespace used to perform leader election. Only used if leader election is enabled.    | `kube-system`            |
 | `command.disablePolling `     | Disable auto polling external secret from kms.     | false                    |
 | `command.pollingInterval `     | How often the controller will sync existing secret from kms.     | `120s`                   |
 | `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager` |

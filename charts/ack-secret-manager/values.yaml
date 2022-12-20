@@ -9,8 +9,6 @@ command:
   reconcileCount: 1
   tokenRotationPeriod: 120s
   region:
-  enableLeaderElection: true
-  leaderElectionNamespace: kube-system
   disablePolling: false
   pollingInterval: 120s
 # watchamespaces:

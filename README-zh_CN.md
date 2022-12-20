@@ -68,8 +68,6 @@
 | command.reconcileCount                             | 指定并发协调externalSecret实例的worker数量，默认是1          | 1                      |
 | command.tokenRotationPeriod                        | 检查KMS client访问STS token是否过期的轮询时间                | 120s                   |
 | command.region                                     | 从指定region拉取secret凭据                                   |                        |
-| command.enableLeaderElection                       | 开启控制器leader选举，开启后控制器会以主备模式运行           | true                   |
-| command.leaderElectionNamespace                    | 控制器leader选举的指定命名空间，只有开启选举时该参数才生效   | kube-system            |
 | command.disablePolling                             | 关闭从KMS后端自动同步拉取最新的凭据内容，默认false           | false                  |
 | command.pollingInterval                            | 从KMS后端同步存量secret实例的间隔时间                        | 120s                   |
 | image.repository                                   | 指定的ack-secret-manager 镜像仓库名称                        | acs/ack-secret-manager |
