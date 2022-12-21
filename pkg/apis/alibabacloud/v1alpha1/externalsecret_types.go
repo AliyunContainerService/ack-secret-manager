@@ -37,7 +37,7 @@ type DataSource struct {
 	VersionId    string `json:"versionId,omitempty"`
 
 	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
-	JMESPath []JMESPathObject `json:"jmesPath"`
+	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
 }
 
 // ExternalSecretStatus defines the observed state of ExternalSecret

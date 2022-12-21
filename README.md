@@ -134,4 +134,46 @@ type: Opaque
 data:
   password: MTIzNA==
 ```
-If the flag `disablePolling` is not set to `true`, the controller would auto polling the secret from KMS backend with the interval set in `pollingInterval` 
+If the flag `disablePolling` is not set to `true`, the controller would auto polling the secret from KMS backend with the interval set in `pollingInterval`
+
+#### jmes support
+
+To set the specific key-value pairs extract from a JSON-formatted secret. You can use `jmesPath` field to mount key-value pairs from a properly formatted secret value as individual secrets. For example: Consider you have a secret "testJson" in KMS Secrets Manager with JSON content as follows:
+
+```
+{
+	"username": "testuser",
+	"password": "testpassword"
+}
+```
+
+To fetch the username and password key pairs of this secret as individual secrets, use the jmesPath field as follows:
+
+```
+  data:
+    - key: testJson
+      name: password
+      jmesPath:
+      - path: "username"
+        objectAlias: "MySecretUsername"
+      - path: "password"
+        objectAlias: "MySecretPassword"
+```
+
+If you use the jmesPath field, you must provide the following two sub-fields:
+
+- path: This required field is the [JMES path](https://jmespath.org/specification.html) to use for retrieval
+- objectAlias: This required field specifies the key name of the extracted value in the synced k8s secrets
+
+The `Secret` created by the controller should look like:
+
+```yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-service
+type: Opaque
+data:
+  MySecretPassword: dGVzdFBhc3N3b3Jk
+  MySecretUsername: dGVzdFVzZXI=
+```

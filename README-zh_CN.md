@@ -144,3 +144,44 @@ data:
 
 
 4. 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
+
+5. 如果您希望解析一个JSON格式的secret并将其中指定的key-value对同步到k8s secret中，可以使用`jmesPath`字段。示例：假如您在KMS Secrets Manager中有如下JSON格式的secret：
+```
+{
+	"username": "testuser",
+	"password": "testpassword"
+}
+```
+
+为了解析其中的username和password键值对并将其独立同步到k8s secrets中，可以使用如下的jmesPath字段配置：
+
+```
+  data:
+    - key: testJson
+      name: password
+      jmesPath:
+      - path: "username"
+        objectAlias: "MySecretUsername"
+      - path: "password"
+        objectAlias: "MySecretPassword"
+```
+
+If you use the jmesPath field, you must provide the following two sub-fields:
+
+当您使用jmesPath字段时，必需指定下面两个子字段：
+
+- path: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析json中的指定字段
+- objectAlias: 必需项，用于指定解析出的字段同步到k8s secret中的key名称
+
+同步后的secret实例如下:
+
+```yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-service
+type: Opaque
+data:
+  MySecretPassword: dGVzdFBhc3N3b3Jk
+  MySecretUsername: dGVzdFVzZXI=
+```
