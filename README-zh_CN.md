@@ -2,7 +2,7 @@
 
 # ACK Secret Manager
 
-[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导入到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
+[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导致到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
 
 
@@ -12,10 +12,10 @@
 
 2. 授予ack-secret-manager获取凭据密文的权限，这里有两种方式：
    a  在集群对应的WorkerRole中添加权限
-   * 登录容器服务控制台
-   * 选择对应集群进入到集群详情页
-   * 在集群信息中选择**集群资源**页，点击Worker RAM角色中对应的命名为			**KubernetesWorkerRole-xxxxxxxxxxxxxxx** 的角色名称，会自动导航到RAM角色对应的控制台页面
-   * 点击添加权限按钮，创建自定义权限策略，策略内容如下：
+    * 登录容器服务控制台
+    * 选择对应集群进入到集群详情页
+    * 在集群信息中选择**集群资源**页，点击Worker RAM角色中对应的命名为			**KubernetesWorkerRole-xxxxxxxxxxxxxxx** 的角色名称，会自动导航到RAM角色对应的控制台页面
+    * 点击添加权限按钮，创建自定义权限策略，策略内容如下：
    ```json
    {
    	"Action": [
@@ -27,19 +27,19 @@
    	"Effect": "Allow"
    }
    ```
-   * 绑定上面创建的自定义策略给集群对应的WorkerRole
+    * 绑定上面创建的自定义策略给集群对应的WorkerRole
 
    b 对于1.22集群，可以通过[RRSA方式](https://help.aliyun.com/document_detail/356611.html) 实现Pod维度的授权（**注意：该方式仅支持1.22版本的ACK标准版和Pro版集群**）
 
-   * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
-   * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：包括为指定的serviceaccount创建对应的RAM角色，角色的信任策略以及为角色授权。
+    * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
+    * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：包括为指定的serviceaccount创建对应的RAM角色，角色的信任策略以及为角色授权。
 
 3. 登录到容器服务控制台
 
-   * 在左侧导航栏选择**市场** -> **应用市场**，在搜索栏中输入ack-secret-manager，选择进入到应用页面；
-   * 选择需要安装的目标集群和命名空间、发布名称；
-   * 在参数配置页面进行自定义参数配置，包括values.yaml中的`rrsa.enable`以及配置envVarsFromSecret中的`ALICLOUD_ROLE_ARN`和 `ALICLOUD_OIDC_PROVIDER_ARN`参数,  参数说明参见下方的配置说明；
-   * 点击**确定**按钮完成安装。
+    * 在左侧导航栏选择**市场** -> **应用市场**，在搜索栏中输入ack-secret-manager，选择进入到应用页面；
+    * 选择需要安装的目标集群和命名空间、发布名称；
+    * 在参数配置页面进行自定义参数配置，包括values.yaml中的`rrsa.enable`以及配置envVarsFromSecret中的`ALICLOUD_ROLE_ARN`和 `ALICLOUD_OIDC_PROVIDER_ARN`参数,  参数说明参见下方的配置说明；
+    * 点击**确定**按钮完成安装。
 
 
 ## 卸载
@@ -71,7 +71,7 @@
 | command.disablePolling                             | 关闭从KMS后端自动同步拉取最新的凭据内容，默认false           | false                  |
 | command.pollingInterval                            | 从KMS后端同步存量secret实例的间隔时间                        | 120s                   |
 | image.repository                                   | 指定的ack-secret-manager 镜像仓库名称                        | acs/ack-secret-manager |
-| image.tag                                          | 指定的ack-secret-manager 镜像tag                             | v0.3.0                 |
+| image.tag                                          | 指定的ack-secret-manager 镜像tag                             | v0.4.0                 |
 | image.pullPolicy                                   | 镜像拉取策略，默认为Always                                   | Always                 |
 | nameOverride                                       | 覆盖应用名称                                                 | nil                    |
 | fullnameOverride                                   | 覆盖应用全名                                                 | nil                    |
@@ -185,3 +185,8 @@ data:
   MySecretPassword: dGVzdFBhc3N3b3Jk
   MySecretUsername: dGVzdFVzZXI=
 ```
+
+## Release Note
+| 版本号     | 变更时间        | 变更内容                    |
+|---------|-------------|-------------------------|
+| `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段 |
