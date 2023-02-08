@@ -1,5 +1,7 @@
 # ACK Secret Manager
 
+English | [简体中文](./README-zh_CN.md)
+
 ACK Secret Manager allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2) to securely add secrets in Kubernetes.
 
 ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) into a Pod using a declarative API similar to the native Secret one.
@@ -55,20 +57,18 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set the ALICLOUD_ROLE_ARN variable to specify the RAM role ARN for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
 | `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session name for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
 | `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session expiration for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
-| `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
-| rrsa.enable | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false |
+| `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
+| `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
+| `rrsa.enable` | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false                    |
 | `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`           |
 | `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                     |
 | `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`                      |
 | `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                   |
 | `command.region `                          | The region id where you want to pull the secret from             |                          |
-| `command.enableLeaderElection `     | Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.     | true                     |
-| `command.leaderElectionNamespace `     | Namespace used to perform leader election. Only used if leader election is enabled.    | `kube-system`            |
 | `command.disablePolling `     | Disable auto polling external secret from kms.     | false                    |
 | `command.pollingInterval `     | How often the controller will sync existing secret from kms.     | `120s`                   |
 | `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager` |
-| `image.tag`                          | ack-secret-manager Image tag | `v0.3.0`                 |
+| `image.tag`                          | ack-secret-manager Image tag | `v0.4.0`                 |
 | `image.pullPolicy`                   | Image pull policy                                            | `Always`                 |
 | `nameOverride`                   | Override the name of app                                            | `nil`                    |
 | `fullnameOverride`                   | Override the full name of app                                            | `nil`                    |
@@ -134,4 +134,51 @@ type: Opaque
 data:
   password: MTIzNA==
 ```
-If the flag `disablePolling` is not set to `true`, the controller would auto polling the secret from KMS backend with the interval set in `pollingInterval` 
+If the flag `disablePolling` is not set to `true`, the controller would auto polling the secret from KMS backend with the interval set in `pollingInterval`
+
+#### jmes support
+
+To set the specific key-value pairs extract from a JSON-formatted secret. You can use `jmesPath` field to mount key-value pairs from a properly formatted secret value as individual secrets. For example: Consider you have a secret "testJson" in KMS Secrets Manager with JSON content as follows:
+
+```
+{
+	"username": "testuser",
+	"password": "testpassword"
+}
+```
+
+To fetch the username and password key pairs of this secret as individual secrets, use the jmesPath field as follows:
+
+```
+  data:
+    - key: testJson
+      name: password
+      jmesPath:
+      - path: "username"
+        objectAlias: "MySecretUsername"
+      - path: "password"
+        objectAlias: "MySecretPassword"
+```
+
+If you use the jmesPath field, you must provide the following two sub-fields:
+
+- path: This required field is the [JMES path](https://jmespath.org/specification.html) to use for retrieval
+- objectAlias: This required field specifies the key name of the extracted value in the synced k8s secrets
+
+The `Secret` created by the controller should look like:
+
+```yml
+apiVersion: v1
+kind: Secret
+metadata:
+  name: hello-service
+type: Opaque
+data:
+  MySecretPassword: dGVzdFBhc3N3b3Jk
+  MySecretUsername: dGVzdFVzZXI=
+```
+
+## Release Note
+| Version | Date       | Changes                                                                                       |
+|---------|------------|-----------------------------------------------------------------------------------------------|
+| `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path |
