@@ -57,9 +57,9 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set the ALICLOUD_ROLE_ARN variable to specify the RAM role ARN for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
 | `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session name for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
 | `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session expiration for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
-| `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** | |
-| `rrsa.enable` | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false |
+| `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
+| `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
+| `rrsa.enable` | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false                    |
 | `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`           |
 | `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                     |
 | `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`                      |
@@ -68,7 +68,7 @@ The following table lists the configurable parameters of the `ack-secret-manager
 | `command.disablePolling `     | Disable auto polling external secret from kms.     | false                    |
 | `command.pollingInterval `     | How often the controller will sync existing secret from kms.     | `120s`                   |
 | `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager` |
-| `image.tag`                          | ack-secret-manager Image tag | `v0.3.0`                 |
+| `image.tag`                          | ack-secret-manager Image tag | `v0.4.0`                 |
 | `image.pullPolicy`                   | Image pull policy                                            | `Always`                 |
 | `nameOverride`                   | Override the name of app                                            | `nil`                    |
 | `fullnameOverride`                   | Override the full name of app                                            | `nil`                    |
@@ -177,3 +177,8 @@ data:
   MySecretPassword: dGVzdFBhc3N3b3Jk
   MySecretUsername: dGVzdFVzZXI=
 ```
+
+## Release Note
+| Version | Date       | Changes                                                                                       |
+|---------|------------|-----------------------------------------------------------------------------------------------|
+| `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path |
