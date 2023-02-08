@@ -19,20 +19,20 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller"
+	"github.com/AliyunContainerService/ack-secret-manager/version"
+	"github.com/operator-framework/operator-lib/leader"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	"os"
 	"runtime"
-	"strings"
-	"time"
-
-	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller"
-	"github.com/AliyunContainerService/ack-secret-manager/version"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
+	"strings"
+	"time"
 )
 
 var (
@@ -57,8 +57,6 @@ func main() {
 	var rotationInterval time.Duration
 	var reconcileCount int
 	var disablePolling bool
-	var enableLeaderElection bool
-	var leaderElectionNamespace string
 	var selectedBackend string
 	var watchNamespaces string
 	var excludeNamespaces string
@@ -66,10 +64,6 @@ func main() {
 	backendCfg := backend.Config{}
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
-	flag.BoolVar(&enableLeaderElection, "enable-leader-election", true,
-		"Enable leader election for controller manager. Enabling this will ensure there is only one active controller manager.")
-	flag.StringVar(&leaderElectionNamespace, "leader-election-namespace", "", ""+
-		"Namespace used to perform leader election. Only used if leader election is enabled")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
 	flag.BoolVar(&disablePolling, "disable-polling", false, "Disable auto polling external secret from kms.")
 	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
@@ -87,6 +81,14 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// Become the leader before proceeding
+	// Using leader-for-life selection to avoid split brain
+	err := leader.Become(ctx, "ack-secret-manager-lock")
+	if err != nil {
+		log.Error(err, "")
+		os.Exit(1)
+	}
+
 	backendClient, err := backend.NewBackendClient(ctx, selectedBackend, backendCfg)
 	if err != nil {
 		log.Error(err, "could not build backend client")
@@ -95,10 +97,7 @@ func main() {
 
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme:                  scheme,
-		LeaderElection:          enableLeaderElection,
-		LeaderElectionNamespace: leaderElectionNamespace,
-		LeaderElectionID:        "ack-secret-manager-leader-election",
+		Scheme: scheme,
 	})
 	if err != nil {
 		log.Error(err, "unable to start manager")
@@ -112,12 +111,6 @@ func main() {
 		log.Error(err, "")
 		os.Exit(1)
 	}
-
-	//// Setup all Controllers
-	//if err := controller.AddToManager(mgr); err != nil {
-	//	log.Error(err, "")
-	//	os.Exit(1)
-	//}
 
 	nsSlice := func(ns string) []string {
 		trimmed := strings.Trim(strings.TrimSpace(ns), "\"")

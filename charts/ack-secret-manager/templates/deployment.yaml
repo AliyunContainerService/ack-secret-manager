@@ -33,8 +33,6 @@ spec:
           command:
             - ack-secret-manager
             - --backend={{ .Values.command.backend }}
-            - --enable-leader-election={{ .Values.command.enableLeaderElection }}
-            - --leader-election-namespace={{ .Values.command.leaderElectionNamespace }}
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --reconcile-count={{ .Values.command.reconcileCount }}
             - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}

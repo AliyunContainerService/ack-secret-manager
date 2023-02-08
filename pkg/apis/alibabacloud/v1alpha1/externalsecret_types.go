@@ -26,8 +26,8 @@ import (
 type ExternalSecretSpec struct {
 	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
 	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
-	Data        []DataSource `json:"data,omitempty"`
-	Type        string       `json:"type,omitempty"`
+	Data []DataSource `json:"data,omitempty"`
+	Type string       `json:"type,omitempty"`
 }
 
 type DataSource struct {
@@ -35,6 +35,9 @@ type DataSource struct {
 	Name         string `json:"name"`
 	VersionStage string `json:"versionStage,omitempty"`
 	VersionId    string `json:"versionId,omitempty"`
+
+	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
+	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
 }
 
 // ExternalSecretStatus defines the observed state of ExternalSecret
@@ -64,6 +67,15 @@ type ExternalSecretList struct {
 	metav1.TypeMeta `json:",inline"`
 	metav1.ListMeta `json:"metadata,omitempty"`
 	Items           []ExternalSecret `json:"items"`
+}
+
+//An individual json key value pair to mount
+type JMESPathObject struct {
+	//JMES path to use for retrieval
+	Path string `json:"path"`
+
+	//File name in which to store the secret in.
+	ObjectAlias string `json:"objectAlias"`
 }
 
 func init() {
