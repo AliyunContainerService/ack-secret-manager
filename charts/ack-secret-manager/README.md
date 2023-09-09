@@ -1,103 +1,110 @@
+
+
 # ACK Secret Manager
 
-English | [简体中文](./README-zh_CN.md)
-
-ACK Secret Manager allows you to use external secret management systems (*e.g.*, [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2) to securely add secrets in Kubernetes.
-
-ACK Secret Manager provide the same use experience as [kubernetes-external-secrets](https://github.com/godaddy/kubernetes-external-secrets) which provide the same ease of use as native Secret objects and provide access to secrets stored externally. In ACK Secret Manager，it also adding an ExternalSecret object to the Kubernetes API that allows developers to inject the external secret from [Alibaba Cloud Secrets Manager](https://help.aliyun.com/document_detail/152001.html?spm=a2c4g.11174283.6.578.4e0f7c681F2t9V) into a Pod using a declarative API similar to the native Secret one.
-
-## Installing the Chart
-
-**1.** You are the authorized user of [Alibaba Cloud Secrets Manager](https://www.alibabacloud.com/help/doc-detail/152003.htm?spm=a2c63.p38356.b99.35.21571e37lyf0t2)
-
-**2.** Grant ack-secret-manager the permission of get credentials in KMS secret manager, here are two ways:
-
-a.  Attach KMS RAM policy on target worker role
-* access the target cluster's detail page in [Container Service console](https://cs.console.aliyun.com/)
-* click the target ram role named **KubernetesWorkerRole-xxxxxxxxxxxxxxx** and access into RAM Roles page
-* add kms RAM policy below into the policy bind to the worker role.
-  ```
-       {
-          "Action": [
-              "kms:GetSecretValue"
-          ],
-          "Resource": [
-              "*"
-          ],
-          "Effect": "Allow"
-      }
-  ```
-
-b.  For ACK/ASK 1.22 clusters, fine-grained ram role for service account could be implemented via [RRSA method](https://help.aliyun.com/document_detail/356611.html) (**Note: This method only supports 1.22 version of ACK Standard and Pro clusters**)
-* [Enable RRSA function](https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control#section-ywl-59g-j8h)
-* [Use RRSA function](https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control#section-rmr-eeh-878) : including creating the corresponding RAM role for the specified serviceaccount, the trust policy for the role, and binding the permission to the role.
-
-**3.** Log on to the Container Service console.
-
-* In the left-side navigation page, choose **Marketplace > App Catalog**. Select the **ack-secret-manager** application, click it and access into application page, then modify the chart configuration values in **Parameters** tab, please find parameters description below
-* Select the target cluster and click **Create** button to add the component.
-* Input the customized parameters in the parameter configuration page, including `rrsa.enable` in values.yaml and `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN` parameters, see the configuration notes below for parameter descriptions.
-* Click the **OK** button to complete the installation.
-
-## Uninstalling the Chart
-
-1. Log on to the [Container Service console](https://cs.console.aliyun.com/) .
-2. In the left-side      navigation pane, choose **Applications      > Publish** and click the **Releases**      tab. On the ** Releases** tab page,      locate the row that named **ack-secret-manager**, and click **Delete**.
+[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导致到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
 
-## Configuration
 
-The following table lists the configurable parameters of the `ack-secret-manager` chart and their default values.
+## 安装
 
-| Parameter                            | Description                                                  | Default                  |
-| ------------------------------------ | ------------------------------------------------------------ |--------------------------|
-| `env.WATCH_NAMESPACE`                     | Set the namespaces operator watch（empty value means all-namespaces）                    |                          |
-| `envVarsFromSecret.ACCESS_KEY_ID`     | Set the ACCESS_KEY_ID variable to specify the credential RAM AK for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret.SECRET_ACCESS_KEY`     | Set the SECRET_ACCESS_KEY variable to specify the credential RAM SK for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret.ALICLOUD_ROLE_ARN`     | Set the ALICLOUD_ROLE_ARN variable to specify the RAM role ARN for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session name for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION`     | Set the ALICLOUD_ROLE_SESSION_NAME variable to specify the RAM role session expiration for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN`        | Set the ALICLOUD_OIDC_PROVIDER_ARN variable to specify the RAM OIDC  provider arn for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE` | Set the ALICLOUD_OIDC_TOKEN_FILE variable to specify the serviceaccount OIDC token file path for building SDK client, which needs to be defined in the secret named **alibaba-credentials** |                          |
-| `rrsa.enable` | Enable RRSA feature, default is false，when enalbe, you need to configure the parametes of  `ALICLOUD_ROLE_ARN` and `ALICLOUD_OIDC_PROVIDER_ARN`  in `envVarsFromSecret` | false                    |
-| `command.backend`                           | Set the secret management backend, only alicloud-kms supported                              | `alicloud-kms`           |
-| `command.reconcilePeriod`                        | How often the controller will re-queue externalsecret events           | `5s`                     |
-| `command.reconcileCount`           | Specify the max concurrency reconcile work at the same time  | `1`                      |
-| `command.tokenRotationPeriod`   | Polling interval to check kms client sts token expiration time.           | `120s`                   |
-| `command.region `                          | The region id where you want to pull the secret from             |                          |
-| `command.disablePolling `     | Disable auto polling external secret from kms.     | false                    |
-| `command.pollingInterval `     | How often the controller will sync existing secret from kms.     | `120s`                   |
-| `image.repository`                   | ack-secret-manager Image name                       | `acs/ack-secret-manager` |
-| `image.tag`                          | ack-secret-manager Image tag | `v0.4.0`                 |
-| `image.pullPolicy`                   | Image pull policy                                            | `Always`                 |
-| `nameOverride`                   | Override the name of app                                            | `nil`                    |
-| `fullnameOverride`                   | Override the full name of app                                            | `nil`                    |
-| `rbac.create`                        | Create & use RBAC resources                                  | `true`                   |
-| `securityContext.fsGroup`            | Security context for the container                           | `{}`                     |
-| `serviceAccount.create`              | Whether a new service account name should be created.        | `true`                   |
-| `serviceAccount.name`                | Service account to be used.                                  | automatically generated  |
-| `serviceAccount.annotations`         | Annotations to be added to service account                   | `nil`                    |
-| `podAnnotations`                     | Annotations to be added to pods                              | `{}`                     |
-| `podLabels`                          | Additional labels to be added to pods                        | `{}`                     |
-| `replicaCount`                       | Number of replicas                                           | `1`                      |
-| `nodeSelector`                       | node labels for pod assignment                               | `{}`                     |
-| `tolerations`                        | List of node taints to tolerate (requires Kubernetes >= 1.6) | `[]`                     |
-| `affinity`                           | Affinity for pod assignment                                  | `{}`                     |
-| `resources`                          | Pod resource requests & limits                               | `{}`                     |
+1. 当前账号有足够的阿里云凭据管家接口权限，以便您在KMS凭据管家服务中完成对密文数据的管理，权限策略说明参见[使用RAM实现对资源的访问控制](https://www.alibabacloud.com/help/zh/doc-detail/28953.html)
+
+2. 授予ack-secret-manager获取凭据密文的权限，这里有两种方式：
+   a  在集群对应的WorkerRole中添加权限
+   * 登录容器服务控制台
+   * 选择对应集群进入到集群详情页
+   * 在集群信息中选择**集群资源**页，点击Worker RAM角色中对应的命名为			**KubernetesWorkerRole-xxxxxxxxxxxxxxx** 的角色名称，会自动导航到RAM角色对应的控制台页面
+   * 点击添加权限按钮，创建自定义权限策略，策略内容如下：
+   ```json
+   {
+   	"Action": [
+   		"kms:GetSecretValue"
+   	],
+   	"Resource": [
+   		"*"
+   	],
+   	"Effect": "Allow"
+   }
+   ```
+   * 绑定上面创建的自定义策略给集群对应的WorkerRole
+
+   b 对于1.22集群，可以通过[RRSA方式](https://help.aliyun.com/document_detail/356611.html) 实现Pod维度的授权（**注意：该方式仅支持1.22版本的ACK标准版和Pro版集群**）
+
+   * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
+   * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：包括为指定的serviceaccount创建对应的RAM角色，角色的信任策略以及为角色授权。
+
+3. 登录到容器服务控制台
+
+   * 在左侧导航栏选择**市场** -> **应用市场**，在搜索栏中输入ack-secret-manager，选择进入到应用页面；
+   * 选择需要安装的目标集群和命名空间、发布名称；
+   * 在参数配置页面进行自定义参数配置，包括values.yaml中的`rrsa.enable`以及配置envVarsFromSecret中的`ALICLOUD_ROLE_ARN`和 `ALICLOUD_OIDC_PROVIDER_ARN`参数,  参数说明参见下方的配置说明；
+   * 点击**确定**按钮完成安装。
 
 
-> **Tip**: You can find the ack-secret-manager release in ACK  edit the param at the **Parameters** tab in    or use the default [values.yaml](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/charts/ack-secret-manager/values.yaml)
+## 卸载
 
-## Add a secret
+1. 登录到容器服务控制台；
+2. 选择目标集群点击进入到集群详情页面；
+3. 在左侧的导航栏选择应用-> Helm，找到ack-secret-manager对应的发布，点击操作拦中的删除按钮进行删除。
 
-Add your secret data to your Secret Manager
 
-```
+
+## 配置说明
+
+| **参数**                                           | **说明**                                                     | **默认值**                |
+| -------------------------------------------------- | ------------------------------------------------------------ |------------------------|
+| env.WATCH_NAMESPACE                                | 指定组件watch的namespace（默认空值代表watch所有命名空间）    |                        |
+| envVarsFromSecret.ACCESS_KEY_ID                    | 可以通过设置ACCESS_KEY_ID变量指定凭证AK构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret.SECRET_ACCESS_KEY                | 可以通过设置SECRET_ACCESS_KEY变量指定凭证SK构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret.ALICLOUD_ROLE_ARN                | 可以通过设置ALICLOUD_ROLE_ARN变量指定RAM角色ARN用于构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME       | 可以通过设置ALICLOUD_ROLE_SESSION_NAME变量指定RAM角色session name用于构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION | 可以通过设置ALICLOUD_ROLE_SESSION_EXPIRATION变量指定RAM角色session过期时长用于构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN      | 可以通过设置ALICLOUD_OIDC_PROVIDER_ARN变量指定RAM OIDC供应商的ARN用于构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE         | 可以通过设置ALICLOUD_OIDC_TOKEN_FILE变量指定pod内oidc token文件路径用于构建SDK client，需要定义在名称为alibaba-credentials的secret实例中 |                        |
+| rrsa.enable                                        | 是否启用RRSA特性，默认为false，启用后需要配置envVarsFromSecret中的ALICLOUD_ROLE_ARN和 ALICLOUD_OIDC_PROVIDER_ARN参数 | false                  |
+| command.backend                                    | 对接的外部密钥管理系统后端，当前仅支持阿里云凭据管家，配置为alicloud-kms | alicloud-kms           |
+| command.reconcilePeriod                            | 控制器重新协调externalSecret实例的间隔时间，默认5秒          | 5s                     |
+| command.reconcileCount                             | 指定并发协调externalSecret实例的worker数量，默认是1          | 1                      |
+| command.tokenRotationPeriod                        | 检查KMS client访问STS token是否过期的轮询时间                | 120s                   |
+| command.region                                     | 从指定region拉取secret凭据                                   |                        |
+| command.disablePolling                             | 关闭从KMS后端自动同步拉取最新的凭据内容，默认false           | false                  |
+| command.pollingInterval                            | 从KMS后端同步存量secret实例的间隔时间                        | 120s                   |
+| image.repository                                   | 指定的ack-secret-manager 镜像仓库名称                        | acs/ack-secret-manager |
+| image.tag                                          | 指定的ack-secret-manager 镜像tag                             | v0.4.0                 |
+| image.pullPolicy                                   | 镜像拉取策略，默认为Always                                   | Always                 |
+| nameOverride                                       | 覆盖应用名称                                                 | nil                    |
+| fullnameOverride                                   | 覆盖应用全名                                                 | nil                    |
+| rbac.create                                        | 是否创建并使用RBAC资源，默认为true                           | true                   |
+| securityContext.fsGroup                            | 指定应用的security context配置                               | {}                     |
+| serviceAccount.create                              | 是否创建serviceaccount                                       | true                   |
+| serviceAccount.name                                | 指定创建serviceaccount的名称                                 | 自动生成                   |
+| serviceAccount.annotations                         | 指定添加serviceaccount annotation标签                        | nil                    |
+| podAnnotations                                     | 指定添加到pod中的annotation标签                              | {}                     |
+| podLabels                                          | 指定添加到pod中的Label标签                                   | {}                     |
+| replicaCount                                       | 控制器副本个数                                               | 1                      |
+| nodeSelector                                       | 指定的nodeSelector标签                                       | {}                     |
+| tolerations                                        | 指定的污点容忍配置                                           | []                     |
+| affinity                                           | 指定的Pod亲和性配置                                          | {}                     |
+| resources                                          | 指定的Pod requests和limits配置                               | {}                     |
+
+
+
+## 使用说明
+
+
+
+下文会通过在阿里云KMS凭据管家中添加一个测试凭据，并在目标集群中创建一个ExternalSecret实例来展示从凭据管家中导入密钥到集群中创建并同步Secret的过程：
+
+
+
+1. 在KMS凭据管家中添加凭证，可通过下面的阿里云CLI工具命令行完成，详细流程请参考[管理通用凭据](https://www.alibabacloud.com/help/zh/doc-detail/152003.html)
+
+```sh
 aliyun kms CreateSecret --SecretName test --SecretData 1234 --VersionId v1
-
 ```
 
-and then create a `hello-service-external-secret.yml` file:
+2.	创建ExternalSecret的测试实例，测试模板如下：
 
 ```yml
 apiVersion: 'alibabacloud.com/v1alpha1'
@@ -111,19 +118,19 @@ spec:
       versionStage: ACSCurrent
 ```
 
-Save the file and run:
+执行命令创建externalsecret测试实例：
 
 ```sh
 kubectl apply -f hello-service-external-secret.yml
 ```
 
-Wait a few minutes and verify that the associated `Secret` has been created:
+3.  查看目标secret是否创建成功：
 
 ```sh
 kubectl get secret hello-service -oyaml
 ```
 
-The `Secret` created by the controller should look like:
+如果创建成功，查看secret内容如下：
 
 ```yml
 apiVersion: v1
@@ -134,12 +141,11 @@ type: Opaque
 data:
   password: MTIzNA==
 ```
-If the flag `disablePolling` is not set to `true`, the controller would auto polling the secret from KMS backend with the interval set in `pollingInterval`
 
-#### jmes support
 
-To set the specific key-value pairs extract from a JSON-formatted secret. You can use `jmesPath` field to mount key-value pairs from a properly formatted secret value as individual secrets. For example: Consider you have a secret "testJson" in KMS Secrets Manager with JSON content as follows:
+4. 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
 
+5. 如果您希望解析一个JSON格式的secret并将其中指定的key-value对同步到k8s secret中，可以使用`jmesPath`字段。示例：假如您在KMS Secrets Manager中有如下JSON格式的secret：
 ```
 {
 	"username": "testuser",
@@ -147,7 +153,7 @@ To set the specific key-value pairs extract from a JSON-formatted secret. You ca
 }
 ```
 
-To fetch the username and password key pairs of this secret as individual secrets, use the jmesPath field as follows:
+为了解析其中的username和password键值对并将其独立同步到k8s secrets中，可以使用如下的jmesPath字段配置：
 
 ```
   data:
@@ -162,10 +168,12 @@ To fetch the username and password key pairs of this secret as individual secret
 
 If you use the jmesPath field, you must provide the following two sub-fields:
 
-- path: This required field is the [JMES path](https://jmespath.org/specification.html) to use for retrieval
-- objectAlias: This required field specifies the key name of the extracted value in the synced k8s secrets
+当您使用jmesPath字段时，必需指定下面两个子字段：
 
-The `Secret` created by the controller should look like:
+- path: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析json中的指定字段
+- objectAlias: 必需项，用于指定解析出的字段同步到k8s secret中的key名称
+
+同步后的secret实例如下:
 
 ```yml
 apiVersion: v1
@@ -179,6 +187,6 @@ data:
 ```
 
 ## Release Note
-| Version | Date       | Changes                                                                                       |
-|---------|------------|-----------------------------------------------------------------------------------------------|
-| `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path |
+| 版本号     | 变更时间        | 变更内容                    |
+|---------|-------------|-------------------------|
+| `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段 |

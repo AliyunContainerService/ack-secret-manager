@@ -37,6 +37,12 @@ env:
 #  ALICLOUD_OIDC_PROVIDER_ARN:
 #    secretKeyRef: alibaba-credentials
 #    key: oidcproviderarn
+#  ALICLOUD_REMOTE_ROLE_ARN:
+#     secretKeyRef: alibaba-credentials
+#     key: remoterolearn
+#  ALICLOUD_REMOTE_ROLE_SESSION_NAME:
+#     secretKeyRef: alibaba-credentials
+#     key: remoterolesessionname
 
 rbac:
   # Specifies whether RBAC resources should be created
@@ -59,12 +65,12 @@ replicaCount: 2
 
 image:
   repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.4.0
+  tag: v0.5.0
   pullPolicy: Always
 
 cleanupImage:
   repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager-cleanup
-  tag: v0.3.0
+  tag: v0.4.0
   pullPolicy: Always
 
 nameOverride: ""

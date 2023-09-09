@@ -16,14 +16,22 @@ limitations under the License.
 package utils
 
 import (
+	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io/ioutil"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	"net/http"
 	"regexp"
 	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/client-go/dynamic"
+	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
 const (
@@ -130,4 +138,39 @@ func CheckInstanceRam() (bool, error) {
 		return false, fmt.Errorf("received %d getting instance role", status)
 	}
 	return true, nil
+}
+
+func GetConfigFromSecret(ctx context.Context, r client.Client, secretRef *v1alpha1.SecretRef) ([]byte, error) {
+	if secretRef == nil {
+		return nil, fmt.Errorf("empty secretRef")
+	}
+	if secretRef.Key == "" || secretRef.Name == "" || secretRef.Namespace == "" {
+		return nil, fmt.Errorf("empty secretRef")
+	}
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, client.ObjectKey{
+		Namespace: secretRef.Namespace,
+		Name:      secretRef.Name,
+	}, secret)
+	if err != nil {
+		return nil, err
+	}
+	data, ok := secret.Data[secretRef.Key]
+	if !ok {
+		return nil, fmt.Errorf("key %v not found", secretRef.Key)
+	}
+	return data, nil
+}
+
+func JsonStr(o interface{}) string {
+	str, _ := json.Marshal(o)
+	return string(str)
+}
+
+// Ignore not found errors
+func IgnoreNotFoundError(err error) error {
+	if apierrors.IsNotFound(err) {
+		return nil
+	}
+	return err
 }
