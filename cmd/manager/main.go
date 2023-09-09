@@ -19,20 +19,25 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller"
-	"github.com/AliyunContainerService/ack-secret-manager/version"
+	"os"
+	"runtime"
+	"strings"
+	"time"
+
 	"github.com/operator-framework/operator-lib/leader"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
-	"os"
-	"runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
-	"strings"
-	"time"
+
+	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/kms"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/externalsecret"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+	"github.com/AliyunContainerService/ack-secret-manager/version"
 )
 
 var (
@@ -60,16 +65,16 @@ func main() {
 	var selectedBackend string
 	var watchNamespaces string
 	var excludeNamespaces string
-
-	backendCfg := backend.Config{}
+	var region string
+	var tokenRotationPeriod time.Duration
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
 	flag.BoolVar(&disablePolling, "disable-polling", false, "Disable auto polling external secret from kms.")
-	flag.DurationVar(&backendCfg.TokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
+	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
-	flag.StringVar(&backendCfg.Region, "region", "", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
 	flag.Parse()
@@ -88,13 +93,22 @@ func main() {
 		log.Error(err, "")
 		os.Exit(1)
 	}
-
-	backendClient, err := backend.NewBackendClient(ctx, selectedBackend, backendCfg)
+	instanceRegion, err := utils.GetRegion()
 	if err != nil {
-		log.Error(err, "could not build backend client")
-		os.Exit(1)
+		log.Error(err, "get region failed")
+	}
+	if region == "" || region != instanceRegion {
+		region = instanceRegion
+	}
+	for providerName, f := range backend.SupportProvider {
+		log.Info("new provider ", providerName)
+		f(region)
 	}
 
+	err = backend.NewProviderClientByENV(ctx, region)
+	if err != nil {
+		log.Error(err, "")
+	}
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -128,9 +142,7 @@ func main() {
 			watchNs[ns] = false
 		}
 	}
-	log.Info("backendClient is:", "backendClient", &backendClient)
-	esReconciler := controller.ExternalSecretReconciler{
-		Backend:              *backendClient,
+	esReconciler := externalsecret.ExternalSecretReconciler{
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
 		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
@@ -144,10 +156,20 @@ func main() {
 		log.Error(err, "unable to create controller", "controller", "ExternalSecret")
 		os.Exit(1)
 	}
-
+	scReconciler := secretstore.SecretStoreReconciler{
+		Client:               mgr.GetClient(),
+		Scheme:               mgr.GetScheme(),
+		Log:                  ctrl.Log.WithName("controllers").WithName("SecretStore"),
+		Ctx:                  ctx,
+		ReconciliationPeriod: reconcilePeriod,
+	}
+	if err = (&scReconciler).SetupWithManager(mgr, reconcileCount); err != nil {
+		log.Error(err, "unable to create controller", "controller", "SecretStore")
+		os.Exit(1)
+	}
 	//not start auto sync job if disable polling
 	if !disablePolling {
-		esReconciler.InitSecretStore()
+		esReconciler.InitSecretCache()
 		go esReconciler.SecretRotationJob()
 	}
 
