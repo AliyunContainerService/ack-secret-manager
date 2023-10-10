@@ -163,6 +163,10 @@ func GetConfigFromSecret(ctx context.Context, r client.Client, secretRef *v1alph
 }
 
 func JsonStr(o interface{}) string {
+	temp, ok := o.(string)
+	if ok {
+		return temp
+	}
 	str, _ := json.Marshal(o)
 	return string(str)
 }

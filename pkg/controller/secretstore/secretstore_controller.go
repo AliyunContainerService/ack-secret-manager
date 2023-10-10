@@ -19,7 +19,6 @@ package secretstore
 import (
 	"context"
 	"fmt"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 // SecretStoreReconciler reconciles a SecretStore object

@@ -2,8 +2,9 @@ package externalsecret
 
 import (
 	"fmt"
-	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"testing"
+
+	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
 var TEST_OBJECT_NAME = "jsonObject"

@@ -325,7 +325,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 	for _, data := range dataSources {
 		clientName := backend.EnvClient
 		if data.Extract.SecretStoreRef != nil {
-			clientName = fmt.Sprintf("%s/%s", data.Extract.SecretStoreRef.Namespace, data.Extract.SecretStoreRef.Namespace)
+			clientName = fmt.Sprintf("%s/%s", data.Extract.SecretStoreRef.Namespace, data.Extract.SecretStoreRef.Name)
 		}
 		klog.Infof("client name %v,data key %v", clientName, data.Extract.Key)
 		secretClient, err := provider.GetClient(clientName)
@@ -361,7 +361,6 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSecret) (bool, error) {
 	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
 	log := r.Log.WithValues("secret", esIndex)
-	// 兼容老版本，用户可能不会去填 provider 字段，默认 kms
 	providerName := externalSec.Spec.Provider
 	if providerName == "" {
 		providerName = kmsprovider.ProviderName

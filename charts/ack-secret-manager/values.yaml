@@ -64,12 +64,12 @@ serviceAccount:
 replicaCount: 2
 
 image:
-  repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager
+  repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
   tag: v0.5.0
   pullPolicy: Always
 
 cleanupImage:
-  repository: registry.cn-hangzhou.aliyuncs.com/acs/ack-secret-manager-cleanup
+  repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager-cleanup
   tag: v0.4.0
   pullPolicy: Always
 
