@@ -77,4 +77,3 @@ tags
 # End of https://www.gitignore.io/api/go,vim,emacs,visualstudiocode
 .idea
 temp.yaml
-values.yaml

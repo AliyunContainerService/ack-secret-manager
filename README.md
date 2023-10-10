@@ -2,13 +2,13 @@
 
 English | [简体中文](./README-zh_CN.md)
 
-[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) can help you convert the key credentials stored in [Alibaba Cloud KMS Credential Manager](https://www.alibabacloud.com/help/en/key-management-service) to securely add secrets in Kubernetes. In the cluster and realize automatic synchronization of key data, you can introduce the ciphertext stored in the credential manager into the application in the form of mounting Secret in the application Pod to avoid the spread of sensitive data in the application development and construction process and leaks.
+[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) can help you import key credentials stored in [Alibaba Cloud KMS  Secrets Manager](https://www.alibabacloud.com/help/en/key-management-service) into the cluster in the form of Kubernetes native Secret objects and achieve automatic synchronization of key data, you can introduce the ciphertext stored in the Secrets Manager into the application in the form of mounting Secret in the application Pod to avoid the spread of sensitive data in the application development and construction process and leaks.
 
 
 
 ## Install
 
-Make sure that the current account has sufficient permissions to access the Alibaba Cloud Credential Manager service. ack-secret-manager supports two methods: shared KMS and dedicated KMS to synchronize the Credential Manager's credentials.
+Make sure that the current account has sufficient permissions to access the Alibaba Cloud KMS Secrets Manager. ack-secret-manager supports two methods: shared KMS and dedicated KMS to synchronize the Secrets Manager's credentials.
 
 1. There are two ways to set shared KMS access permissions:
 
@@ -39,7 +39,7 @@ Make sure that the current account has sufficient permissions to access the Alib
 
      * [Enable RRSA functionality](https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control#section-ywl-59g-j8h)
 
-     * [Use RRSA function](https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control#section-rmr-eeh-878): including creating the corresponding RAM role for the specified serviceaccount, the trust policy of the role, and authorizing the role
+     * [Use RRSA function](https://www.alibabacloud.com/help/en/container-service-for-kubernetes/latest/use-rrsa-to-enforce-access-control#section-rmr-eeh-878): Create the corresponding RAM role for the specified serviceaccount, set the trust policy for the RAM role, and authorize the RAM role
 
 2. Set dedicated KMS access permissions. For details, see [Access a KMS instance by using an AAP](https://www.alibabacloud.com/help/en/key-management-service/latest/aap?spm=a2c63.l28256.0.0.2d881b76SOifvo)
 
@@ -49,7 +49,7 @@ Make sure that the current account has sufficient permissions to access the Alib
 
    * Select the target cluster, namespace, and release name to be installed;
 
-   * Configure custom parameters on the parameter configuration page, including `rrsa.enable` in values.yaml and related parameters in envVarsFromSecret. For parameter descriptions, see the configuration instructions below;
+   * Configure custom parameters on the parameter configuration page, including `rrsa.enable` in values.yaml and related parameters in `envVarsFromSecret`. For parameter descriptions, see the **configuration instructions** below;
 
    * Click the **OK** button to complete the installation.
 
@@ -63,7 +63,7 @@ Make sure that the current account has sufficient permissions to access the Alib
 
 1. Log in to the Container Service console;
 2. Select the target cluster and click to enter the cluster details page;
-3. Select **Applications** -> **Helm** in the navigation bar on the left, find the **Update** buttoncorresponding to ack-secret-manager, and click the **Delete** button in the operation bar to delete it.
+3. Select **Applications** -> **Helm** in the navigation bar on the left, find the **Delete** button corresponding to ack-secret-manager, and click the **Delete** button in the operation bar to delete it.
 
 ## Configuration instructions
 
@@ -80,7 +80,7 @@ Make sure that the current account has sufficient permissions to access the Alib
 | envVarsFromSecret.ALICLOUD_REMOTE_ROLE_ARN          | You can specify the RAM Role Arn of another account by setting the ALICLOUD_REMOTE_ROLE_ARN variable for role playing when pulling credential data across accounts. |                        |
 | envVarsFromSecret.ALICLOUD_REMOTE_ROLE_SESSION_NAME | You can specify the RAM Role Session Name by setting the ALICLOUD_REMOTE_ROLE_SESSION_NAME variable to perform role play when pulling credential data across accounts. |                        |
 | rrsa.enable                                         | Whether to enable the RRSA feature, the default is false. After enabling, you need to configure the ALICLOUD_ROLE_ARN and ALICLOUD_OIDC_PROVIDER_ARN parameters in envVarsFromSecret. | false                  |
-| command.backend                                     | The docked external key management system backend currently only supports Alibaba Cloud Credential Manager, configured as alicloud-kms | alicloud-kms           |
+| command.backend                                     | The docked external key management system backend currently only supports Alibaba Cloud Secrets Manager, configured as alicloud-kms | alicloud-kms           |
 | command.reconcilePeriod                             | The interval for the controller to re-coordinate the externalSecret instance, the default is 5 seconds | 5s                     |
 | command.reconcileCount                              | Specify the number of workers to concurrently coordinate the externalSecret instance. The default is 1 | 1                      |
 | command.tokenRotationPeriod                         | Polling time to check whether the KMS client access STS token has expired | 120s                   |
@@ -109,13 +109,13 @@ Make sure that the current account has sufficient permissions to access the Alib
 
 ## Instructions for use
 
-The following will add a test credential in Alibaba Cloud KMS Credential Manager, synchronize the credentials through dedicated KMS and shared KMS, and demonstrate some extended functions.
+The following will add a test credential in Alibaba Cloud KMS Secrets Manager, synchronize the credentials through dedicated KMS and shared KMS, and demonstrate some extended functions.
 
-ack-secret-manager involves two CRDs. SecretStore is used to store access credentials (such as RRSA, ClientKey, AK configuration, etc.), and ExternalSecret is used to store basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore. It ensures the separation of permissions and data and enhances the flexibility of use. See below for details **CRD configuration introduction**
+ack-secret-manager involves two CRDs. SecretStore is used to store access credentials (such as RRSA configuration, ClientKey, AK configuration, etc.), and ExternalSecret is used to store basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore. It ensures the separation of permissions and data and enhances the flexibility of use. See below for details **CRD configuration introduction**
 
 1. Create credentials
 
-   Add the following credentials in the KMS Credential Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
+   Add the following credentials in the KMS Secrets Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
 
    ```txt
    SecretName: test1
@@ -188,9 +188,9 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      type: Opaque
      ```
 
-   - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Credential Manager and wait for a while to check whether the target secret has been synchronized.
+   - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Secrets Manager and wait for a while to check whether the target secret has been synchronized.
 
-   - If you want to parse a JSON-formatted secret and synchronize the key-value pairs specified in it to the k8s secret, you can use the `jmesPath` field. The following is an example using the jmesPath field, which we deploy in the cluster
+   - If you want to parse a JSON-formatted secret and synchronize the key-value pairs specified in it to the k8s secret, you can use the `jmesPath` field. The following is an example using the `jmesPath` field, which we deploy in the cluster
 
      ```yaml
      apiVersion: 'alibabacloud.com/v1alpha1'
@@ -239,9 +239,9 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
    - When you use the `jmesPath` field, you must specify the following two subfields:
 
-     - path: Required, parses the specified field in json based on the [JMES path](https://jmespath.org/specification.html) specification
+     - `path`: Required, parses the specified field in json based on the [JMES path](https://jmespath.org/specification.html) specification
 
-     - objectAlias: Required, used to specify the parsed field to be synchronized to the key name in the k8s secret
+     - `objectAlias`: Required, used to specify the parsed field to be synchronized to the key name in the k8s secret
 
    - The shared KMS currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in `SecretStore.Spec.KMS.KMSAuth`. The following is a sample SecretStore
 
@@ -384,7 +384,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **spec**
 
-| crd field   | description                                                  | required |
+| parameter   | description                                                  | required |
 | ----------- | ------------------------------------------------------------ | -------- |
 | provider    | The target cloud products for syncing credentials, such as KMS | no       |
 | data        | Data source (identifier for the target data)                 | no       |
@@ -393,7 +393,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **data**
 
-| crd field      | description                                                  | required |
+| parameter      | description                                                  | required |
 | -------------- | ------------------------------------------------------------ | -------- |
 | key            | The unique identifier for the target credential, such as the key for KMS credentials | yes      |
 | name           | The corresponding key for the credentials in the secret data of the cluster | no       |
@@ -404,28 +404,28 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **dataProcess（Data source requiring special processing.）**
 
-| crd field   | description                                                  | required |
+| parameter   | description                                                  | required |
 | ----------- | ------------------------------------------------------------ | -------- |
 | extract     | Parsing JSON for the target credential without requiring the user to specify the JSON key | no       |
 | replaceRule | Replacing keys of the parsed secret based on specific rules to prevent illegal keys from being stored in the Kubernetes Secret | no       |
 
 **replaceRule（The content replacement used for the Secret Key.）**
 
-| crd field | description                                                  | required |
+| parameter | description                                                  | required |
 | --------- | ------------------------------------------------------------ | -------- |
 | target    | The string used for replacement                              | yes      |
 | source    | The string that needs to be replaced, which can be a regular expression | yes      |
 
 **jmesPath**
 
-| crd field   | description                                                  | required |
+| parameter   | description                                                  | required |
 | ----------- | ------------------------------------------------------------ | -------- |
 | path        | JMESPath expression that allows users to specify the JSON key | yes      |
 | objectAlias | The data key corresponding to the Kubernetes Secret where the data will be stored | yes      |
 
 **secretStoreRef**
 
-| crd field | description                         | required |
+| parameter | description                         | required |
 | --------- | ----------------------------------- | -------- |
 | name      | The specified SecretStore name      | yes      |
 | namespace | The specified SecretStore namespace | Yes      |
@@ -434,20 +434,20 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **spec**
 
-| crd field | description                                                  | required |
+| parameter | description                                                  | required |
 | --------- | ------------------------------------------------------------ | -------- |
 | KMS       | Representing the target cloud product as KMS (Key Management Service) | no       |
 
 **KMS**
 
-| crd field        | description                                                  | required |
+| parameter        | description                                                  | required |
 | ---------------- | ------------------------------------------------------------ | -------- |
 | KMSAuth          | Credentials required to access KMS (Key Management Service) under a shared KMS | no       |
 | dedicatedKMSAuth | Credentials required to access KMS (Key Management Service) under a dedicated KMS | no       |
 
 **KMSAuth**
 
-| crd field                | description                         | required |
+| parameter                | description                         | required |
 | ------------------------ | ----------------------------------- | -------- |
 | accessKey                | AccessKey                           | no       |
 | accessKeySecret          | AccessKey Secret                    | no       |
@@ -460,9 +460,9 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **dedicatedKMSAuth**
 
-| crd field        | description                              | required |
+| parameter        | description                              | required |
 | ---------------- | ---------------------------------------- | -------- |
-| protocol         | Https                                    | yes      |
+| protocol         | https                                    | yes      |
 | endpoint         | Kms instance ID                          | yes      |
 | ca               | User root CA certificate, base64 encoded | no       |
 | ignoreSSL        | Whether to ignore ssl authentication     | no       |
@@ -471,7 +471,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **SecretRef（sensitive access credentials are stored in K8S secret）**
 
-| crd field | description          | required |
+| parameter | description          | required |
 | --------- | -------------------- | -------- |
 | name      | k8s secret name      | yes      |
 | namespace | k8s secret namaspace | yes      |
@@ -482,4 +482,4 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 | Version | Date       | Changes                                                      |
 | ------- | ---------- | ------------------------------------------------------------ |
 | `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path |
-| `0.5.0` | 2023/10/10 | Support for dedicated KMS credential synchronization, support for multi-instance access credentials, support for self-resolving credentials and key rule replacement, and support for shared KMS cross-account credential synchronization. |
+| `0.5.0` | 2023/10/10 | 1.dedicated KMS credential synchronization<br />2.multiple Alibaba Cloud access credentials management,<br />3.self-resolving credentials and key rule replacement<br />4.shared KMS cross-account credential synchronization. |

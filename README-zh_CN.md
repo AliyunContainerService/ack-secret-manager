@@ -2,7 +2,7 @@
 
 # ACK Secret Manager
 
-[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导致到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
+[ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据以K8s原生Secret对象的形式导入到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
 
 
@@ -41,7 +41,7 @@
 
      * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
 
-     * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：包括为指定的serviceaccount创建对应的RAM角色，角色的信任策略以及为角色授权
+     * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：为指定的 serviceaccount 创建对应的 RAM 角色，为 RAM 角色设置信任策略，并为 RAM 角色授权
 
 2. 设置专属网关访问权限，详情见[通过应用接入点访问KMS实例](https://help.aliyun.com/document_detail/604467.html?spm=a2c4g.2252257.0.0.7f047495H2lmEh)
 
@@ -51,7 +51,7 @@
 
    * 选择需要安装的目标集群和命名空间、发布名称；
 
-   * 在参数配置页面进行自定义参数配置，包括 values.yaml 中的`rrsa.enable`以及配置 envVarsFromSecret 中的相关参数，参数说明参见下方的配置说明；
+   * 在参数配置页面进行自定义参数配置，包括 values.yaml 中的`rrsa.enable`以及配置 `envVarsFromSecret` 中的相关参数，参数说明参见下方的**配置说明**；
 
    * 点击**确定**按钮完成安装。
 
@@ -192,7 +192,7 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
    - 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
 
-   - 如果您希望解析一个 JSON 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用`jmesPath`字段。以下是一个使用 jmesPath 字段的样例，我们将其部署在集群中
+   - 如果您希望解析一个 JSON 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用`jmesPath`字段。以下是一个使用 `jmesPath` 字段的样例，我们将其部署在集群中
 
      ```yaml
      apiVersion: 'alibabacloud.com/v1alpha1'
@@ -241,9 +241,9 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
    - 当您使用`jmesPath`字段时，必需指定下面两个子字段：
 
-     - path: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json 中的指定字段
+     - `path`: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json 中的指定字段
 
-     - objectAlias: 必需项，用于指定解析出的字段同步到 k8s secret 中的 key 名称
+     - `objectAlias`: 必需项，用于指定解析出的字段同步到 k8s secret 中的 key 名称
 
    - 共享网关当前支持跨账号同步凭据，在 `SecretStore.Spec.KMS.KMSAuth` 中配置 `remoteRamRoleArn`，`remoteRamRoleSessionName` 即可，以下为样例 SecretStore
 
@@ -486,4 +486,4 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 | 版本号  | 变更时间       | 变更内容                                                     |
 | ------- | -------------- | ------------------------------------------------------------ |
 | `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段                       |
-| `0.5.0` | 2023年10月10日 | 支持专属版 KMS 凭据同步、支持多实例访问凭据、支持凭据自解析与键规则替换、支持共享版 KMS 跨账号凭据同步 |
+| `0.5.0` | 2023年10月10日 | 1.支持专属版 KMS 凭据同步<br />2.多阿里云访问凭据管理<br />3.凭据自解析与键规则替换<br />4.共享版 KMS 跨账号凭据同步 |

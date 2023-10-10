@@ -3,8 +3,10 @@ package externalsecret
 import (
 	"encoding/json"
 	"fmt"
-	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+
 	"github.com/jmespath/go-jmespath"
+
+	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
 func getJsonSecrets(jmesObj []api.JMESPathObject, secretValue, key string) (jsonMap map[string]string, err error) {
