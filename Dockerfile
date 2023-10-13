@@ -1,4 +1,4 @@
-FROM golang:1.16.12 as builder
+FROM golang:1.19.3-buster as builder
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GO111MODULE off
 WORKDIR /go/src/github.com/AliyunContainerService/ack-secret-manager

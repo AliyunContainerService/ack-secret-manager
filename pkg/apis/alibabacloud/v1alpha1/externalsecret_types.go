@@ -24,20 +24,36 @@ import (
 // ExternalSecretSpec defines the desired state of ExternalSecret
 // +k8s:openapi-gen=true
 type ExternalSecretSpec struct {
-	// Important: Run "operator-sdk generate k8s" to regenerate code after modifying this file
-	// Add custom validation using kubebuilder tags: https://book-v1.book.kubebuilder.io/beyond_basics/generating_crd.html
-	Data []DataSource `json:"data,omitempty"`
-	Type string       `json:"type,omitempty"`
+	Provider    string        `json:"provider,omitempty"`
+	Data        []DataSource  `json:"data,omitempty"`
+	DataProcess []DataProcess `json:"dataProcess,omitempty"`
+	Type        string        `json:"type,omitempty"`
 }
 
 type DataSource struct {
-	Key          string `json:"key"`
-	Name         string `json:"name"`
-	VersionStage string `json:"versionStage,omitempty"`
-	VersionId    string `json:"versionId,omitempty"`
-
+	SecretStoreRef *SecretStoreRef `json:"secretStoreRef,omitempty"`
+	Key            string          `json:"key"`
+	Name           string          `json:"name,omitempty"`
+	VersionStage   string          `json:"versionStage,omitempty"`
+	VersionId      string          `json:"versionId,omitempty"`
 	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
 	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
+}
+
+type SecretStoreRef struct {
+	Name      string `json:"name"`
+	Namespace string `json:"namespace"`
+}
+
+type DataProcess struct {
+	Extract *DataSource `json:"extract,omitempty"`
+	// +optional
+	ReplaceKey []ReplaceRule `json:"replaceRule,omitempty"`
+}
+
+type ReplaceRule struct {
+	Target string `json:"target"`
+	Source string `json:"source"`
 }
 
 // ExternalSecretStatus defines the observed state of ExternalSecret
@@ -69,7 +85,7 @@ type ExternalSecretList struct {
 	Items           []ExternalSecret `json:"items"`
 }
 
-//An individual json key value pair to mount
+// An individual json key value pair to mount
 type JMESPathObject struct {
 	//JMES path to use for retrieval
 	Path string `json:"path"`
