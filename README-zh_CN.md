@@ -303,6 +303,8 @@ ack-secret-manager 包含两种 CRD，其中SecretStore 用于存放访问凭据
   type: Opaque
   ```
 
+## 安全
+对于发现的安全漏洞，请发送邮件至**kubernetes-security@service.aliyun.com**，您可在[SECURITY.md](./SECURITY.md)文件中找到更多信息。
 
 ## Release Note
 

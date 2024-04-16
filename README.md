@@ -8,30 +8,30 @@ English | [简体中文](./README-zh_CN.md)
 
 ## Install
 
-1. Please make sure that the credentials used by the ack-secret-manager have enough permissions to access the Alibaba Cloud KMS Secrets Manager. You can use the following two configuration methods, and we recommend you to use the RRSA method to achieve authorization in the Pod level.
+1. Please make sure that the credentials used by the ack-secret-manager have enough permissions to access the Alibaba Cloud KMS Secrets Manager. You can use the following two configuration methods, and we recommend you to use the second **RRSA** method to achieve authorization in the Pod level.
 
-    - Add permissions to the WorkerRole corresponding to the cluster
+- Add permissions to the WorkerRole corresponding to the cluster
 
-        - Log in to the Container Service console
+    - Log in to the Container Service console
 
-        - Select the cluster to enter the cluster details page
+    - Select the cluster to enter the cluster details page
 
-        - Navigate to the **Cluster Resources** page in the cluster information. Once there, click on the Worker RAM role with the corresponding name **KubernetesWorkerRole-xxxxxxxxxxxxxxx**. This will automatically take you to the console page associated with the RAM role.
+    - Navigate to the **Cluster Resources** page in the cluster information. Once there, click on the Worker RAM role with the corresponding name **KubernetesWorkerRole-xxxxxxxxxxxxxxx**. This will automatically take you to the console page associated with the RAM role.
 
-        - Add kms RAM policy below into the policy bind to the worker role
+    - Add kms RAM policy below into the policy bind to the worker role
 
-          ```json
-          {
-              "Action": [
-                 "kms:GetSecretValue",
-                 "kms:Decrypt"
-              ],
-              "Resource": [
-                  "*"
-              ],
-              "Effect": "Allow"
-          }
-          ```
+      ```json
+      {
+          "Action": [
+             "kms:GetSecretValue",
+             "kms:Decrypt"
+          ],
+          "Resource": [
+              "*"
+          ],
+          "Effect": "Allow"
+      }
+      ```
 
 
 - Implement Pod dimension authorization through [RRSA method](https://www.alibabacloud.com/help/en/ack/ack-managed-and-ack-dedicated/user-guide/use-rrsa-to-authorize-pods-to-access-different-cloud-services)
@@ -45,13 +45,14 @@ English | [简体中文](./README-zh_CN.md)
     * Select **Marketplace** -> **Marketplace** in the left navigation bar, enter **ack-secret-manager** in the search bar, and select to enter the application page;
 
 
-* Select the target cluster, namespace, and release name to be installed;
+     * Select the target cluster, namespace, and release name to be installed;
 
 
-* Configure custom parameters on the parameter configuration page, including `rrsa.enable` in values.yaml and related parameters in `envVarsFromSecret`. For parameter descriptions, see the **configuration instructions** below;
+     * Configure custom parameters on the parameter configuration page, including `rrsa.enable` in values.yaml and related parameters in `envVarsFromSecret`. For parameter descriptions, see the **configuration instructions** below;
 
 
-* Click the **OK** button to complete the installation.
+     * Click the **OK** button to complete the installation.
+
 
 ## Upgrade
 
@@ -311,6 +312,8 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      type: Opaque
      ```
 
+## Security
+Please report vulnerabilities by email to **kubernetes-security@service.aliyun.com**. Also see our [SECURITY.md](./SECURITY.md) file for details.
 
 ## Release Note
 

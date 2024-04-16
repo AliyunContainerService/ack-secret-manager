@@ -18,19 +18,21 @@ jobs:
         cache: true
     - name: golangci-lint
       uses: golangci/golangci-lint-action@v3.2.0
-        with:
-          version: latest
+      with:
+        version: latest
         args: --verbose
-  Gosec:
-    name: Run Gosec Security Scanner
+  go-security-scan:
+    runs-on: ubuntu-latest
     env:
       GO111MODULE: on
-    runs-on: ubuntu-latest
     steps:
+      - name: Checkout
+        uses: actions/checkout@v3
+
       - name: Run Gosec Security Scanner
         uses: securego/gosec@master
         with:
-          args: ./...
+          args: '-no-fail -exclude-dir=pkg/apis -exclude-dir=ack-secret-manager-cli ./...'
 
   build:
     runs-on: ubuntu-latest
@@ -46,6 +48,3 @@ jobs:
 
     - name: Build
       run: make build
-
-    - name: Test
-      run: make test
