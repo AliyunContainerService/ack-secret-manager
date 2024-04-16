@@ -46,8 +46,8 @@ var (
 )
 
 func init() {
-	corev1.AddToScheme(scheme)
-	apis.AddToScheme(scheme)
+	_ = corev1.AddToScheme(scheme)
+	_ = apis.AddToScheme(scheme)
 	// +kubebuilder:scaffold:scheme
 }
 
@@ -169,7 +169,11 @@ func main() {
 	}
 	//not start auto sync job if disable polling
 	if !disablePolling {
-		esReconciler.InitSecretCache()
+		err := esReconciler.InitSecretCache()
+		if err != nil {
+			log.Error(err, "failed to init secret cache")
+			os.Exit(1)
+		}
 		go esReconciler.SecretRotationJob()
 	}
 

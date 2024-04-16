@@ -313,7 +313,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 			out[k] = v
 		}
 	}
-	if errors != nil && len(errors) != 0 {
+	if len(errors) != 0 {
 		return out, fmt.Errorf("%v", errors)
 	}
 	return out, nil
@@ -352,7 +352,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 			out[k] = v
 		}
 	}
-	if errors != nil && len(errors) != 0 {
+	if len(errors) != 0 {
 		return out, fmt.Errorf("%v", errors)
 	}
 	return out, nil
@@ -372,10 +372,8 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 		if err != nil {
 			klog.Errorf("get external secret error %v", err)
 		}
-		if out != nil {
-			for k, v := range out {
-				secretMap[k] = v
-			}
+		for k, v := range out {
+			secretMap[k] = v
 		}
 	}
 	if externalSec.Spec.DataProcess != nil && len(externalSec.Spec.DataProcess) != 0 {
@@ -383,10 +381,8 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 		if err != nil {
 			klog.Errorf("get external secret error %v", err)
 		}
-		if out != nil {
-			for k, v := range out {
-				secretMap[k] = v
-			}
+		for k, v := range out {
+			secretMap[k] = v
 		}
 	}
 	// Get the actual secret from Kubernetes
