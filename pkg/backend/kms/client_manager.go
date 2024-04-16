@@ -39,7 +39,6 @@ func (m *Manager) RegisterRamProvider(clientName string, stopper provider.Stoppe
 	}
 	m.ramProvider[clientName] = stopper
 	klog.Infof("register provider %v success", clientName)
-	return
 }
 
 func (m *Manager) StopProvider(clientName string) {

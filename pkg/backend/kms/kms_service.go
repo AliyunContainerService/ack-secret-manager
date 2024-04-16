@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"github.com/jmespath/go-jmespath"
 	"math"
 	"regexp"
 	"time"
@@ -13,7 +14,6 @@ import (
 	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	dkmsopenapiutil "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/openapi-util"
 	dkms "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/sdk"
-	"github.com/jmespath/go-jmespath"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -25,8 +25,6 @@ const (
 	REJECTED_THROTTLING           = "Rejected.Throttling"
 	SERVICE_UNAVAILABLE_TEMPORARY = "ServiceUnavailableTemporary"
 	INTERNAL_FAILURE              = "InternalFailure"
-	MAX_RETRY_TIMES               = 5
-	KMSVPCDomain                  = "%s.cryptoservice.kms.aliyuncs.com"
 )
 
 var (
@@ -181,21 +179,18 @@ func (c *KMSClient) getExternalDataFromKMS(data v1alpha1.DataSource) ([]byte, er
 		req.VersionId = tea.String(data.VersionId)
 	}
 	resp, err := c.kmsClient.GetSecretValue(req)
-	for retryTimes := 1; retryTimes < MAX_RETRY_TIMES; retryTimes++ {
-		if err != nil {
-			if !judgeNeedRetry(err) {
-				klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
+	if err != nil {
+		if !judgeNeedRetry(err) {
+			klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
+			return nil, err
+		} else {
+			time.Sleep(getWaitTimeExponential(1))
+			resp, err = c.kmsClient.GetSecretValue(req)
+			if err != nil {
+				klog.Errorf("retry to get secret value from kms failed,key %v,error %v", data.Key, err)
 				return nil, err
-			} else {
-				time.Sleep(getWaitTimeExponential(retryTimes))
-				resp, err = c.kmsClient.GetSecretValue(req)
-				if err != nil && retryTimes == MAX_RETRY_TIMES-1 {
-					klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
-					return nil, err
-				}
 			}
 		}
-		break
 	}
 	if *resp.Body.SecretDataType == utils.BinaryType {
 		klog.Errorf("not support binary type yet,key %v", data.Key)
@@ -221,21 +216,18 @@ func (c *KMSClient) getExternalDataFromDKMS(data v1alpha1.DataSource) ([]byte, e
 
 	runtimeOptions := &dkmsopenapiutil.RuntimeOptions{}
 	resp, err := c.dedicatedClient.GetSecretValueWithOptions(req, runtimeOptions)
-	for retryTimes := 1; retryTimes < MAX_RETRY_TIMES; retryTimes++ {
-		if err != nil {
-			if !judgeNeedRetry(err) {
-				klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
+	if err != nil {
+		if !judgeNeedRetry(err) {
+			klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
+			return nil, err
+		} else {
+			time.Sleep(getWaitTimeExponential(1))
+			resp, err = c.dedicatedClient.GetSecretValueWithOptions(req, runtimeOptions)
+			if err != nil {
+				klog.Errorf("retry to get secret value from kms failed,key %v,error %v", data.Key, err)
 				return nil, err
-			} else {
-				time.Sleep(getWaitTimeExponential(retryTimes))
-				resp, err = c.dedicatedClient.GetSecretValueWithOptions(req, runtimeOptions)
-				if err != nil && retryTimes == MAX_RETRY_TIMES-1 {
-					klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
-					return nil, err
-				}
 			}
 		}
-		break
 	}
 	if *resp.SecretDataType == utils.BinaryType {
 		klog.Errorf("not support binary type yet,key %v", data.Key)

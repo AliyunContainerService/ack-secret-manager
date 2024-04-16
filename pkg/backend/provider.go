@@ -59,7 +59,7 @@ func NewProviderClientByENV(ctx context.Context, region string) error {
 		provider.Register(EnvClient, secretClient)
 		return true
 	})
-	if errs != nil && len(errs) != 0 {
+	if len(errs) != 0 {
 		return fmt.Errorf("new provider client by env error %v", errs)
 	}
 	return nil
