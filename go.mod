@@ -8,7 +8,7 @@ require (
 	github.com/alibabacloud-go/kms-20160120/v2 v2.0.0
 	github.com/alibabacloud-go/tea v1.2.1
 	github.com/aliyun/alibaba-cloud-sdk-go v1.61.127
-	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.4.0
+	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.5.1
 	github.com/aliyun/credentials-go v1.2.2
 	github.com/go-logr/logr v0.3.0
 	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af
