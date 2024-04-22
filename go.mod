@@ -10,7 +10,7 @@ require (
 	github.com/aliyun/alibaba-cloud-sdk-go v1.61.127
 	github.com/aliyun/alibabacloud-dkms-gcs-go-sdk v0.4.0
 	github.com/aliyun/credentials-go v1.2.2
-	github.com/go-logr/logr v0.3.0
+	github.com/go-logr/logr v1.4.1
 	github.com/jmespath/go-jmespath v0.0.0-20180206201540-c2b33e8439af
 	github.com/onsi/ginkgo v1.14.1
 	github.com/onsi/gomega v1.10.2
