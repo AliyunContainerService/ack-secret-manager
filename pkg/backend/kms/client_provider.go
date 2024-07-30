@@ -36,15 +36,17 @@ func init() {
 // Provider provides the ability to generate kms clients and manage kms clients
 type Provider struct {
 	*Manager
-	region string
-	name   string
+	region             string
+	name               string
+	maxConcurrentCount int
 }
 
-func NewProvider(region string) {
+func NewProvider(opts *backend.ProviderOptions) {
 	provider := &Provider{
-		Manager: NewManager(region),
-		region:  region,
-		name:    ProviderName,
+		Manager:            NewManager(opts.Region),
+		region:             opts.Region,
+		name:               ProviderName,
+		maxConcurrentCount: 5,
 	}
 	backend.RegisterProvider(ProviderName, provider)
 }

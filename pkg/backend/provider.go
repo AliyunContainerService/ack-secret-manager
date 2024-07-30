@@ -12,7 +12,12 @@ import (
 
 const EnvClient = "env.client"
 
-type CreateProvider func(region string)
+type CreateProvider func(opt *ProviderOptions)
+
+type ProviderOptions struct {
+	Region        string
+	MaxConcurrent int
+}
 
 var (
 	SupportProvider map[string]CreateProvider

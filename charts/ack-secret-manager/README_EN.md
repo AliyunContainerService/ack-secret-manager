@@ -87,6 +87,7 @@ Make sure that the current account has sufficient permissions to access the Alib
 | command.region                                      | Pull secret credentials from the specified region            |                        |
 | command.disablePolling                              | Turn off automatic synchronization of pulling the latest credential content from the KMS backend, default false | false                  |
 | command.pollingInterval                             | The interval for synchronizing existing secret instances from the KMS backend | 120s                   |
+| command.maxConcurrentSecretPulls                    | Maximum concurrent synchronization of secrets                | 5                      |
 | image.repository                                    | Specified ack-secret-manager mirror warehouse name           | acs/ack-secret-manager |
 | image.tag                                           | Specified ack-secret-manager image tag                       | v0.5.0                 |
 | image.pullPolicy                                    | Image pull strategy, default is Always                       | Always                 |
@@ -483,3 +484,5 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 | ------- | ---------- | ------------------------------------------------------------ |
 | `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path |
 | `0.5.0` | 2023/10/10 | 1.dedicated KMS credential synchronization<br />2.multiple Alibaba Cloud access credentials management,<br />3.self-resolving credentials and key rule replacement<br />4.shared KMS cross-account credential synchronization. |
+| `0.5.1` | 2023/10/18 | Function and performance optimization                        |
+| `0.5.2` | 2024/08/01 | Large-scale resource synchronization concurrency optimization |

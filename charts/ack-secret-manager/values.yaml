@@ -11,6 +11,7 @@ command:
   region:
   disablePolling: false
   pollingInterval: 120s
+  maxConcurrentSecretPulls: 5
 # watchamespaces:
 # excludeamespaces:
 
@@ -65,7 +66,7 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.5.0
+  tag: v0.5.2
   pullPolicy: Always
 
 cleanupImage:
