@@ -19,6 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"golang.org/x/sync/semaphore"
 	"reflect"
 	"sync"
 	"time"
@@ -57,6 +58,7 @@ type ExternalSecretReconciler struct {
 	rotationTicker       *time.Ticker
 	secrets              sync.Map  // secrets map is the cache for secrets.
 	closing              chan bool // close channel.
+	ConcurrentController *semaphore.Weighted
 }
 
 var (
@@ -255,9 +257,16 @@ func (r *ExternalSecretReconciler) rotate() {
 		es := v.(*api.ExternalSecret)
 		r.Log.Info("rotate checking secret", "index", k)
 		// Re-generate secret if update in kms secret-manager.
+		timeoutContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+		if err := r.ConcurrentController.Acquire(timeoutContext, 1); err != nil {
+			cancel()
+			return true
+		}
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
+			defer r.ConcurrentController.Release(1)
+			defer cancel()
 			updated, _ := r.syncIfNeedUpdate(es)
 			if updated {
 				secretMap.Store(fmt.Sprintf("%s/%s", es.Namespace, es.Name), es)

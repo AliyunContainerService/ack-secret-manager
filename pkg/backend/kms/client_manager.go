@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"k8s.io/klog"
 
@@ -35,7 +36,10 @@ func (m *Manager) RegisterRamProvider(clientName string, stopper provider.Stoppe
 	defer m.ramLock.Unlock()
 	providerIns, ok := m.ramProvider[clientName]
 	if ok {
-		providerIns.Stop(context.Background())
+		timeoutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+		// cancel is earlier than m.ramLock.Unlock
+		defer cancel()
+		providerIns.Stop(timeoutCtx)
 	}
 	m.ramProvider[clientName] = stopper
 	klog.Infof("register provider %v success", clientName)
@@ -48,7 +52,10 @@ func (m *Manager) StopProvider(clientName string) {
 	if !ok || providerIns == nil {
 		return
 	}
-	providerIns.Stop(context.Background())
+	timeoutCtx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+	// cancel is earlier than m.ramLock.Unlock
+	defer cancel()
+	providerIns.Stop(timeoutCtx)
 	delete(m.ramProvider, clientName)
 	klog.Infof("stop provider %v success", clientName)
 }

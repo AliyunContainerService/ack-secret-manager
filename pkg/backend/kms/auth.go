@@ -32,6 +32,7 @@ type authConfig struct {
 
 func (a *authConfig) getKMSAuthCred(region string, p *Provider) (credentials.Credential, error) {
 	providers := make([]provider.CredentialsProvider, 0)
+	var semaphoreProvider *provider.SemaphoreProvider
 	if a.oidcArn != "" && a.roleArn != "" {
 		oidcProvider := provider.NewOIDCProvider(provider.OIDCProviderOptions{
 			STSEndpoint:     provider.GetSTSEndpoint(region, true),
@@ -60,20 +61,24 @@ func (a *authConfig) getKMSAuthCred(region string, p *Provider) (credentials.Cre
 	}))
 	chainProvider := provider.NewChainProvider(providers...)
 	var remoteRoleProvider *provider.RoleArnProvider
+	var cred *provider.CredentialForV2SDK
 	if a.remoteRoleArn != "" && a.remoteRoleSessionName != "" {
 		remoteRoleProvider = provider.NewRoleArnProvider(chainProvider, a.remoteRoleArn, provider.RoleArnProviderOptions{
 			STSEndpoint:   provider.GetSTSEndpoint(region, true),
 			SessionName:   a.remoteRoleSessionName,
 			RefreshPeriod: a.refreshPeriod,
 		})
-	}
-	var cred *provider.CredentialForV2SDK
-	if remoteRoleProvider != nil {
-		p.RegisterRamProvider(a.clientName, remoteRoleProvider)
-		cred = provider.NewCredentialForV2SDK(remoteRoleProvider, provider.CredentialForV2SDKOptions{})
+		semaphoreProvider = provider.NewSemaphoreProvider(remoteRoleProvider, provider.SemaphoreProviderOptions{
+			MaxWeight: int64(p.maxConcurrentCount),
+		})
 	} else {
-		p.RegisterRamProvider(a.clientName, chainProvider)
-		cred = provider.NewCredentialForV2SDK(chainProvider, provider.CredentialForV2SDKOptions{})
+		semaphoreProvider = provider.NewSemaphoreProvider(chainProvider, provider.SemaphoreProviderOptions{
+			MaxWeight: int64(p.maxConcurrentCount),
+		})
 	}
+	p.RegisterRamProvider(a.clientName, semaphoreProvider)
+	cred = provider.NewCredentialForV2SDK(semaphoreProvider, provider.CredentialForV2SDKOptions{
+		CredentialRetrievalTimeout: 10 * time.Minute,
+	})
 	return cred, nil
 }

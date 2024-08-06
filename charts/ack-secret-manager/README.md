@@ -89,6 +89,7 @@
 | command.region                                      | 从指定region拉取secret凭据                                   |                        |
 | command.disablePolling                              | 关闭从KMS后端自动同步拉取最新的凭据内容，默认false           | false                  |
 | command.pollingInterval                             | 从KMS后端同步存量secret实例的间隔时间                        | 120s                   |
+| command.maxConcurrentSecretPulls                    | secret 同步的最大并发数量                                    | 5                      |
 | image.repository                                    | 指定的ack-secret-manager 镜像仓库名称                        | acs/ack-secret-manager |
 | image.tag                                           | 指定的ack-secret-manager 镜像tag                             | v0.5.0                 |
 | image.pullPolicy                                    | 镜像拉取策略，默认为Always                                   | Always                 |
@@ -487,3 +488,6 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 | ------- | -------------- | ------------------------------------------------------------ |
 | `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段                       |
 | `0.5.0` | 2023年10月10日 | 1.支持专属版 KMS 凭据同步<br />2.多阿里云访问凭据管理<br />3.凭据自解析与键规则替换<br />4.共享版 KMS 跨账号凭据同步 |
+| `0.5.1` | 2023年10月18日 | 部分功能与性能优化                                           |
+| `0.5.2` | 2024年8月1日   | 大规模资源同步并发优化                                       |
+

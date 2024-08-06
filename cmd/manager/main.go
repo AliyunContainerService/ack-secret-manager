@@ -19,6 +19,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"golang.org/x/sync/semaphore"
 	"os"
 	"runtime"
 	"strings"
@@ -67,6 +68,7 @@ func main() {
 	var excludeNamespaces string
 	var region string
 	var tokenRotationPeriod time.Duration
+	var maxConcurrentSecretPulls int
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -77,6 +79,8 @@ func main() {
 	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
+	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 5, "used to control how many secrets are pulled at the same time.\n\n")
+
 	flag.Parse()
 
 	ctrl.SetLogger(zap.New())
@@ -100,9 +104,13 @@ func main() {
 	if region == "" || region != instanceRegion {
 		region = instanceRegion
 	}
+	opts := &backend.ProviderOptions{
+		Region:        region,
+		MaxConcurrent: maxConcurrentSecretPulls,
+	}
 	for providerName, f := range backend.SupportProvider {
 		log.Info("new provider ", providerName)
-		f(region)
+		f(opts)
 	}
 
 	err = backend.NewProviderClientByENV(ctx, region)
@@ -142,6 +150,7 @@ func main() {
 			watchNs[ns] = false
 		}
 	}
+	w := semaphore.NewWeighted(int64(opts.MaxConcurrent))
 	esReconciler := externalsecret.ExternalSecretReconciler{
 		Client:               mgr.GetClient(),
 		APIReader:            mgr.GetAPIReader(),
@@ -150,6 +159,7 @@ func main() {
 		ReconciliationPeriod: reconcilePeriod,
 		WatchNamespaces:      watchNs,
 		RotationInterval:     rotationInterval,
+		ConcurrentController: w,
 	}
 	err = (&esReconciler).SetupWithManager(mgr, reconcileCount)
 	if err != nil {

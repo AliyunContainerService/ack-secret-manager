@@ -3,7 +3,7 @@ module github.com/AliyunContainerService/ack-secret-manager
 go 1.18
 
 require (
-	github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider v0.10.0
+	github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider v0.13.0
 	github.com/alibabacloud-go/darabonba-openapi v0.1.4
 	github.com/alibabacloud-go/kms-20160120/v2 v2.0.0
 	github.com/alibabacloud-go/tea v1.2.1
@@ -75,6 +75,7 @@ require (
 	golang.org/x/crypto v0.10.0 // indirect
 	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20200107190931-bf48bf16ab8d // indirect
+	golang.org/x/sync v0.7.0 // indirect
 	golang.org/x/sys v0.12.0 // indirect
 	golang.org/x/term v0.9.0 // indirect
 	golang.org/x/text v0.10.0 // indirect
