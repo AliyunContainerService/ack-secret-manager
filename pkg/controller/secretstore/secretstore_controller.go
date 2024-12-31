@@ -19,6 +19,8 @@ package secretstore
 import (
 	"context"
 	"fmt"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -29,6 +31,10 @@ import (
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+)
+
+const (
+	secretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
 )
 
 // SecretStoreReconciler reconciles a SecretStore object
@@ -63,8 +69,13 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
 	r.Log.Info("secret store info", req.NamespacedName)
+
+	// SecretStoreSpec kubebuilder:validation:MaxProperties=1
 	if secretStore.Spec.KMS != nil {
 		return r.ReconcileKMS(ctx, log, secretStore)
+	}
+	if secretStore.Spec.OOS != nil {
+		return r.ReconcileOOS(ctx, log, secretStore)
 	}
 	return ctrl.Result{}, nil
 }
@@ -75,7 +86,25 @@ func (r *SecretStoreReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCoun
 		MaxConcurrentReconciles: reconcileCount,
 		Reconciler:              r,
 	}
-	return ctrl.NewControllerManagedBy(mgr).WithOptions(options).
-		For(&v1alpha1.SecretStore{}).
-		Complete(r)
+	secretStoreController, err := controller.New("secretStore-controller", mgr, options)
+	if err != nil {
+		return err
+	}
+	err = secretStoreController.Watch(source.Kind(mgr.GetCache(), &v1alpha1.SecretStore{}, &handler.TypedEnqueueRequestForObject[*v1alpha1.SecretStore]{}, SecretStorePredicate[*v1alpha1.SecretStore]{}))
+	if err != nil {
+		return err
+	}
+	return nil
+}
+
+func (r *SecretStoreReconciler) addFinalizer(logger logr.Logger, ss *v1alpha1.SecretStore) error {
+	logger.Info("Adding Finalizer for the secretstore", "name", ss.Name, "namespace", ss.Namespace)
+	ss.SetFinalizers(append(ss.GetFinalizers(), secretFinalizer))
+	//update external secret instance
+	err := r.Client.Update(context.TODO(), ss)
+	if err != nil {
+		logger.Error(err, "Failed to update secretstore with finalizer", "name", ss.Name, "namespace", ss.Namespace)
+		return err
+	}
+	return nil
 }

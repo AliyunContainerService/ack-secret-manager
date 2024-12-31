@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io/ioutil"
+	"math"
 	"net/http"
 	"regexp"
 	"time"
@@ -30,6 +31,8 @@ import (
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/jmespath/go-jmespath"
+	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
@@ -38,6 +41,17 @@ const (
 	METADATA_URL = "http://100.100.100.200/latest/meta-data/"
 	REGIONID_TAG = "region-id"
 	RAM          = "ram/"
+)
+
+const (
+	REJECTED_THROTTLING           = "Rejected.Throttling"
+	SERVICE_UNAVAILABLE_TEMPORARY = "ServiceUnavailableTemporary"
+	INTERNAL_FAILURE              = "InternalFailure"
+)
+
+var (
+	BACKOFF_DEFAULT_RETRY_INTERVAL = time.Second
+	BACKOFF_DEFAULT_CAPACITY       = time.Duration(10) * time.Second
 )
 
 var clusterIDPattern = regexp.MustCompile(`^c[0-9a-z]{32}$`)
@@ -176,4 +190,63 @@ func IgnoreNotFoundError(err error) error {
 		return nil
 	}
 	return err
+}
+
+func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) (jsonMap map[string]string, err error) {
+	jsonMap = make(map[string]string, 0)
+	var data interface{}
+	err = json.Unmarshal([]byte(secretValue), &data)
+	if err != nil {
+		return nil, fmt.Errorf("invalid JSON used with jmesPath in secret key: %s", key)
+	}
+	//fetch all specified key value pairs`
+	for _, jmesPathEntry := range jmesObj {
+		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
+		if err != nil {
+			return nil, fmt.Errorf("Invalid JMES Path: %s.", jmesPathEntry.Path)
+		}
+
+		if jsonSecret == nil {
+			return nil, fmt.Errorf("JMES Path - %s for object alias - %s does not point to a valid object.",
+				jmesPathEntry.Path, jmesPathEntry.ObjectAlias)
+		}
+
+		jsonSecretAsString, isString := jsonSecret.(string)
+		if !isString {
+			return nil, fmt.Errorf("Invalid JMES search result type for path:%s. Only string is allowed.", jmesPathEntry.Path)
+		}
+		jsonMap[jmesPathEntry.ObjectAlias] = jsonSecretAsString
+	}
+	return jsonMap, nil
+}
+
+// RewriteRegexp rewrites a single Regexp Rewrite Operation.
+func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[string]string, error) {
+	out := make(map[string]string)
+	re, err := regexp.Compile(operation.Source)
+	if err != nil {
+		return nil, err
+	}
+	for key, value := range in {
+		newKey := re.ReplaceAllString(key, operation.Target)
+		out[newKey] = value
+	}
+	return out, nil
+}
+
+func JudgeNeedRetry(err error) bool {
+	respErr, is := err.(*sdkErr.ClientError)
+	if is && (respErr.ErrorCode() == REJECTED_THROTTLING || respErr.ErrorCode() == SERVICE_UNAVAILABLE_TEMPORARY || respErr.ErrorCode() == INTERNAL_FAILURE) {
+		return true
+	}
+	return false
+}
+
+func GetWaitTimeExponential(retryTimes int) time.Duration {
+	sleepInterval := time.Duration(math.Pow(2, float64(retryTimes))) * BACKOFF_DEFAULT_RETRY_INTERVAL
+	if sleepInterval >= BACKOFF_DEFAULT_CAPACITY {
+		return BACKOFF_DEFAULT_CAPACITY
+	} else {
+		return sleepInterval
+	}
 }

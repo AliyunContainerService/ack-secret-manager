@@ -32,13 +32,14 @@ spec:
         - name: {{ .Chart.Name }}
           command:
             - ack-secret-manager
-            - --backend={{ .Values.command.backend }}
             - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --reconcile-count={{ .Values.command.reconcileCount }}
             - --polling-interval={{ .Values.command.pollingInterval }}
             - --disable-polling={{ .Values.command.disablePolling }}
             - --region={{ .Values.command.region }}
+            - --max-concurrent-kms-secret-pulls={{ .Values.command.maxConcurrentKmsSecretPulls }}
+            - --max-concurrent-oos-secret-pulls={{ .Values.command.maxConcurrentOosSecretPulls }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

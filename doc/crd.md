@@ -18,7 +18,7 @@
 | key            | The unique identifier for the target credential, such as the key for KMS credentials | yes      |
 | name           | The corresponding key for the credentials in the secret data of the cluster | no       |
 | versionStage   | The version stage of the target credential                   | no       |
-| versionId      | The version Id of the target credential                      | no       |
+| versionId      | The version Id of the target credential, this field is not required when provider is oos | no       |
 | jmesPath       | If the target credential is in JSON format, you can specify to retrieve the value corresponding to a specific key in the JSON | no       |
 | secretStoreRef | Information of the referenced SecretStore                    | no       |
 
@@ -57,13 +57,20 @@
 | parameter | description                                                  | required |
 | --------- | ------------------------------------------------------------ | -------- |
 | KMS       | Representing the target cloud product as KMS (Key Management Service) | no       |
+| OOS       | Representing the target cloud product as OOS(Key Management Service)  | no       |
 
 **KMS**
 
-| parameter        | description                                                  | required |
-| ---------------- | ------------------------------------------------------------ | -------- |
-| KMSAuth          | Credentials required to access KMS (Key Management Service) under a shared KMS | no       |
+| parameter        | description                                                                       | required |
+| ---------------- | --------------------------------------------------------------------------------- | -------- |
+| KMSAuth          | Credentials required to access KMS (Key Management Service) under a shared KMS    | no       |
 | dedicatedKMSAuth | Credentials required to access KMS (Key Management Service) under a dedicated KMS | no       |
+
+**OOS**
+
+| parameter | description                                                                   | required |
+| --------- | ----------------------------------------------------------------------------- | -------- |
+| OOSAuth   | Credentials required to access OOS(Key Management Service) under a shared OOS | no       |
 
 **KMSAuth**
 
@@ -77,6 +84,19 @@
 | oidcTokenFilePath        |                                     | no       |
 | remoteRamRoleArn         | Cross-account ram role are          | no       |
 | remoteRamRoleSessionName | Cross-account ram role session name | no       |
+
+**OOSAuth**
+
+| crd 字段                 | 描述                         | 是否必选 |
+| ------------------------ | ---------------------------- | -------- |
+| accessKey                | 用户AK                       | 否       |
+| accessKeySecret          | 用户SK                       | 否       |
+| ramRoleARN               | ram 角色 arn                 | 否       |
+| ramRoleSessionName       | 角色会话名                   | 否       |
+| oidcProviderARN          | oidc 提供商 arn              | 否       |
+| oidcTokenFilePath        | 暂时无用                     | 否       |
+| remoteRamRoleArn         | 跨账号 ram 角色 arn          | 否       |
+| remoteRamRoleSessionName | 跨账号 ram 角色 session name | 否       |
 
 **dedicatedKMSAuth**
 

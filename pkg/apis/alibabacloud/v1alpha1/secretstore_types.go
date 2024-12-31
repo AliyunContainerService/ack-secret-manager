@@ -32,6 +32,7 @@ type SecretStoreSpec struct {
 	// Important: Run "make" to regenerate code after modifying this file
 	// maybe support more alibabacloud product
 	KMS *KMSProvider `json:"KMS,omitempty"`
+	OOS *OOSProvider `json:"OOS,omitempty"`
 }
 
 // +kubebuilder:validation:MaxProperties=1
@@ -43,6 +44,22 @@ type KMSProvider struct {
 }
 
 type KMSAuth struct {
+	AccessKey                *SecretRef `json:"accessKey,omitempty"`
+	AccessKeySecret          *SecretRef `json:"accessKeySecret,omitempty"`
+	RAMRoleARN               string     `json:"ramRoleARN,omitempty"`
+	RAMRoleSessionName       string     `json:"ramRoleSessionName,omitempty"`
+	OIDCProviderARN          string     `json:"oidcProviderARN,omitempty"`
+	OIDCTokenFilePath        string     `json:"oidcTokenFilePath,omitempty"`
+	RoleSessionExpiration    string     `json:"roleSessionExpiration,omitempty"`
+	RemoteRAMRoleARN         string     `json:"remoteRamRoleARN,omitempty"`
+	RemoteRAMRoleSessionName string     `json:"remoteRamRoleSessionName,omitempty"`
+}
+
+type OOSProvider struct {
+	OOS *OOSAuth `json:"OOSAuth,omitempty"`
+}
+
+type OOSAuth struct {
 	AccessKey                *SecretRef `json:"accessKey,omitempty"`
 	AccessKeySecret          *SecretRef `json:"accessKeySecret,omitempty"`
 	RAMRoleARN               string     `json:"ramRoleARN,omitempty"`

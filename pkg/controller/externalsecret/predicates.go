@@ -18,29 +18,39 @@ package externalsecret
 import (
 	"reflect"
 
-	"sigs.k8s.io/controller-runtime/pkg/event"
-	"sigs.k8s.io/controller-runtime/pkg/predicate"
-
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
-func getWatchPredicateForExternalSecret() predicate.Funcs {
-	return predicate.Funcs{
-		CreateFunc: func(e event.CreateEvent) bool {
-			return true
-		},
-		DeleteFunc: func(e event.DeleteEvent) bool {
-			return true
-		},
-		UpdateFunc: func(e event.UpdateEvent) bool {
-			old := e.ObjectOld.(*api.ExternalSecret)
-			new := e.ObjectNew.(*api.ExternalSecret)
-			if !reflect.DeepEqual(old.Spec, new.Spec) || !reflect.DeepEqual(old.Status, new.Status) ||
-				old.GetDeletionTimestamp() != new.GetDeletionTimestamp() ||
-				old.GetGeneration() != new.GetGeneration() {
-				return true
-			}
-			return false
-		},
+type ExternalSecretsPredicate[object any] struct{}
+
+func (p ExternalSecretsPredicate[object]) Create(e event.TypedCreateEvent[object]) bool {
+	return true
+}
+
+func (p ExternalSecretsPredicate[object]) Delete(e event.TypedDeleteEvent[object]) bool {
+	return true
+}
+
+func (p ExternalSecretsPredicate[object]) Update(e event.TypedUpdateEvent[object]) bool {
+	var oldObjInterface interface{} = e.ObjectOld
+	var newObjInterface interface{} = e.ObjectNew
+	oldObj, ok := oldObjInterface.(*api.ExternalSecret)
+	if !ok {
+		return false
 	}
+	newObj, ok := newObjInterface.(*api.ExternalSecret)
+	if !ok {
+		return false
+	}
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) || !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
+		oldObj.GetDeletionTimestamp() != newObj.GetDeletionTimestamp() ||
+		oldObj.GetGeneration() != newObj.GetGeneration() {
+		return true
+	}
+	return false
+}
+
+func (p ExternalSecretsPredicate[object]) Generic(e event.TypedGenericEvent[object]) bool {
+	return true
 }

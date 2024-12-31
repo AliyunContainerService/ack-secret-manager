@@ -12,11 +12,17 @@ import (
 
 const EnvClient = "env.client"
 
+const (
+	ProviderKMSName = "kms"
+	ProviderOOSName = "oos"
+)
+
 type CreateProvider func(opt *ProviderOptions)
 
 type ProviderOptions struct {
-	Region        string
-	MaxConcurrent int
+	Region           string
+	KmsMaxConcurrent int
+	OosMaxConcurrent int
 }
 
 var (

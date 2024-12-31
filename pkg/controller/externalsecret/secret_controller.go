@@ -17,13 +17,13 @@ package externalsecret
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"golang.org/x/sync/semaphore"
 	"reflect"
-	"sync"
 	"time"
 
+	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -33,12 +33,9 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
-
-	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-	kmsprovider "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/kms"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 )
 
 const (
@@ -54,11 +51,13 @@ type ExternalSecretReconciler struct {
 	Ctx                  context.Context
 	WatchNamespaces      map[string]bool
 	ReconciliationPeriod time.Duration
-	RotationInterval     time.Duration // Key rotation job running interval.
-	rotationTicker       *time.Ticker
-	secrets              sync.Map  // secrets map is the cache for secrets.
-	closing              chan bool // close channel.
-	ConcurrentController *semaphore.Weighted
+
+	DisablePolling   bool
+	RotationInterval time.Duration // Key rotation job running interval.
+	rotationTicker   *time.Ticker
+	closing          chan bool // close channel.
+	KmsLimiter       KmsLimiter
+	OosLimiter       OosLimiter
 }
 
 var (
@@ -139,11 +138,19 @@ func (r *ExternalSecretReconciler) AddFinalizerIfNotPresent(externalSec *api.Ext
 	return nil
 }
 
+func (r *ExternalSecretReconciler) Requeue(result ctrl.Result) ctrl.Result {
+	if r.DisablePolling {
+		return ctrl.Result{Requeue: false}
+	}
+	return result
+}
+
 func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("ExternalSecret", req.NamespacedName)
 
 	externalSec := &api.ExternalSecret{}
 
+	// only do not requeue when getting CR fails.
 	err := r.Get(r.Ctx, req.NamespacedName, externalSec)
 	if err != nil {
 		log.Error(err, fmt.Sprintf("could not get ExternalSecret '%s'", req.NamespacedName))
@@ -170,17 +177,18 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 			err := r.Update(context.TODO(), externalSec)
 			if err != nil {
 				log.Error(err, "failed to update externalSec when clean finalizers")
-				return reconcile.Result{}, err
+				return r.Requeue(reconcile.Result{RequeueAfter: r.ReconciliationPeriod}), err
 			}
-			r.secrets.Delete(secretIndex)
 		}
-		return reconcile.Result{}, nil
+		return r.Requeue(reconcile.Result{RequeueAfter: r.RotationInterval}), nil
 	}
+
+	klog.Infof("reconcile external secret %v", secretIndex)
 
 	// add Finalizer to external secret instance
 	if !utils.Contains(externalSec.GetFinalizers(), secretFinalizer) {
 		if err := r.addFinalizer(log, externalSec); err != nil {
-			return reconcile.Result{}, err
+			return r.Requeue(reconcile.Result{RequeueAfter: r.ReconciliationPeriod}), err
 		}
 	}
 	if !r.shouldWatch(secretNamespace) {
@@ -189,11 +197,10 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	}
 	_, syncErr := r.syncIfNeedUpdate(externalSec)
 	if syncErr != nil {
-		return ctrl.Result{}, syncErr
+		return r.Requeue(ctrl.Result{RequeueAfter: r.ReconciliationPeriod}), syncErr
 	}
-	r.secrets.Store(secretIndex, externalSec)
 	log.Info("update secret store", "index", secretIndex)
-	return ctrl.Result{Requeue: false}, nil
+	return r.Requeue(ctrl.Result{RequeueAfter: r.RotationInterval}), nil
 }
 
 func (r *ExternalSecretReconciler) finalizeExternalSecret(log logr.Logger, secretNamespace, secretName string) error {
@@ -226,66 +233,16 @@ func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 		MaxConcurrentReconciles: reconcileCount,
 		Reconciler:              r,
 	}
-	return ctrl.NewControllerManagedBy(mgr).WithOptions(options).WithEventFilter(getWatchPredicateForExternalSecret()).
-		For(&api.ExternalSecret{}).
-		Complete(r)
-}
-
-// secretRotationJob refresh the secret if updated in kms secret-manager
-func (r *ExternalSecretReconciler) SecretRotationJob() {
-	r.Log.Info("begin polling job", "polling interval", r.RotationInterval)
-	r.closing = make(chan bool)
-	r.rotationTicker = time.NewTicker(r.RotationInterval)
-	for {
-		select {
-		case <-r.rotationTicker.C:
-			r.rotate()
-		case <-r.closing:
-			if r.rotationTicker != nil {
-				r.rotationTicker.Stop()
-			}
-		}
+	externalSecretController, err := controller.New("externalSecret-controller", mgr, options)
+	if err != nil {
+		return err
 	}
-}
-
-func (r *ExternalSecretReconciler) rotate() {
-	r.Log.Info("rotate job running")
-
-	var secretMap sync.Map
-	wg := sync.WaitGroup{}
-	r.secrets.Range(func(k interface{}, v interface{}) bool {
-		es := v.(*api.ExternalSecret)
-		r.Log.Info("rotate checking secret", "index", k)
-		// Re-generate secret if update in kms secret-manager.
-		timeoutContext, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
-		if err := r.ConcurrentController.Acquire(timeoutContext, 1); err != nil {
-			cancel()
-			return true
-		}
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			defer r.ConcurrentController.Release(1)
-			defer cancel()
-			updated, _ := r.syncIfNeedUpdate(es)
-			if updated {
-				secretMap.Store(fmt.Sprintf("%s/%s", es.Namespace, es.Name), es)
-			}
-		}()
-		return true
-	})
-
-	wg.Wait()
-	secretMap.Range(func(k interface{}, v interface{}) bool {
-		secretIndex := k.(string)
-		r.Log.Info("sync secret store", "index", secretIndex)
-		es, ok := v.(*api.ExternalSecret)
-		if !ok {
-			return true
-		}
-		r.secrets.Store(secretIndex, es)
-		return true
-	})
+	// Watch for Pod create / update / delete events and call Reconcile
+	err = externalSecretController.Watch(source.Kind(mgr.GetCache(), &api.ExternalSecret{}, &handler.TypedEnqueueRequestForObject[*api.ExternalSecret]{}, ExternalSecretsPredicate[*api.ExternalSecret]{}))
+	if err != nil {
+		return err
+	}
+	return nil
 }
 
 func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, dataSources []api.DataSource) (map[string][]byte, error) {
@@ -368,32 +325,56 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 }
 
 func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSecret) (bool, error) {
-	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
-	log := r.Log.WithValues("secret", esIndex)
 	providerName := externalSec.Spec.Provider
 	if providerName == "" {
-		providerName = kmsprovider.ProviderName
+		providerName = backend.ProviderKMSName
 	}
+	waitTimeoutCtx, cancel := context.WithTimeout(r.Ctx, 5*time.Minute)
+	defer cancel()
+
+	var err error
+	switch providerName {
+	case backend.ProviderKMSName:
+		err = r.KmsLimiter.SecretPullLimiter.Wait(waitTimeoutCtx)
+	case backend.ProviderOOSName:
+		err = r.OosLimiter.SecretPullLimiter.Wait(waitTimeoutCtx)
+	default:
+		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
+	}
+	if err != nil {
+		return false, err
+	}
+
+	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
+	log := r.Log.WithValues("secret", esIndex)
+
 	provider := backend.GetProviderByName(providerName)
+	if provider == nil {
+		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
+	}
+
 	secretMap := make(map[string][]byte)
-	if externalSec.Spec.Data != nil && len(externalSec.Spec.Data) != 0 {
+	if len(externalSec.Spec.Data) != 0 {
 		out, err := r.getExternalSecret(provider, externalSec.Spec.Data)
 		if err != nil {
 			klog.Errorf("get external secret error %v", err)
 		}
+
 		for k, v := range out {
 			secretMap[k] = v
 		}
 	}
-	if externalSec.Spec.DataProcess != nil && len(externalSec.Spec.DataProcess) != 0 {
+	if len(externalSec.Spec.DataProcess) != 0 {
 		out, err := r.getExternalSecretWithExtract(provider, externalSec.Spec.DataProcess)
 		if err != nil {
 			klog.Errorf("get external secret error %v", err)
 		}
+
 		for k, v := range out {
 			secretMap[k] = v
 		}
 	}
+
 	// Get the actual secret from Kubernetes
 	currentData, err := r.getCurrentData(externalSec.Namespace, externalSec.Name)
 	if err != nil && !errors.IsNotFound(err) {
@@ -411,33 +392,6 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 		return true, nil
 	}
 	return false, nil
-}
-
-func (r *ExternalSecretReconciler) InitSecretCache() error {
-	k8sCli, err := utils.GetKubernetesClients()
-	if err != nil {
-		r.Log.Error(err, "failed to get external secret clientset")
-	}
-
-	esList, err := k8sCli.Resource(externalSecretGRV).Namespace("").List(context.TODO(), metav1.ListOptions{})
-	if err != nil {
-		r.Log.Error(err, "failed to list all external secrets")
-		return err
-	}
-
-	//add existing secret into reconciler secret map
-	for _, esObj := range esList.Items {
-		esIndex := fmt.Sprintf("%s/%s", esObj.GetNamespace(), esObj.GetName())
-		r.Log.Info("init secret store", "key", esIndex)
-		esBytes, _ := esObj.MarshalJSON()
-		es := &api.ExternalSecret{}
-		if err := json.Unmarshal(esBytes, &es); err != nil {
-			r.Log.Error(err, "failed to unmarshal externalsecret during init secret store")
-			continue
-		}
-		r.secrets.Store(esIndex, es)
-	}
-	return nil
 }
 
 func (r *ExternalSecretReconciler) getSecretStore(secretStoreRef *api.SecretStoreRef) (*api.SecretStore, error) {
