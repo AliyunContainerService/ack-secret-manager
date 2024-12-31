@@ -106,158 +106,158 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 1. 创建密文
    当前支持同步 KMS 凭据和 OOS 加密参数，下面分别是两种密文的创建方式参考
 
-   - 在KMS凭据管家中添加如下凭证，详细流程请参考[管理通用凭据](https://www.alibabacloud.com/help/zh/doc-detail/152003.html)
-     ```txt
-     SecretName: test1
-     SecretData: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
-     VersionId: v1
-     ```
+    - 在KMS凭据管家中添加如下凭证，详细流程请参考[管理通用凭据](https://www.alibabacloud.com/help/zh/doc-detail/152003.html)
+      ```txt
+      SecretName: test1
+      SecretData: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
+      VersionId: v1
+      ```
 
-   - 在OOS加密参数中添加如下参数，详细流程请参考[管理加密参数](https://www.alibabacloud.com/help/zh/oos/developer-reference/api-oos-2019-06-01-createsecretparameter)
-     ```txt
-     Name: test2
-     Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
-     ```
+    - 在OOS加密参数中添加如下参数，详细流程请参考[管理加密参数](https://www.alibabacloud.com/help/zh/oos/developer-reference/api-oos-2019-06-01-createsecretparameter)
+      ```txt
+      Name: test2
+      Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
+      ```
 2. 创建SecretStore & ExternalSecret
 
    前提：给集群开启 RRSA，并且正确配置相关 RAM Role 权限
 
    本示例包含了对模板中一些配置字段的说明, 以下的示例中不再重复说明
 
-   - 创建文件 `hello-service-secret-store.yml`如下并保存为测试模板, 其可以创建名称为 `scdemo` 的 SecretStore 的测试实例, 需对部分字段进行替换
-     ```yaml
-     apiVersion: 'alibabacloud.com/v1alpha1'
-     kind: SecretStore
-     metadata:
-       name: scdemo
-     spec:
-       KMS: # 同步kms凭据时，指定为KMS, 同步oos加密参数时，指定为OOS
-         KMSAuth: # 同步kms凭据时，指定为KMSAuth, 同步oos加密参数时，指定为OOSAuth
-           oidcProviderARN: "acs:ram::{accountID}:oidc-provider/ack-rrsa-{clusterID}"
-           ramRoleARN: "acs:ram::{accountID}:role/{roleName}"
-     ```
-   - 创建文件 `hello-service-external-secret.yml`如下并保存为测试模板, 其可以创建名称为 `esdemo` 的ExternalSecret的测试实例：
-     ```yaml
-     apiVersion: 'alibabacloud.com/v1alpha1'
-     kind: ExternalSecret
-     metadata:
-       name: esdemo
-     spec:
-       provider: kms # 当前支持kms和oos, 默认为kms, 同步kms凭据时可不指定该字段
-       data: #无需特殊处理的数据源
-         - key: test1 # 需要同步的秘钥名称, 当前支持kms凭据和oos加密参数, 本示例为kms凭据名称
-           name: test1 # 存入secret字段
-           versionId: v1 #kms凭据版本, 当provider为非kms 时, 则不需要指定该字段 
-           secretStoreRef: # 使用WorkerRole方式认证时, 则不需要指定该属性
-             name: scdemo
-             namespace: default
-     ```
-   - 执行命令创建secretstore测试实例(使用WorkerRole方式认证时, 则不需要创建该实例)：
-     ```sh
-     kubectl apply -f hello-service-secret-store.yml
-     ```
-   - 执行命令创建externalsecret测试实例：
-     ```sh
-     kubectl apply -f hello-service-external-secret.yml
-     ```
-   - 查看目标secret是否创建成功：
-     ```sh
-     kubectl get secret esdemo -oyaml
-     ```
-   - 如果创建成功，查看secret内容如下：
-     ```yaml
-     apiVersion: v1
-     data:
-       test1: eyJuYW1lIjoidG9tIiwiYWdlIjoiMTQiLCJmcmllbmRzIjpbeyJuYW1lIjoibGlsaSJ9LHsibmFtZSI6ImVkZiJ9XX0=
-     kind: Secret
-     metadata:
-       name: esdemo
-       namespace: default
-     type: Opaque
-     ```
-   - 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
+    - 创建文件 `hello-service-secret-store.yml`如下并保存为测试模板, 其可以创建名称为 `scdemo` 的 SecretStore 的测试实例, 需对部分字段进行替换
+      ```yaml
+      apiVersion: 'alibabacloud.com/v1alpha1'
+      kind: SecretStore
+      metadata:
+        name: scdemo
+      spec:
+        KMS: # 同步kms凭据时，指定为KMS, 同步oos加密参数时，指定为OOS
+          KMSAuth: # 同步kms凭据时，指定为KMSAuth, 同步oos加密参数时，指定为OOSAuth
+            oidcProviderARN: "acs:ram::{accountID}:oidc-provider/ack-rrsa-{clusterID}"
+            ramRoleARN: "acs:ram::{accountID}:role/{roleName}"
+      ```
+    - 创建文件 `hello-service-external-secret.yml`如下并保存为测试模板, 其可以创建名称为 `esdemo` 的ExternalSecret的测试实例：
+      ```yaml
+      apiVersion: 'alibabacloud.com/v1alpha1'
+      kind: ExternalSecret
+      metadata:
+        name: esdemo
+      spec:
+        provider: kms # 当前支持kms和oos, 默认为kms, 同步kms凭据时可不指定该字段
+        data: #无需特殊处理的数据源
+          - key: test1 # 需要同步的秘钥名称, 当前支持kms凭据和oos加密参数, 本示例为kms凭据名称
+            name: test1 # 存入secret字段
+            versionId: v1 #kms凭据版本, 当provider为非kms 时, 则不需要指定该字段 
+            secretStoreRef: # 使用WorkerRole方式认证时, 则不需要指定该属性
+              name: scdemo
+              namespace: default
+      ```
+    - 执行命令创建secretstore测试实例(使用WorkerRole方式认证时, 则不需要创建该实例)：
+      ```sh
+      kubectl apply -f hello-service-secret-store.yml
+      ```
+    - 执行命令创建externalsecret测试实例：
+      ```sh
+      kubectl apply -f hello-service-external-secret.yml
+      ```
+    - 查看目标secret是否创建成功：
+      ```sh
+      kubectl get secret esdemo -oyaml
+      ```
+    - 如果创建成功，查看secret内容如下：
+      ```yaml
+      apiVersion: v1
+      data:
+        test1: eyJuYW1lIjoidG9tIiwiYWdlIjoiMTQiLCJmcmllbmRzIjpbeyJuYW1lIjoibGlsaSJ9LHsibmFtZSI6ImVkZiJ9XX0=
+      kind: Secret
+      metadata:
+        name: esdemo
+        namespace: default
+      type: Opaque
+      ```
+    - 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
 3. JSON凭据解析
 
    **data**
 
-   - 如果您希望解析一个 JSON 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用 `jmesPath`字段。以下是一个使用 `jmesPath` 字段的样例，我们将其部署在集群中
-     ```yaml
-     apiVersion: 'alibabacloud.com/v1alpha1'
-     kind: ExternalSecret
-     metadata:
-       name: es-json-demo
-     spec:
-       provider: kms
-       data:
-         - key: test1
-           name: test1
-           versionId: v1
-           secretStoreRef:
-             name: scdemo
-             namespace: default
-           jmesPath: # 解析 json 串中的部分字段
-             - path: "name"
-               objectAlias: "name"
-             - path: "friends[0].name"
-               objectAlias: "friendname"
-     ```
-   - 当您使用 `jmesPath`字段时，必需指定下面两个子字段：
-     - `path`: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json 中的指定字段
-     - `objectAlias`: 必需项，用于指定解析出的字段同步到 k8s secret 中的 key 名称
-   - 部署后检查 secret 是否创建成功
-     ```sh
-     kubectl get secret es-json-demo -oyaml
-     ```
-   - 同步成功即可看到如下结果
-     ```yaml
-     apiVersion: v1
-     data:
-       friendname: bGlsaQ==
-       name: dG9t
-     kind: Secret
-     metadata:
-       name: es-json-demo
-       namespace: default
-     type: Opaque
-     ```
+    - 如果您希望解析一个 JSON 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用 `jmesPath`字段。以下是一个使用 `jmesPath` 字段的样例，我们将其部署在集群中
+      ```yaml
+      apiVersion: 'alibabacloud.com/v1alpha1'
+      kind: ExternalSecret
+      metadata:
+        name: es-json-demo
+      spec:
+        provider: kms
+        data:
+          - key: test1
+            name: test1
+            versionId: v1
+            secretStoreRef:
+              name: scdemo
+              namespace: default
+            jmesPath: # 解析 json 串中的部分字段
+              - path: "name"
+                objectAlias: "name"
+              - path: "friends[0].name"
+                objectAlias: "friendname"
+      ```
+    - 当您使用 `jmesPath`字段时，必需指定下面两个子字段：
+        - `path`: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json 中的指定字段
+        - `objectAlias`: 必需项，用于指定解析出的字段同步到 k8s secret 中的 key 名称
+    - 部署后检查 secret 是否创建成功
+      ```sh
+      kubectl get secret es-json-demo -oyaml
+      ```
+    - 同步成功即可看到如下结果
+      ```yaml
+      apiVersion: v1
+      data:
+        friendname: bGlsaQ==
+        name: dG9t
+      kind: Secret
+      metadata:
+        name: es-json-demo
+        namespace: default
+      type: Opaque
+      ```
 
    **datasource**
 
-   - 如果您想将 JSON 凭据解析后再存放入 secret 中，但又不知道凭据的具体结构，可以采用自解析功能，即 dataProcess.Extract 字段。并且可以针对解析后的字段键进行规则替换，即 dataProcss.replaceRule 字段，防止不规则的 secret data key 导致无法创建 secret，以下为样例 ExternalSecret
-     ```yaml
-     apiVersion: 'alibabacloud.com/v1alpha1'
-     kind: ExternalSecret
-     metadata:
-       name: extract-secret
-     spec:
-       provider: kms
-       dataProcess:
-         - extract:
-             key: test1
-             name: extract
-             versionId: v1
-             secretStoreRef:
-               name: dkms-client
-               namespace: default
-           replaceRule:
-             - source: "^n.*e$" #替换 以n开头以e结尾 的 key 为 alibabacloud
-               target: "alibabacloud"
-             - source: "^f.*s$"
-               target: "ack"
-     ```
-   - 同步成功即可看到如下结果，JSON 凭据被解析为三部分，且各自的键根据 replaceRule 规则进行了替换
-     ```yaml
-     apiVersion: v1
-     data:
-       ack: W3sibmFtZSI6ImxpbGkifSx7Im5hbWUiOiJlZGYifV0=
-       age: IjE0Ig==
-       alibabacloud: InRvbSI=
-     kind: Secret
-     metadata:
-       name: extract-secret
-       namespace: default
-     type: Opaque
-     ```
+    - 如果您想将 JSON 凭据解析后再存放入 secret 中，但又不知道凭据的具体结构，可以采用自解析功能，即 dataProcess.Extract 字段。并且可以针对解析后的字段键进行规则替换，即 dataProcss.replaceRule 字段，防止不规则的 secret data key 导致无法创建 secret，以下为样例 ExternalSecret
+      ```yaml
+      apiVersion: 'alibabacloud.com/v1alpha1'
+      kind: ExternalSecret
+      metadata:
+        name: extract-secret
+      spec:
+        provider: kms
+        dataProcess:
+          - extract:
+              key: test1
+              name: extract
+              versionId: v1
+              secretStoreRef:
+                name: dkms-client
+                namespace: default
+            replaceRule:
+              - source: "^n.*e$" #替换 以n开头以e结尾 的 key 为 alibabacloud
+                target: "alibabacloud"
+              - source: "^f.*s$"
+                target: "ack"
+      ```
+    - 同步成功即可看到如下结果，JSON 凭据被解析为三部分，且各自的键根据 replaceRule 规则进行了替换
+      ```yaml
+      apiVersion: v1
+      data:
+        ack: W3sibmFtZSI6ImxpbGkifSx7Im5hbWUiOiJlZGYifV0=
+        age: IjE0Ig==
+        alibabacloud: InRvbSI=
+      kind: Secret
+      metadata:
+        name: extract-secret
+        namespace: default
+      type: Opaque
+      ```
 4. 当前支持跨账号同步凭据，在 `SecretStore.Spec.KMS.KMSAuth` 中配置 `remoteRamRoleArn`，`remoteRamRoleSessionName` 即可，以下为样例 SecretStore
 
    ```yaml
