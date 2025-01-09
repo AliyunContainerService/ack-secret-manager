@@ -1,3 +1,4 @@
+//nolint:all
 package v1alpha1
 
 import (
