@@ -19,9 +19,10 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"golang.org/x/sync/semaphore"
+	"golang.org/x/time/rate"
 	"os"
 	"runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"strings"
 	"time"
 
@@ -34,7 +35,8 @@ import (
 
 	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/kms"
+	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/kms"
+	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/externalsecret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
@@ -69,6 +71,8 @@ func main() {
 	var region string
 	var tokenRotationPeriod time.Duration
 	var maxConcurrentSecretPulls int
+	var maxConcurrentKmsSecretPulls int
+	var maxConcurrentOosSecretPulls int
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -79,10 +83,27 @@ func main() {
 	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
-	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 5, "used to control how many secrets are pulled at the same time.\n\n")
+	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
+	flag.IntVar(&maxConcurrentKmsSecretPulls, "max-concurrent-kms-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
+	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
 
 	flag.Parse()
 
+	finalMaxConcurrentSecretPulls := maxConcurrentKmsSecretPulls
+
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "max-concurrent-secret-pulls" {
+			finalMaxConcurrentSecretPulls = maxConcurrentSecretPulls
+		}
+	})
+	flag.Visit(func(f *flag.Flag) {
+		if f.Name == "max-concurrent-kms-secret-pulls" {
+			finalMaxConcurrentSecretPulls = maxConcurrentKmsSecretPulls
+		}
+	})
+
+	maxConcurrentKmsSecretPulls = finalMaxConcurrentSecretPulls
+	
 	ctrl.SetLogger(zap.New())
 
 	printVersion()
@@ -105,8 +126,9 @@ func main() {
 		region = instanceRegion
 	}
 	opts := &backend.ProviderOptions{
-		Region:        region,
-		MaxConcurrent: maxConcurrentSecretPulls,
+		Region:           region,
+		KmsMaxConcurrent: maxConcurrentKmsSecretPulls,
+		OosMaxConcurrent: maxConcurrentOosSecretPulls,
 	}
 	for providerName, f := range backend.SupportProvider {
 		log.Info("new provider ", providerName)
@@ -117,9 +139,16 @@ func main() {
 	if err != nil {
 		log.Error(err, "")
 	}
+	var syncPeriod = 10 * time.Hour
+	if disablePolling {
+		syncPeriod = 365 * 24 * time.Hour
+	}
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache: cache.Options{
+			SyncPeriod: &syncPeriod,
+		},
 	})
 	if err != nil {
 		log.Error(err, "unable to start manager")
@@ -150,17 +179,18 @@ func main() {
 			watchNs[ns] = false
 		}
 	}
-	w := semaphore.NewWeighted(int64(opts.MaxConcurrent))
 	esReconciler := externalsecret.ExternalSecretReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
-		Ctx:                  ctx,
-		ReconciliationPeriod: reconcilePeriod,
-		WatchNamespaces:      watchNs,
-		RotationInterval:     rotationInterval,
-		ConcurrentController: w,
+		Client:                       mgr.GetClient(),
+		APIReader:                    mgr.GetAPIReader(),
+		Log:                          ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
+		Ctx:                          ctx,
+		DisablePolling:               disablePolling,
+		ReconciliationPeriod:         reconcilePeriod,
+		WatchNamespaces:              watchNs,
+		RotationInterval:             rotationInterval,
 	}
+	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
+	esReconciler.OosLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentOosSecretPulls), 1)
 	err = (&esReconciler).SetupWithManager(mgr, reconcileCount)
 	if err != nil {
 		log.Error(err, "unable to create controller", "controller", "ExternalSecret")
@@ -176,15 +206,6 @@ func main() {
 	if err = (&scReconciler).SetupWithManager(mgr, reconcileCount); err != nil {
 		log.Error(err, "unable to create controller", "controller", "SecretStore")
 		os.Exit(1)
-	}
-	//not start auto sync job if disable polling
-	if !disablePolling {
-		err := esReconciler.InitSecretCache()
-		if err != nil {
-			log.Error(err, "failed to init secret cache")
-			os.Exit(1)
-		}
-		go esReconciler.SecretRotationJob()
 	}
 
 	log.Info("starting ack-secret-manager")

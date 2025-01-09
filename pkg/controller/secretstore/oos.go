@@ -11,20 +11,20 @@ import (
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-	kmsprovider "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/kms"
+	oosprovider "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
-func (r *SecretStoreReconciler) ReconcileKMS(ctx context.Context, log logr.Logger, secretStore *v1alpha1.SecretStore) (ctrl.Result, error) {
-	kmsProvider := backend.GetProviderByName(backend.ProviderKMSName)
+func (r *SecretStoreReconciler) ReconcileOOS(ctx context.Context, log logr.Logger, secretStore *v1alpha1.SecretStore) (ctrl.Result, error) {
+	oosProvider := backend.GetProviderByName(backend.ProviderOOSName)
 	clientName := fmt.Sprintf("%s/%s", secretStore.Namespace, secretStore.Name)
 	isSecretStoretMarkedToBeDeleted := secretStore.GetDeletionTimestamp() != nil
 	if isSecretStoretMarkedToBeDeleted {
-		log.Info("SecretStore kms is marked to be deleted")
+		log.Info("SecretStore oos is marked to be deleted")
 		if utils.Contains(secretStore.GetFinalizers(), secretFinalizer) {
 			// exec the clean work in secretFinalizer
 			// do not delete Finalizer if clean failed, the clean work will exec in next reconcile
-			kmsProvider.Delete(clientName)
+			oosProvider.Delete(clientName)
 			// remove secretFinalizer
 			log.Info("removing finalizer", "currentFinalizers", secretStore.GetFinalizers())
 			secretStore.SetFinalizers(utils.Remove(secretStore.GetFinalizers(), secretFinalizer))
@@ -43,16 +43,17 @@ func (r *SecretStoreReconciler) ReconcileKMS(ctx context.Context, log logr.Logge
 		}
 	}
 
-	secretClient, err := kmsProvider.NewClient(ctx, secretStore, r.Client)
+	secretClient, err := oosProvider.NewClient(ctx, secretStore, r.Client)
 	if err != nil {
-		log.Error(err, fmt.Sprintf("could not new kms client %s", clientName))
+		log.Error(err, fmt.Sprintf("could not new oos client %s", clientName))
 		return ctrl.Result{}, err
 	}
-	kmsClient, ok := secretClient.(*kmsprovider.KMSClient)
+	oosClient, ok := secretClient.(*oosprovider.OOSClient)
 	if !ok {
 		klog.Errorf("client type error")
 		return ctrl.Result{}, err
 	}
-	kmsProvider.Register(kmsClient.GetName(), kmsClient)
+	oosProvider.Register(oosClient.GetName(), oosClient)
+
 	return ctrl.Result{}, nil
 }
