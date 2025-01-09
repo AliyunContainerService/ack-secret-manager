@@ -107,7 +107,8 @@ The following will add a test credential in Alibaba Cloud KMS Secrets Manager fo
 ack-secret-manager involves two CRDs. SecretStore is used to store access credentials (such as RRSA configuration, ClientKey, AK configuration, etc.), and ExternalSecret is used to store basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore. It ensures the separation of permissions and data and enhances the flexibility of use. See below for details **CRD configuration introduction**
 
 1. Create ciphertexts
-   Currently supports synchronization of KMS credentials and OOS encryption parameters. The following are references to how to create two ciphertexts.
+   
+   Currently supports synchronization of KMS credentials and OOS encryption parameters. The following are references to how to create both types of ciphertexts.
 
     - Add the following credential in the KMS Secrets Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
 
@@ -122,7 +123,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
       Name: test2
       Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
       ```
-2. Create SecretStore & ExternalSecret
+3. Create SecretStore & ExternalSecret
 
    Prerequisite: Enable RRSA for the cluster and properly configure the relevant RAM Role permissions
 
@@ -180,7 +181,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
       type: Opaque
       ```
     - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Secrets Manager and wait for a while to check whether the target secret has been synchronized.
-3. JSON-formatted support
+4. JSON-formatted support
 
    **data**
 
@@ -262,7 +263,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
         namespace: default
       type: Opaque
       ```
-4. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
+5. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
 
    ```yaml
    apiVersion: 'alibabacloud.com/v1alpha1'
