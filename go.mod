@@ -1,6 +1,6 @@
 module github.com/AliyunContainerService/ack-secret-manager
 
-go 1.23.1
+go 1.23
 
 require (
 	github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider v0.13.0

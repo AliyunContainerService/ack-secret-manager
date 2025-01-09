@@ -26,7 +26,7 @@ type Manager struct {
 
 func RegisterRamProvider(clientName string, stopper provider.Stopper, m *Manager) {
 	if m == nil || m.RamLock == nil {
-		klog.Errorf("Manager init error")
+		klog.Errorf("Manager init error") //nolint
 		return
 	}
 	m.RamLock.Lock()
@@ -39,7 +39,7 @@ func RegisterRamProvider(clientName string, stopper provider.Stopper, m *Manager
 		providerIns.Stop(timeoutCtx)
 	}
 	m.RamProvider[clientName] = stopper
-	klog.Infof("register provider %v success", clientName)
+	klog.Infof("register provider %v success", clientName) //nolint
 }
 
 func StopProvider(clientName string, m *Manager) {
