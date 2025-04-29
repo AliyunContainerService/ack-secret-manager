@@ -38,8 +38,10 @@ spec:
             - --polling-interval={{ .Values.command.pollingInterval }}
             - --disable-polling={{ .Values.command.disablePolling }}
             - --region={{ .Values.command.region }}
+            - --kms-endpoint={{ .Values.command.kmsEndpoint }}
             - --max-concurrent-kms-secret-pulls={{ .Values.command.maxConcurrentKmsSecretPulls }}
             - --max-concurrent-oos-secret-pulls={{ .Values.command.maxConcurrentOosSecretPulls }}
+            - --enable-worker-role={{ .Values.command.enableWorkerRole }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:

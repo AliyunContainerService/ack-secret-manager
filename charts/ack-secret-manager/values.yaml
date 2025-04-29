@@ -8,10 +8,12 @@ command:
   reconcileCount: 1
   tokenRotationPeriod: 120s
   region:
+  kmsEndpoint:
   disablePolling: false
   pollingInterval: 120s
   maxConcurrentKmsSecretPulls: 10
   maxConcurrentOosSecretPulls: 10
+  enableWorkerRole: true
 # watchamespaces:
 # excludeamespaces:
 
@@ -66,7 +68,7 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.5.5
+  tag: v0.5.8
   pullPolicy: Always
 
 cleanupImage:

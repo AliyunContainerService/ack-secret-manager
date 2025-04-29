@@ -39,7 +39,6 @@ import (
 	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/externalsecret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	"github.com/AliyunContainerService/ack-secret-manager/version"
 )
 
@@ -73,6 +72,8 @@ func main() {
 	var maxConcurrentSecretPulls int
 	var maxConcurrentKmsSecretPulls int
 	var maxConcurrentOosSecretPulls int
+	var enableWorkerRole bool
+	var kmsEndpoint string
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -80,14 +81,18 @@ func main() {
 	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
-	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&region, "region", "cn-hangzhou", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
 	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
 	flag.IntVar(&maxConcurrentKmsSecretPulls, "max-concurrent-kms-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
 	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
+	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
+	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
 
 	flag.Parse()
+
+	backend.EnableWorkerRole = enableWorkerRole
 
 	finalMaxConcurrentSecretPulls := maxConcurrentKmsSecretPulls
 
@@ -103,7 +108,6 @@ func main() {
 	})
 
 	maxConcurrentKmsSecretPulls = finalMaxConcurrentSecretPulls
-	
 	ctrl.SetLogger(zap.New())
 
 	printVersion()
@@ -118,15 +122,10 @@ func main() {
 		log.Error(err, "")
 		os.Exit(1)
 	}
-	instanceRegion, err := utils.GetRegion()
-	if err != nil {
-		log.Error(err, "get region failed")
-	}
-	if region == "" || region != instanceRegion {
-		region = instanceRegion
-	}
+
 	opts := &backend.ProviderOptions{
 		Region:           region,
+		KmsEndpoint:      kmsEndpoint,
 		KmsMaxConcurrent: maxConcurrentKmsSecretPulls,
 		OosMaxConcurrent: maxConcurrentOosSecretPulls,
 	}
@@ -135,7 +134,7 @@ func main() {
 		f(opts)
 	}
 
-	err = backend.NewProviderClientByENV(ctx, region)
+	err = backend.NewProviderClientByENV()
 	if err != nil {
 		log.Error(err, "")
 	}
@@ -180,14 +179,14 @@ func main() {
 		}
 	}
 	esReconciler := externalsecret.ExternalSecretReconciler{
-		Client:                       mgr.GetClient(),
-		APIReader:                    mgr.GetAPIReader(),
-		Log:                          ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
-		Ctx:                          ctx,
-		DisablePolling:               disablePolling,
-		ReconciliationPeriod:         reconcilePeriod,
-		WatchNamespaces:              watchNs,
-		RotationInterval:             rotationInterval,
+		Client:               mgr.GetClient(),
+		APIReader:            mgr.GetAPIReader(),
+		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
+		Ctx:                  ctx,
+		DisablePolling:       disablePolling,
+		ReconciliationPeriod: reconcilePeriod,
+		WatchNamespaces:      watchNs,
+		RotationInterval:     rotationInterval,
 	}
 	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
 	esReconciler.OosLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentOosSecretPulls), 1)

@@ -17,10 +17,13 @@ const (
 	ProviderOOSName = "oos"
 )
 
+var EnableWorkerRole bool
+
 type CreateProvider func(opt *ProviderOptions)
 
 type ProviderOptions struct {
 	Region           string
+	KmsEndpoint      string
 	KmsMaxConcurrent int
 	OosMaxConcurrent int
 }
@@ -53,7 +56,7 @@ func GetProviderByName(providerName string) Provider {
 	return provider
 }
 
-func NewProviderClientByENV(ctx context.Context, region string) error {
+func NewProviderClientByENV() error {
 	errs := make([]error, 0)
 	providerMap.Range(func(k, v any) bool {
 		provider, ok := v.(Provider)
@@ -62,7 +65,7 @@ func NewProviderClientByENV(ctx context.Context, region string) error {
 			errs = append(errs, err)
 			return true
 		}
-		secretClient, err := provider.NewClientByENV(ctx, region)
+		secretClient, err := provider.NewClientByENV()
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%v new client by env error %v", k, err))
 			return true
@@ -81,9 +84,10 @@ type Provider interface {
 	// NewClient constructs secrets client by secret store
 	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
 	// NewClientByENV constructs secrets client by environment variable
-	NewClientByENV(ctx context.Context, region string) (SecretClient, error)
+	NewClientByENV() (SecretClient, error)
 	GetName() string
 	GetRegion() string
+	GetEndpoint() string
 }
 
 type SecretClient interface {

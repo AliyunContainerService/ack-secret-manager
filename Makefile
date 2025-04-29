@@ -23,20 +23,20 @@ setup:
 	glide install --strip-vendor
 
 build: *.go fmt
-	CGO_ENABLED=0  go build -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
+	GOARCH=${TARGETARCH} GOOS=${TARGETOS} CGO_ENABLED=0  go build -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
 
 build-race: *.go fmt
-	CGO_ENABLED=0  go build -race -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
+	GOARCH=${TARGETARCH} GOOS=${TARGETOS} CGO_ENABLED=0  go build -race -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
 
 build-all:
-	CGO_ENABLED=0  go build $$(glide nv)
+	GOARCH=${TARGETARCH} GOOS=${TARGETOS} CGO_ENABLED=0  go build $$(glide nv)
 
 build-image:
-	CGO_ENABLED=0  go build -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
+	GOARCH=${TARGETARCH} GOOS=${TARGETOS} CGO_ENABLED=0  go build -o build/bin/$(BINARY_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cmd/manager
 	docker build --build-arg SECRET_MANAGER_VERSION=${SECRET_MANAGER_VERSION} -t ${IMG} .
 
 build-cleanup-image:
-	CGO_ENABLED=0  go build -o build/bin/$(CLEANUP_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cleanup
+	GOARCH=${TARGETARCH} GOOS=${TARGETOS} CGO_ENABLED=0  go build -o build/bin/$(CLEANUP_NAME) github.com/AliyunContainerService/$(BINARY_NAME)/cleanup
 	docker build -f cleanup/Dockerfile --build-arg SECRET_MANAGER_VERSION=${SECRET_MANAGER_VERSION} -t ${CLEANUP_IMG} .
 
 # Run tests

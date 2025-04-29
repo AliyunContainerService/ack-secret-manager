@@ -2,48 +2,103 @@
 
 [ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据或[阿里云OOS加密参数](https://www.alibabacloud.com/help/zh/oos/getting-started/manage-encryption-parameters), 以K8s原生Secret对象的形式导入到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家或加密参数中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
-## 安装
+## Helm CLI
+
+### 先决条件
+
+- Helm >= 3
+- Kubernetes >= 1.16
+
+### 安装
+
+1. 拉取代码
+
+```bash
+git clone https://github.com/AliyunContainerService/ack-secret-manager.git
+cd ack-secret-manager
+```
+
+2. 安装 ack-secret-manager
+
+```bash
+helm install ack-secret-manager ./charts/ack-secret-manager \
+  --namespace kube-system \
+  --set image.repository=registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager \
+  --set command.region=cn-hangzhou \
+  --set command.enableWorkerRole=false \
+  --set command.kmsEnpoint=kms.cn-zhangzhou.aliyuncs.com
+```
+
+说明
+
+- 指定参数 image.repository 为可拉取的 ack-secret-manager 镜像仓库地址，默认为 registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
+- 指定参数 command.region 为集群所在区域
+- 自版本 0.5.6 开始，增加参数 command.enableWorkerRole，默认为 true，配置方式参考 [使用说明](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/README-zh_CN.md#使用说明) 第5部分
+- 自版本 0.5.8 开始，增加参数 command.kmsEnpoint 配置 KMS 服务地址，默认为空，配置方式参考 [使用说明](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/README-zh_CN.md#使用说明) 第6部分
+
+### 更新
+
+1. 修改参数
+   执行如下命令进行更新需要修改的参数
+
+```bash
+helm upgrade ack-secret-manager ./charts/ack-secret-manager \
+    --namespace kube-system \
+    --set command.maxConcurrentKmsSecretPulls=5
+```
+
+### 卸载
+
+1. 卸载 ack-secret-manager
+
+```bash
+helm -n kube-system uninstall ack-secret-manager
+```
+
+## 阿里云容器服务控制台
+
+### 安装
 
 1. 请确保组件使用的凭据有足够的权限访问需要同步的阿里云服务，可以使用如下两种配置方式，推荐使用RRSA方式，实现Pod维度的授权
-    - 在集群对应的 WorkerRole 中添加权限
-        - 登录容器服务控制台
-        - 选择对应集群进入到集群详情页
-        - 在集群信息中选择**集群资源**页，点击Worker RAM角色中对应的命名为**KubernetesWorkerRole-xxxxxxxxxxxxxxx** 的角色名称，会自动导航到RAM角色对应的控制台页面
-        - 点击添加权限按钮，创建自定义权限策略，策略内容如下（仅授权同步服务需要的RAM策略即可，保证最小权限原则）：
-          ```json
-          {
-              "Action": [
-                // 阿里云KMS凭据管家所需权限
-                "kms:GetSecretValue",
-                "kms:Decrypt",
-          
-                // 阿里云OOS加密参数所需权限
-                "oos:GetSecretParameter",
-                "kms:GetSecretValue"
-              ],
-              "Resource": [
-                  "*"
-              ],
-              "Effect": "Allow"
-          }
-          ```
-        - 绑定上面创建的自定义策略给集群对应的WorkerRole
-    - 通过 [RRSA方式](https://help.aliyun.com/document_detail/356611.html) 实现Pod维度的授权
-        * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
-        * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：为指定的 serviceaccount 创建对应的 RAM 角色，为 RAM 角色设置信任策略，并为 RAM 角色授权
+   - 在集群对应的 WorkerRole 中添加权限
+     - 登录容器服务控制台
+     - 选择对应集群进入到集群详情页
+     - 在集群信息中选择**集群资源**页，点击Worker RAM角色中对应的命名为**KubernetesWorkerRole-xxxxxxxxxxxxxxx** 的角色名称，会自动导航到RAM角色对应的控制台页面
+     - 点击添加权限按钮，创建自定义权限策略，策略内容如下（仅授权同步服务需要的RAM策略即可，保证最小权限原则）：
+       ```json
+       {
+           "Action": [
+             // 阿里云KMS凭据管家所需权限
+             "kms:GetSecretValue",
+             "kms:Decrypt",
+
+             // 阿里云OOS加密参数所需权限
+             "oos:GetSecretParameter",
+             "kms:GetSecretValue"
+           ],
+           "Resource": [
+               "*"
+           ],
+           "Effect": "Allow"
+       }
+       ```
+     - 绑定上面创建的自定义策略给集群对应的WorkerRole
+   - 通过 [RRSA方式](https://help.aliyun.com/document_detail/356611.html) 实现Pod维度的授权
+     * [启用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-ywl-59g-j8h)
+     * [使用RRSA功能](https://help.aliyun.com/document_detail/356611.html#section-rmr-eeh-878) ：为指定的 serviceaccount 创建对应的 RAM 角色，为 RAM 角色设置信任策略，并为 RAM 角色授权
 2. 登录到容器服务控制台
    * 在左侧导航栏选择**市场** -> **应用市场**，在搜索栏中输入ack-secret-manager，选择进入到应用页面；
    * 选择需要安装的目标集群和命名空间、发布名称；
    * 在参数配置页面进行自定义参数配置，包括 values.yaml 中的 `rrsa.enable`以及配置 `envVarsFromSecret` 中的相关参数，参数说明参见下方的**配置说明**；
    * 点击**确定**按钮完成安装。
 
-## 升级
+### 更新
 
 1. 登录到容器服务控制台；
 2. 选择目标集群点击进入到集群详情页面；
 3. 在左侧的导航栏选择应用-> Helm，找到 ack-secret-manager 对应的**更新**，修改配置后点击**确定**按钮完成安装。
 
-## 卸载
+### 卸载
 
 1. 登录到容器服务控制台；
 2. 选择目标集群点击进入到集群详情页面；
@@ -68,6 +123,7 @@
 | command.reconcileCount                              | 指定并发协调externalSecret实例的worker数量，默认是1                                                                                             | 1                      |
 | command.tokenRotationPeriod                         | 检查 client访问STS token是否过期的轮询时间                                                                                                      | 120s                   |
 | command.region                                      | 从指定region拉取secret凭据                                                                                                                      |                        |
+| command.kmsEndpoint                                 | 从指定endpoint拉取secret凭据                                                                                                                    |                        |
 | command.disablePolling                              | 关闭从后端自动同步拉取最新的凭据内容，默认false                                                                                                 | false                  |
 | command.pollingInterval                             | 从后端同步存量secret实例的间隔时间                                                                                                              | 120s                   |
 | command.maxConcurrentSecretPulls                    | 已弃用                                                                                                                                          | -                      |
@@ -95,10 +151,10 @@
 
 下文会在阿里云 KMS 凭据管家中添加一个测试凭据进行凭据同步，并展示部分扩展功能。
 
-| 配置字段                          | 阿里云 KMS 凭据                | 阿里云 OOS 加密参数                |
-| ------------------------------------------- | ------------------------------ | ---------------------------------- |
-| **SecretStore 认证方式关键字**        | SecretStore.Spec.KMS.KMSAuth   | SecretStore.Spec.OOS.OOSAuth       |
-| **ExternalSecret.spec.provider** | kms                            | oos                                |
+| 配置字段                               | 阿里云 KMS 凭据                | 阿里云 OOS 加密参数               |
+| -------------------------------------- | ------------------------------ | --------------------------------- |
+| **SecretStore 认证方式关键字**   | SecretStore.Spec.KMS.KMSAuth   | SecretStore.Spec.OOS.OOSAuth      |
+| **ExternalSecret.spec.provider** | kms                            | oos                               |
 | **ExternalSecret.spec.data.key** | <KMS 凭据名称>(如下文的 test1) | <OOS加密参数名称>(如下文的 test2) |
 
 ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（例如 RRSA ，ClientKey，AK 配置等），ExternalSecret 用于存放需要同步的凭据基础信息（如凭据名称，版本等）以及指定 SecretStore，保证了权限与数据分离，增强使用灵活性。具体介绍见下方 **CRD 配置介绍**
@@ -107,13 +163,14 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
    当前支持同步 KMS 凭据和 OOS 加密参数，下面分别是两种密文的创建方式参考
 
    - 在KMS凭据管家中添加如下凭证，详细流程请参考[管理通用凭据](https://www.alibabacloud.com/help/zh/doc-detail/152003.html)
+
      ```txt
      SecretName: test1
      SecretData: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
      VersionId: v1
      ```
-
    - 在OOS加密参数中添加如下参数，详细流程请参考[管理加密参数](https://www.alibabacloud.com/help/zh/oos/developer-reference/api-oos-2019-06-01-createsecretparameter)
+
      ```txt
      Name: test2
      Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
@@ -176,11 +233,11 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
      type: Opaque
      ```
    - 在没有关闭自动同步配置的前提下，可以修改KMS凭据管家中的密钥内容，等待片刻后查看目标secret是否已经完成同步
-3. JSON凭据解析
+3. JSON/YAML 凭据解析
 
    **data**
 
-   - 如果您希望解析一个 JSON 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用 `jmesPath`字段。以下是一个使用 `jmesPath` 字段的样例，我们将其部署在集群中
+   - 如果您希望解析一个 JSON/YAML 格式的 secret 并将其中指定的 key-value 对同步到 k8s secret 中，可以使用 `jmesPath`字段。以下是一个使用 `jmesPath` 字段的样例，我们将其部署在集群中
      ```yaml
      apiVersion: 'alibabacloud.com/v1alpha1'
      kind: ExternalSecret
@@ -195,14 +252,14 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
            secretStoreRef:
              name: scdemo
              namespace: default
-           jmesPath: # 解析 json 串中的部分字段
+           jmesPath: # 解析 json/yaml 凭据中的部分字段
              - path: "name"
                objectAlias: "name"
              - path: "friends[0].name"
                objectAlias: "friendname"
      ```
    - 当您使用 `jmesPath`字段时，必需指定下面两个子字段：
-     - `path`: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json 中的指定字段
+     - `path`: 必需项，基于 [JMES path](https://jmespath.org/specification.html) 规范解析 json/yaml 中的指定字段
      - `objectAlias`: 必需项，用于指定解析出的字段同步到 k8s secret 中的 key 名称
    - 部署后检查 secret 是否创建成功
      ```sh
@@ -221,9 +278,9 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
      type: Opaque
      ```
 
-   **datasource**
+   **dataProcess**
 
-   - 如果您想将 JSON 凭据解析后再存放入 secret 中，但又不知道凭据的具体结构，可以采用自解析功能，即 dataProcess.Extract 字段。并且可以针对解析后的字段键进行规则替换，即 dataProcss.replaceRule 字段，防止不规则的 secret data key 导致无法创建 secret，以下为样例 ExternalSecret
+   - 如果您想将 JSON/YAML 凭据解析后再存放入 secret 中，但又不知道凭据的具体结构，可以采用自解析功能，即 dataProcess.Extract 字段。并且可以针对解析后的字段键进行规则替换，即 dataProcss.replaceRule 字段，防止不规则的 secret data key 导致无法创建 secret，以下为样例 ExternalSecret
      ```yaml
      apiVersion: 'alibabacloud.com/v1alpha1'
      kind: ExternalSecret
@@ -237,7 +294,7 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
              name: extract
              versionId: v1
              secretStoreRef:
-               name: dkms-client
+               name: scdemo
                namespace: default
            replaceRule:
              - source: "^n.*e$" #替换 以n开头以e结尾 的 key 为 alibabacloud
@@ -245,7 +302,7 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
              - source: "^f.*s$"
                target: "ack"
      ```
-   - 同步成功即可看到如下结果，JSON 凭据被解析为三部分，且各自的键根据 replaceRule 规则进行了替换
+   - 同步成功即可看到如下结果，JSON/YAML 凭据被解析为三部分，且各自的键根据 replaceRule 规则进行了替换
      ```yaml
      apiVersion: v1
      data:
@@ -273,6 +330,23 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
          remoteRamRoleArn: "acs:ram::{accountID}:role/{roleName}"   #替换为指定跨账号RAM角色的ARN
          remoteRamRoleSessionName: ""
    ```
+5. command.enableWorkerRole 配置介绍
+   command.enableWorkerRole 配置与集群类型有关，以下是对应关系：
+
+   | 集群类型      | command.enableWorkerRole |
+   | ------------- | ------------------------ |
+   | ACK 托管集群  | true                     |
+   | ACK 专有集群  | true                     |
+   | ACK Edge 集群 | true                     |
+   | 其它集群      | false                    |
+6. command.kmsEndpoint 配置介绍
+   KMS 当前支持专属网关和共享网关两种访问方式，应用当前支持这两种方式，不同方式需要配置不同的 Endpoint，以下是不同网关的 Endpoint 地址配置方式：
+
+   | 网关类型     | Endpoint 地址                                    | 使用说明                                                                                                                            |
+   | ------------ | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------- |
+   | 专属网关     | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. 要求 KMS 实例和集群 Region 相同且VPC 相同<br />2. 替换 {kms-instance-id} 为实际的 KMS 实例 ID<br />3. KMS 实例版本 3.0 以上      |
+   | VPC共享网关  | kms-vpc.{region}.aliyuncs.com                    | 1. 要求 KMS 实例和集群 Region 相同<br />2. 应用 Endpoint 默认配置，使用此地址无需配置<br />3. 替换 {region} 为 KMS 实例所在的region |
+   | 公网共享网关 | kms.{region}.aliyuncs.com                        | 1. 替换 {region} 为 KMS 实例所在的 region<br />2. 集群具有公网访问能力                                                              |
 
 ## CRD 配置介绍
 
@@ -289,21 +363,21 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
 **data（无需经过特殊处理的数据源）**
 
-| crd 字段       | 描述                                                                  | 是否必选 |
-| -------------- | --------------------------------------------------------------------- | -------- |
-| key            | 目标 secret 的唯一标识（例如 KMS 凭据的 key）                         | 是       |
-| name           | 在集群 secret data 中对应的 key                                       | 否       |
-| versionStage   | 目标 secret 版本状态                                                  | 否       |
-| versionId      | 目标 secret 版本号, 当 provider 是 oos 时, 则不需要指定该字段         | 否       |
-| jmesPath       | 如果目标 secret 为 json 类型，可指定获取 json 中特定 key 对应的 value | 否       |
-| secretStoreRef | 引用的 SecretStore 信息                                               | 否       |
+| crd 字段       | 描述                                                                            | 是否必选 |
+| -------------- | ------------------------------------------------------------------------------- | -------- |
+| key            | 目标 secret 的唯一标识（例如 KMS 凭据的 key）                                   | 是       |
+| name           | 在集群 secret data 中对应的 key                                                 | 否       |
+| versionStage   | 目标 secret 版本状态                                                            | 否       |
+| versionId      | 目标 secret 版本号, 当 provider 是 oos 时, 则不需要指定该字段                   | 否       |
+| jmesPath       | 如果目标 secret 为 json/yaml 类型，可指定获取 json/yaml 中特定 key 对应的 value | 否       |
+| secretStoreRef | 引用的 SecretStore 信息                                                         | 否       |
 
 **dataProcess（需要进行特殊处理的数据源）**
 
-| crd 字段    | 描述                                                                             | 是否必选 |
-| ----------- | -------------------------------------------------------------------------------- | -------- |
-| extract     | 针对目标 secret 进行 json 解析，不需要用户指定 json key                          | 否       |
-| replaceRule | 根据特定规则替换经过 json 解析的 secret 的 key，防止非法 key 不能存入 k8s secret | 否       |
+| crd 字段    | 描述                                                                                  | 是否必选 |
+| ----------- | ------------------------------------------------------------------------------------- | -------- |
+| extract     | 针对目标 secret 进行 json/yaml 解析，不需要用户指定 json/yaml key                     | 否       |
+| replaceRule | 根据特定规则替换经过 json/yaml 解析的 secret 的 key，防止非法 key 不能存入 k8s secret | 否       |
 
 **replaceRule（用于进行 Secret Key 内容替换）**
 
@@ -314,10 +388,10 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
 **jmesPath**
 
-| crd 字段    | 描述                            | 是否必选 |
-| ----------- | ------------------------------- | -------- |
-| path        | jmes 表达式，用户指定 json key  | 是       |
-| objectAlias | 存入 k8s secret 对应的 data key | 是       |
+| crd 字段    | 描述                                | 是否必选 |
+| ----------- | ----------------------------------- | -------- |
+| path        | jmes 表达式，用户指定 json/yaml key | 是       |
+| objectAlias | 存入 k8s secret 对应的 data key     | 是       |
 
 **secretStoreRef**
 
@@ -349,31 +423,29 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
 **KMSAuth**
 
-| crd 字段                 | 描述                     | 是否必选 |
-| ------------------------ |------------------------| -------- |
+| crd 字段                 | 描述                                | 是否必选 |
+| ------------------------ | ----------------------------------- | -------- |
 | accessKey                | 参考如下阿里云AccessKey认证配置方式 | 否       |
 | accessKeySecret          | 参考如下阿里云AccessKey认证配置方式 | 否       |
-| ramRoleARN               | RAM 角色 ARN             | 否       |
-| ramRoleSessionName       | 角色会话名                  | 否       |
-| oidcProviderARN          | OIDC 提供商 ARN           | 否       |
-| oidcTokenFilePath        | OIDC Token文件路径         | 否       |
-| remoteRamRoleArn         | 跨账号 RAM 角色 ARN         | 否       |
-| remoteRamRoleSessionName | 跨账号RAM角色 session name  | 否       |
+| ramRoleARN               | RAM 角色 ARN                        | 否       |
+| ramRoleSessionName       | 角色会话名                          | 否       |
+| oidcProviderARN          | OIDC 提供商 ARN                     | 否       |
+| oidcTokenFilePath        | OIDC Token文件路径                  | 否       |
+| remoteRamRoleArn         | 跨账号 RAM 角色 ARN                 | 否       |
+| remoteRamRoleSessionName | 跨账号RAM角色 session name          | 否       |
 
 **OOSAuth**
 
-| crd 字段                 | 描述                         | 是否必选 |
-| ------------------------ | ---------------------------- |------|
-| accessKey                | 参考如下阿里云AccessKey认证配置方式 | 否    |
-| accessKeySecret          | 参考如下阿里云AccessKey认证配置方式 | 否    |
-| ramRoleARN               | RAM 角色 ARN           | 否    |
-| ramRoleSessionName       | 角色会话名                   | 否    |
-| oidcProviderARN          | OIDC 提供商 ARN       | 否    |
-| oidcTokenFilePath        | OIDC Token文件路径               | 否    |
-| remoteRamRoleArn         | 跨账号 RAM 角色 ARN    | 否    |
-| remoteRamRoleSessionName | 跨账号 RAM 角色 session name | 否    |
-
-
+| crd 字段                 | 描述                                | 是否必选 |
+| ------------------------ | ----------------------------------- | -------- |
+| accessKey                | 参考如下阿里云AccessKey认证配置方式 | 否       |
+| accessKeySecret          | 参考如下阿里云AccessKey认证配置方式 | 否       |
+| ramRoleARN               | RAM 角色 ARN                        | 否       |
+| ramRoleSessionName       | 角色会话名                          | 否       |
+| oidcProviderARN          | OIDC 提供商 ARN                     | 否       |
+| oidcTokenFilePath        | OIDC Token文件路径                  | 否       |
+| remoteRamRoleArn         | 跨账号 RAM 角色 ARN                 | 否       |
+| remoteRamRoleSessionName | 跨账号 RAM 角色 session name        | 否       |
 
 **阿里云AccessKey认证配置方式**
 
@@ -389,16 +461,19 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 
 ## 安全
 
-对于发现的安全漏洞，请发送邮件至**kubernetes-security@service.aliyun.com**，您可在[SECURITY.md](./SECURITY.md)文件中找到更多信息。
+对于发现的安全漏洞，请发送邮件至**kubernetes-security@service.aliyun.com**，您可在[SECURITY.md](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/SECURITY.md)文件中找到更多信息。
 
 ## Release Note
 
-| 版本号    | 变更时间       | 变更内容                                                                        |
-| --------- | -------------- |-----------------------------------------------------------------------------|
-| `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段                                                     |
+| 版本号    | 变更时间       | 变更内容                                                                                                           |
+| --------- | -------------- | ------------------------------------------------------------------------------------------------------------------ |
+| `0.4.0` | 2022年12月22日 | 支持基于JMES解析提取JSON格式的密文字段                                                                             |
 | `0.5.0` | 2023年10月10日 | 1.支持专属版 KMS 凭据同步<br />2.多阿里云访问凭据管理<br />3.凭据自解析与键规则替换<br />4.支持 KMS 跨账号凭据同步 |
-| `0.5.1` | 2023年10月18日 | 部分功能与性能优化                                                                   |
-| `0.5.2` | 2024年8月1日   | 大规模资源同步并发优化                                                                 |
-| `0.5.3` | 2024年10月10日 | 支持资源同步秒级限流，修复部分软件包cve                                                       |
-| `0.5.4` | 2024年10月31日 | 支持同步 OOS 加密参数                                                               |
-| `0.5.5` | 2024年11月22日 | 支持同步 binary 类型的凭据                                                           |
+| `0.5.1` | 2023年10月18日 | 部分功能与性能优化                                                                                                 |
+| `0.5.2` | 2024年8月1日   | 大规模资源同步并发优化                                                                                             |
+| `0.5.3` | 2024年10月10日 | 支持资源同步秒级限流，修复部分软件包cve                                                                            |
+| `0.5.4` | 2024年10月31日 | 支持同步 OOS 加密参数                                                                                              |
+| `0.5.5` | 2024年11月22日 | 支持同步 binary 类型的凭据                                                                                         |
+| `0.5.6` | 2025年3月3日   | 支持Acs集群                                                                                                        |
+| `0.5.7` | 2025年3月26日  | 支持解析提取YAML格式的密文字段                                                                                     |
+| `0.5.8` | 2025年3月28日  | 1.支持多架构部署<br />2.支持配置 Endpoint 获取 KMS 凭据                                                            |

@@ -25,15 +25,17 @@ import (
 	"regexp"
 	"time"
 
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/jmespath/go-jmespath"
-	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
+	"github.com/jmespath/go-jmespath"
+	"k8s.io/klog"
 )
 
 const (
@@ -184,6 +186,15 @@ func JsonStr(o interface{}) string {
 	return string(str)
 }
 
+func YamlStr(o interface{}) string {
+	temp, ok := o.(string)
+	if ok {
+		return temp
+	}
+	str, _ := yaml.Marshal(o)
+	return string(str)
+}
+
 // Ignore not found errors
 func IgnoreNotFoundError(err error) error {
 	if apierrors.IsNotFound(err) {
@@ -195,28 +206,62 @@ func IgnoreNotFoundError(err error) error {
 func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) (jsonMap map[string]string, err error) {
 	jsonMap = make(map[string]string, 0)
 	var data interface{}
-	err = json.Unmarshal([]byte(secretValue), &data)
-	if err != nil {
-		return nil, fmt.Errorf("invalid JSON used with jmesPath in secret key: %s", key)
+	// Attempt to unmarshal the secretValue as YAML. If it fails, try to unmarshal it as JSON.
+	// If both attempts fail, return an error indicating that the provided value is neither valid JSON nor YAML.
+	marshalToYaml := true
+	if err = yaml.Unmarshal([]byte(secretValue), &data); err != nil {
+		marshalToYaml = false
+		if err = json.Unmarshal([]byte(secretValue), &data); err != nil {
+			return nil, fmt.Errorf("invalid JSON or YAML used with jmesPath in secret key: %s", key)
+		}
 	}
+
 	//fetch all specified key value pairs`
 	for _, jmesPathEntry := range jmesObj {
 		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
 		if err != nil {
-			return nil, fmt.Errorf("Invalid JMES Path: %s.", jmesPathEntry.Path)
+			klog.Errorf("Invalid JMES Path: %s.", jmesPathEntry.Path)
+			continue
 		}
 
 		if jsonSecret == nil {
-			return nil, fmt.Errorf("JMES Path - %s for object alias - %s does not point to a valid object.",
+			klog.Errorf("JMES Path - %s for object alias - %s does not point to a valid object.",
 				jmesPathEntry.Path, jmesPathEntry.ObjectAlias)
+			continue
 		}
 
-		jsonSecretAsString, isString := jsonSecret.(string)
-		if !isString {
-			return nil, fmt.Errorf("Invalid JMES search result type for path:%s. Only string is allowed.", jmesPathEntry.Path)
+		var strValue string
+		switch v := jsonSecret.(type) {
+		case string:
+			strValue = v
+		case int, int64, uint, uint64, float32, float64, bool:
+			strValue = fmt.Sprintf("%v", v)
+		case map[string]interface{}, []interface{}:
+			// Marshal complex types (maps, slices) to YAML or JSON
+			if marshalToYaml {
+				yamlData, err := yaml.Marshal(v)
+				if err != nil {
+					klog.Errorf("failed to marshal value to JSON, key: %v, type: %T, error: %v", jmesPathEntry.ObjectAlias, v, err)
+					continue
+				}
+				strValue = string(yamlData)
+			} else {
+				jsonData, err := json.Marshal(v)
+				if err != nil {
+					klog.Errorf("failed to marshal value to JSON, key: %v, type: %T, error: %v", jmesPathEntry.ObjectAlias, v, err)
+					continue
+				}
+				strValue = string(jsonData)
+			}
+
+		default:
+			klog.Errorf("unsupported value type for key: %v, type: %T", jmesPathEntry.ObjectAlias, v)
+			continue
 		}
-		jsonMap[jmesPathEntry.ObjectAlias] = jsonSecretAsString
+
+		jsonMap[jmesPathEntry.ObjectAlias] = strValue
 	}
+
 	return jsonMap, nil
 }
 

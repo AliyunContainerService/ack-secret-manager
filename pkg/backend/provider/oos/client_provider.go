@@ -12,9 +12,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/auth"
 	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
@@ -50,6 +50,10 @@ func (p *Provider) GetName() string {
 
 func (p *Provider) GetRegion() string {
 	return p.region
+}
+
+func (p *Provider) GetEndpoint() string {
+	return ""
 }
 
 func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
@@ -110,9 +114,9 @@ func NewOOSClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.
 
 	//get ram auth credential
 	cred, err := auth.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock: p.Manager.RamLock,
+		RamLock:     p.Manager.RamLock,
 		RamProvider: p.Manager.RamProvider,
-    })
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -131,11 +135,12 @@ func NewOOSClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.
 	return client, nil
 }
 
-func (p *Provider) NewClientByENV(ctx context.Context, region string) (backend.SecretClient, error) {
+func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
 	authEnvs := auth.GetCredentialParameterFromEnv()
+	region := p.GetRegion()
 	//get ram auth credential
 	cred, err := authEnvs.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock: p.Manager.RamLock,
+		RamLock:     p.Manager.RamLock,
 		RamProvider: p.Manager.RamProvider,
 	})
 	if err != nil {
