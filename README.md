@@ -4,7 +4,59 @@ English | [简体中文](./README-zh_CN.md)
 
 [ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) can help you import key credentials stored in [Alibaba Cloud KMS  Secrets Manager](https://www.alibabacloud.com/help/en/key-management-service) or [Alibaba Cloud OOS Encryption Parameter ](https://www.alibabacloud.com/help/en/oos/getting-started/manage-encryption-parameters)into the cluster in the form of Kubernetes native Secret objects and achieve automatic synchronization of key data, you can introduce the ciphertext stored in the Secrets Manager or Encryption Parameter into the application in the form of mounting Secret in the application Pod, to avoid the spread of sensitive data in the application development and construction process and leaks.
 
-## Install
+## Helm CLI
+
+### Prerequisites
+
+- Helm >= 3
+- Kubernetes >= 1.16
+
+### Install
+
+1. Clone the repository
+
+```bash
+git clone https://github.com/AliyunContainerService/ack-secret-manager.git
+cd ack-secret-manager
+```
+
+2. Install ack-secret-manager
+
+```bash
+helm install ack-secret-manager ./charts/ack-secret-manager \
+  --namespace kube-system \
+  --set image.repository=registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager \
+  --set command.region=cn-hangzhou \
+  --set command.enableWorkerRole=false \
+  --set command.kmsEnpoint=kms.cn-zhangzhou.aliyuncs.com
+```
+
+Notes:
+
+- The image.repository parameter specify the image repository address for ack-secret-manager, default to registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager.
+- The command.region parameter specify the region where the cluster is located.
+- From version 0.5.6, the command.enableWorkerRole parameter is added, default to true. For configuration  refer to [Instructions for use](https://github.com/AliyunContainerService/ack-secret-manager?tab=readme-ov-file#instructions-for-use) part 5.
+- From version 0.5.8, the command.kmsEnpoint parameter is added to configure the KMS service endpoint, default to empty.For configuration  refer to [Instructions for use](https://github.com/AliyunContainerService/ack-secret-manager?tab=readme-ov-file#instructions-for-use) part 6.
+
+### Upgrade
+
+Modify parameters and execute the following command to update the parameters that need to be modified:
+
+```bash
+helm upgrade ack-secret-manager ./charts/ack-secret-manager \
+    --namespace kube-system \
+    --set command.maxConcurrentKmsSecretPulls=5
+```
+
+### Uninstall
+
+1. Uninstall ack-secret-manager
+
+```bash
+helm -n kube-system uninstall ack-secret-manager
+```
+
+### Install
 
 1. Make sure that the credentials used by the ack-secret-manager has sufficient permissions to access the Alibaba Cloud product service. You can use the following two configuration methods, and we recommend you to use the second **RRSA** method to achieve authorization in the Pod level.
 
@@ -40,13 +92,13 @@ English | [简体中文](./README-zh_CN.md)
    * Configure custom parameters on the parameter configuration page, including `rrsa.enable` in values.yaml and related parameters in `envVarsFromSecret`. For parameter descriptions, see the **configuration instructions** below;
    * Click the **OK** button to complete the installation.
 
-## Upgrade
+### Upgrade
 
 1. Log in to the Container Service console;
 2. Select the target cluster and click to enter the cluster details page;
 3. Select **Applications** -> **Helm** in the navigation bar on the left, find the **Update** button corresponding to ack-secret-manager, modify the configuration and click the **OK** button to complete the installation.
 
-## Uninstall
+### Uninstall
 
 1. Log in to the Container Service console;
 2. Select the target cluster and click to enter the cluster details page;
@@ -71,6 +123,7 @@ English | [简体中文](./README-zh_CN.md)
 | command.reconcileCount                              | Specify the number of workers to concurrently coordinate the externalSecret instance. The default is 1                                                                                                            | 1                       |
 | command.tokenRotationPeriod                         | Polling time to check whether the client access STS token has expired                                                                                                                                             | 120s                    |
 | command.region                                      | Pull secret credentials from the specified region                                                                                                                                                                 |                         |
+| command.kmsEndpoint                                 | Pull secret credentials from the specified endpoint                                                                                                                                                               |                         |
 | command.disablePolling                              | Turn off automatic synchronization of pulling the latest credential content from the backend, default false                                                                                                       | false                   |
 | command.pollingInterval                             | The interval for synchronizing existing secret instances from the backend                                                                                                                                         | 120s                    |
 | command.maxConcurrentSecretPulls                    | Deprecated                                                                                                                                                                                                        | -                       |
@@ -98,94 +151,95 @@ English | [简体中文](./README-zh_CN.md)
 
 The following will add a test credential in Alibaba Cloud KMS Secrets Manager for synchronize the credentials, and demonstrate some extended functions.
 
-| Configuration                             | Alibaba KMS Credential                       | Alibaba Cloud OOS  Secret Parameter               |
-| ----------------------------------------------- | -------------------------------------------- | ------------------------------------------------- |
-| **SecretStore keyword authentication method** | SecretStore.Spec.KMS.KMSAuth                 | SecretStore.Spec.OOS.OOSAuth                      |
-| **ExternalSecret.spec.provider**        | kms                                          | oos                                               |
-| **ExternalSecret.spec.data.key**        | `<KMS  credential name>`(as follows test1) | `<OOS encryption parameter name>`(as follows test2) |
+**Tip: The method of cryptotext synchronization for other Alibaba Cloud products is similar to that of KMS credentials. Just refer to the method in step 1 to add corresponding products cryptotext first, then modify the configuration fields in the SecretStore and ExternalSecret examples below to the corresponding values in the table below.**
+
+| Configuration                                       | Alibaba KMS Credential                       | Alibaba Cloud OOS  Secret Parameter                   |
+| --------------------------------------------------- | -------------------------------------------- | ----------------------------------------------------- |
+| **SecretStore keyword authentication method** | SecretStore.Spec.KMS.KMSAuth                 | SecretStore.Spec.OOS.OOSAuth                          |
+| **ExternalSecret.spec.provider**              | kms                                          | oos                                                   |
+| **ExternalSecret.spec.data.key**              | `<KMS  credential name>`(as follows test1) | `<OOS encryption parameter name>`(as follows test2) |
 
 ack-secret-manager involves two CRDs. SecretStore is used to store access credentials (such as RRSA configuration, ClientKey, AK configuration, etc.), and ExternalSecret is used to store basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore. It ensures the separation of permissions and data and enhances the flexibility of use. See below for details **CRD configuration introduction**
 
 1. Create ciphertexts
-   
-   Currently supports synchronization of KMS credentials and OOS encryption parameters. The following are references to how to create both types of ciphertexts.
+   Currently supports synchronization of KMS credentials and OOS encryption parameters. The following are references to how to create two ciphertexts.
 
-    - Add the following credential in the KMS Secrets Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
+   - Add the following credential in the KMS Secrets Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
 
-      ```txt
-      SecretName: test1
-      SecretData: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
-      VersionId: v1
-      ```
-    - Add the following parameter to the OOS Encryption Parameters. Please refer to the detailed process[CreateSecretParameter](https://www.alibabacloud.com/help/en/oos/developer-reference/api-oos-2019-06-01-createsecretparameter)
+     ```txt
+     SecretName: test1
+     SecretData: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
+     VersionId: v1
+     ```
+   - Add the following parameter to the OOS Encryption Parameters. Please refer to the detailed process[CreateSecretParameter](https://www.alibabacloud.com/help/en/oos/developer-reference/api-oos-2019-06-01-createsecretparameter)
 
-      ```txt
-      Name: test2
-      Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
-      ```
-3. Create SecretStore & ExternalSecret
+     ```txt
+     Name: test2
+     Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
+     ```
+2. Create SecretStore & ExternalSecret
 
    Prerequisite: Enable RRSA for the cluster and properly configure the relevant RAM Role permissions
 
    This example includes descriptions of some configuration fields in the template, which will not be repeated in the following example.
 
-    - Create a test instance named `scdemo` of SecretStore, and saved as a file `hello-service-secret-store.yml`. The sample template is as follows, with some fields need to be replaced.
-      ```yaml
-      apiVersion: 'alibabacloud.com/v1alpha1'
-      kind: SecretStore
-      metadata:
-        name: scdemo
-      spec:
-        KMS: # When synchronizing KMS Secret Manager credentials, specify as KMS, and OOS when synchronizing OOS encryption parameters
-          KMSAuth: # KMSAuth or OOSAuth
-            oidcProviderARN: "acs:ram::{accountID}:oidc-provider/ack-rrsa-{clusterID}"
-            ramRoleARN: "acs:ram::{accountID}:role/{roleName}"
-      ```
-    - Create a test instance named `esdemo` of ExternalSecret, and saved as a file `hello-service-external-secret.yml`. The test template is as follows:
-      ```yaml
-      apiVersion: 'alibabacloud.com/v1alpha1'
-      kind: ExternalSecret
-      metadata:
-        name: esdemo
-      spec:
-        provider: kms  # Currently supports kms and oos, the default value is kms when this field is not specified
-        data:
-          - key: test1 # Key name to be synchronized, currently supports kms credentials and oos encryption parameters, this example is kms credential name
-            name: test1 # the secret name in target Kubernetes cluster
-            versionId: v1 # kms credential version, this field does not need to be configured when the provider is not kms
-            secretStoreRef: # no need to be specified when using worker node RAM Role authentication
-              name: scdemo
-              namespace: default
-      ```
-    - Execute the command to create an secretstore test instance(This instance does not need to be created when using Worker Role authentication):
-      ```sh
-      kubectl apply -f hello-service-secret-store.yml
-      ```
-    - Execute the command to create an externalsecret test instance:
-      ```sh
-      kubectl apply -f hello-service-external-secret.yml
-      ```
-    - Check whether the target secret is created successfully:
-      ```sh
-      kubectl get secret esdemo -oyaml
-      ```
-    - If the creation is successful, view the secret content as follows:
-      ```yaml
-      apiVersion: v1
-      data:
-        test1: eyJuYW1lIjoidG9tIiwiYWdlIjoiMTQiLCJmcmllbmRzIjpbeyJuYW1lIjoibGlsaSJ9LHsibmFtZSI6ImVkZiJ9XX0=
-      kind: Secret
-      metadata:
-        name: esdemo
-        namespace: default
-      type: Opaque
-      ```
-    - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Secrets Manager and wait for a while to check whether the target secret has been synchronized.
-4. JSON-formatted support
+   - Create a test instance named `scdemo` of SecretStore, and saved as a file `hello-service-secret-store.yml`. The sample template is as follows, with some fields need to be replaced.
+     ```yaml
+     apiVersion: 'alibabacloud.com/v1alpha1'
+     kind: SecretStore
+     metadata:
+       name: scdemo
+     spec:
+       KMS: # When synchronizing KMS Secret Manager credentials, specify as KMS, and OOS when synchronizing OOS encryption parameters
+         KMSAuth: # KMSAuth or OOSAuth
+           oidcProviderARN: "acs:ram::{accountID}:oidc-provider/ack-rrsa-{clusterID}"
+           ramRoleARN: "acs:ram::{accountID}:role/{roleName}"
+     ```
+   - Create a test instance named `esdemo` of ExternalSecret, and saved as a file `hello-service-external-secret.yml`. The test template is as follows:
+     ```yaml
+     apiVersion: 'alibabacloud.com/v1alpha1'
+     kind: ExternalSecret
+     metadata:
+       name: esdemo
+     spec:
+       provider: kms  # Currently supports kms and oos, the default value is kms when this field is not specified
+       data:
+         - key: test1 # Key name to be synchronized, currently supports kms credentials and oos encryption parameters, this example is kms credential name
+           name: test1 # the secret name in target Kubernetes cluster
+           versionId: v1 # kms credential version, this field does not need to be configured when the provider is not kms
+           secretStoreRef: # no need to be specified when using worker node RAM Role authentication
+             name: scdemo
+             namespace: default
+     ```
+   - Execute the command to create an secretstore test instance(This instance does not need to be created when using Worker Role authentication):
+     ```sh
+     kubectl apply -f hello-service-secret-store.yml
+     ```
+   - Execute the command to create an externalsecret test instance:
+     ```sh
+     kubectl apply -f hello-service-external-secret.yml
+     ```
+   - Check whether the target secret is created successfully:
+     ```sh
+     kubectl get secret esdemo -oyaml
+     ```
+   - If the creation is successful, view the secret content as follows:
+     ```yaml
+     apiVersion: v1
+     data:
+       test1: eyJuYW1lIjoidG9tIiwiYWdlIjoiMTQiLCJmcmllbmRzIjpbeyJuYW1lIjoibGlsaSJ9LHsibmFtZSI6ImVkZiJ9XX0=
+     kind: Secret
+     metadata:
+       name: esdemo
+       namespace: default
+     type: Opaque
+     ```
+   - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Secrets Manager and wait for a while to check whether the target secret has been synchronized.
+3. JSON/YAML-formatted support
 
    **data**
 
-   - If you want to parse a JSON-formatted secret and synchronize the key-value pairs specified in it to the k8s secret, you can use the `jmesPath` field. The following is an example using the `jmesPath` field, which we deploy in the cluster
+   - If you want to parse a JSON/YAML-formatted secret and synchronize the key-value pairs specified in it to the k8s secret, you can use the `jmesPath` field. The following is an example using the `jmesPath` field, which we deploy in the cluster
      ```yaml
      apiVersion: 'alibabacloud.com/v1alpha1'
      kind: ExternalSecret
@@ -200,7 +254,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
            secretStoreRef:
              name: scdemo
              namespace: default
-           jmesPath: # Parse some fields in json string
+           jmesPath: # Parse some fields in json/yaml string
              - path: "name"
                objectAlias: "name"
              - path: "friends[0].name"
@@ -223,47 +277,47 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      type: Opaque
      ```
    - When you use the `jmesPath` field, you must specify the following two subfields:
-     - `path`: Required, parses the specified field in json based on the [JMES path](https://jmespath.org/specification.html) specification
+     - `path`: Required, parses the specified field in json/yaml based on the [JMES path](https://jmespath.org/specification.html) specification
      - `objectAlias`: Required, used to specify the parsed field to be synchronized to the key name in the k8s secret
 
    **dataProcess**
 
-    - If you want to parse JSON credentials and store them in a secret but don't know the specific structure of the credentials, you can use the self-extraction feature, i.e.  `dataProcess.Extract` field. And you can replace the parsed field key with a rule, i.e., `dataProcss.replaceRule` field, to prevent the secret data key from being irregular, resulting in failure to create a secret, the following is a sample ExternalSecret:
-      ```yaml
-      apiVersion: 'alibabacloud.com/v1alpha1'
-      kind: ExternalSecret
-      metadata:
-        name: extract-secret
-      spec:
-        provider: kms
-        dataProcess:
-          - extract:
-              key: test1
-              name: extract
-              versionId: v1
-              secretStoreRef:
-                name: dkms-client
-                namespace: default
-            replaceRule:
-              - source: "^n.*e$" # To replace keys that start with 'n' and end with 'e' with 'alibabacloud'
-                target: "alibabacloud"
-              - source: "^f.*s$"
-                target: "ack"
-      ```
-    - Once the synchronization is successful, you will be able to see the following results. The JSON credentials are parsed into three parts, and their respective keys are replaced according to the replaceRule rules.
-      ```yaml
-      apiVersion: v1
-      data:
-        ack: W3sibmFtZSI6ImxpbGkifSx7Im5hbWUiOiJlZGYifV0=
-        age: IjE0Ig==
-        alibabacloud: InRvbSI=
-      kind: Secret
-      metadata:
-        name: extract-secret
-        namespace: default
-      type: Opaque
-      ```
-5. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
+   - If you want to parse JSON/YAML credentials and store them in a secret but don't know the specific structure of the credentials, you can use the self-extraction feature, i.e.  `dataProcess.Extract` field. And you can replace the parsed field key with a rule, i.e., `dataProcss.replaceRule` field, to prevent the secret data key from being irregular, resulting in failure to create a secret, the following is a sample ExternalSecret:
+     ```yaml
+     apiVersion: 'alibabacloud.com/v1alpha1'
+     kind: ExternalSecret
+     metadata:
+       name: extract-secret
+     spec:
+       provider: kms
+       dataProcess:
+         - extract:
+             key: test1
+             name: extract
+             versionId: v1
+             secretStoreRef:
+               name: scdemo
+               namespace: default
+           replaceRule:
+             - source: "^n.*e$" # To replace keys that start with 'n' and end with 'e' with 'alibabacloud'
+               target: "alibabacloud"
+             - source: "^f.*s$"
+               target: "ack"
+     ```
+   - Once the synchronization is successful, you will be able to see the following results. The JSON/YAML credentials are parsed into three parts, and their respective keys are replaced according to the replaceRule rules.
+     ```yaml
+     apiVersion: v1
+     data:
+       ack: W3sibmFtZSI6ImxpbGkifSx7Im5hbWUiOiJlZGYifV0=
+       age: IjE0Ig==
+       alibabacloud: InRvbSI=
+     kind: Secret
+     metadata:
+       name: extract-secret
+       namespace: default
+     type: Opaque
+     ```
+4. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
 
    ```yaml
    apiVersion: 'alibabacloud.com/v1alpha1'
@@ -278,6 +332,23 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
          remoteRamRoleArn: "acs:ram::{accountID}:role/{roleName}"  #Replace with the ARN of the specified cross-account RAM role
          remoteRamRoleSessionName: ""
    ```
+5. command.enableWorkerRole Configuration Introduction
+   The configuration of `command.enableWorkerRole` is related to the cluster type, and the corresponding relationship is as follows:
+
+   | Cluster Type          | command.enableWorkerRole |
+   | --------------------- | ------------------------ |
+   | ACK Managed Cluster   | true                     |
+   | ACK Dedicated Cluster | true                     |
+   | ACK Edge Cluster      | true                     |
+   | Other Cluster         | false                    |
+6. commands.kmsEndpoint Configuration Introduction
+   KMS currently supports two access methods: dedicated gateway and shared gateway. The application supports both methods, and different Endpoints need to be configured for each method. Below are the Endpoint address configurations for different gateways:
+
+   | Gateway Type          | Endpoint Address                                 | Usage Instructions                                                                                                                                                                                                                                                |
+   | --------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+   | Dedicated Gateway     | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. Requires the KMS instance and the cluster to be in the same Region and VPC.<br />2. Replace {kms-instance-id} with the actual KMS instance ID.<br />3. KMS instance version must be 3.0 or above.                                                              |
+   | VPC Shared Gateway    | kms-vpc.{region}.aliyuncs.com                    | 1. Requires the KMS instance and the cluster to be in the same Region.<br />2. This is the default Endpoint configuration for the application; no additional configuration is needed.<br />3. Replace {region} with the Region where the KMS instance is located. |
+   | Public Shared Gateway | kms.{region}.aliyuncs.com                        | 1. Replace {region} with the Region where the KMS instance is located.<br />2. The cluster must have public network access capability.                                                                                                                            |
 
 ## CRD configuration introduction
 
@@ -285,43 +356,43 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **spec**
 
-| Parameter   | Description                                                  | Required |
-| ----------- | ------------------------------------------------------------ | -------- |
-| provider    | The target cloud products for syncing credentials, such as KMS, OOS | no       |
-| data        | Data source (identifier for the target data)                 | no       |
+| Parameter   | Description                                                               | Required |
+| ----------- | ------------------------------------------------------------------------- | -------- |
+| provider    | The target cloud products for syncing credentials, such as KMS, OOS       | no       |
+| data        | Data source (identifier for the target data)                              | no       |
 | dataProcess | Data source requiring special processing (identifier for the target data) | no       |
-| type        | Kubernetes Secret types (Opaque, etc.)                       | no       |
+| type        | Kubernetes Secret types (Opaque, etc.)                                    | no       |
 
 **data**
 
-| Parameter      | Description                                                  | Required |
-| -------------- | ------------------------------------------------------------ | -------- |
-| key            | The unique identifier for the target credential, such as the key for KMS credentials | yes      |
-| name           | The corresponding key for the credentials in the secret data of the cluster | no       |
-| versionStage   | The version stage of the target credential                   | no       |
-| versionId      | The version Id of the target credential, this field is not required when provider is oos | no       |
-| jmesPath       | If the target credential is in JSON format, you can specify to retrieve the value corresponding to a specific key in the JSON | no       |
-| secretStoreRef | Information of the referenced SecretStore                    | no       |
+| Parameter      | Description                                                                                                                             | Required |
+| -------------- | --------------------------------------------------------------------------------------------------------------------------------------- | -------- |
+| key            | The unique identifier for the target credential, such as the key for KMS credentials                                                    | yes      |
+| name           | The corresponding key for the credentials in the secret data of the cluster                                                             | no       |
+| versionStage   | The version stage of the target credential                                                                                              | no       |
+| versionId      | The version Id of the target credential, this field is not required when provider is oos                                                | no       |
+| jmesPath       | If the target credential is in JSON/YAML format, you can specify to retrieve the value corresponding to a specific key in the JSON/YAML | no       |
+| secretStoreRef | Information of the referenced SecretStore                                                                                               | no       |
 
 **dataProcess（Data source requiring special processing.）**
 
-| Parameter   | Description                                                  | Required |
-| ----------- | ------------------------------------------------------------ | -------- |
-| extract     | Parsing JSON for the target credential without requiring the user to specify the JSON key | no       |
+| Parameter   | Description                                                                                                                    | Required |
+| ----------- | ------------------------------------------------------------------------------------------------------------------------------ | -------- |
+| extract     | Parsing JSON/YAML for the target credential without requiring the user to specify the JSON/YAML key                            | no       |
 | replaceRule | Replacing keys of the parsed secret based on specific rules to prevent illegal keys from being stored in the Kubernetes Secret | no       |
 
 **replaceRule（The content replacement used for the Secret Key.）**
 
-| Parameter | Description                                                  | Required |
-| --------- | ------------------------------------------------------------ | -------- |
-| target    | The string used for replacement                              | yes      |
+| Parameter | Description                                                             | Required |
+| --------- | ----------------------------------------------------------------------- | -------- |
+| target    | The string used for replacement                                         | yes      |
 | source    | The string that needs to be replaced, which can be a regular expression | yes      |
 
 **jmesPath**
 
-| Parameter   | Description                                                  | Required |
-| ----------- | ------------------------------------------------------------ | -------- |
-| path        | JMESPath expression that allows users to specify the JSON key | yes      |
+| Parameter   | Description                                                                       | Required |
+| ----------- | --------------------------------------------------------------------------------- | -------- |
+| path        | JMESPath expression that allows users to specify the JSON/YAML key                | yes      |
 | objectAlias | The data key corresponding to the Kubernetes Secret where the data will be stored | yes      |
 
 **secretStoreRef**
@@ -335,52 +406,50 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 **spec**
 
-| Parameter | Description                                               | Required |
-| --------- |-----------------------------------------------------------| -------- |
-| KMS       | Get credentials from KMS Secret Manager                   | no       |
-| OOS       | Get credentials from CloudOps Orchestration Service (OOS) | no       |
+| Parameter | Description                                                               | Required |
+| --------- | ------------------------------------------------------------------------- | -------- |
+| KMS       | Representing the target cloud product as KMS (Key Management Service)     | no       |
+| OOS       | Representing the target cloud product as OOS(Manage Encryption Parameter) | no       |
 
 **KMS**
 
-| parameter | Description                                | Required |
-| --------- |--------------------------------------------| -------- |
-| KMSAuth   | Credentials required to access KMS service | no       |
+| parameter | Description                                                                    | Required |
+| --------- | ------------------------------------------------------------------------------ | -------- |
+| KMSAuth   | Credentials required to access KMS (Key Management Service) under a shared KMS | no       |
 
 **OOS**
 
-| Parameter | Description                                | Required |
-| --------- |--------------------------------------------| -------- |
-| OOSAuth   | Credentials required to access OOS service | no       |
+| Parameter | Description                                                     | Required |
+| --------- | --------------------------------------------------------------- | -------- |
+| OOSAuth   | Credentials required to access OOS(Manage Encryption Parameter) | no       |
 
 **KMSAuth**
 
-| Parameter                | Description                                                  | Required |
-| ------------------------ | ------------------------------------------------------------ | -------- |
-| accessKey                | Refer to the following Alibaba Cloud AccessKey authentication configuration | no       |
-| accessKeySecret          | Refer to the following Alibaba Cloud AccessKey authentication configuration | no       |
-| ramRoleARN               | Ram role arn                                                 | no       |
-| ramRoleSessionName       | Role session name                                            | no       |
-| oidcProviderARN          | OIDC provider arn                                            | no       |
-| oidcTokenFilePath        | OIDC token file path                                         | no       |
-| remoteRamRoleArn         | Cross-account ram role are                                   | no       |
-| remoteRamRoleSessionName | Cross-account ram role session name                          | no       |
+| Parameter                | Description                                                                        | Required |
+| ------------------------ | ---------------------------------------------------------------------------------- | -------- |
+| accessKey                | Refer to the following Alibaba Cloud AccessKey authentication configuration method | no       |
+| accessKeySecret          | Refer to the following Alibaba Cloud AccessKey authentication configuration method | no       |
+| ramRoleARN               | Ram role arn                                                                       | no       |
+| ramRoleSessionName       | Role session name                                                                  | no       |
+| oidcProviderARN          | OIDC provider arn                                                                  | no       |
+| oidcTokenFilePath        | OIDC token file path                                                               | no       |
+| remoteRamRoleArn         | Cross-account ram role are                                                         | no       |
+| remoteRamRoleSessionName | Cross-account ram role session name                                                | no       |
 
 **OOSAuth**
 
-| Parameter                | Description                                                  | Required |
-| ------------------------ | ------------------------------------------------------------ | -------- |
-| accessKey                | Refer to the following Alibaba Cloud AccessKey authentication configuration | no       |
-| accessKeySecret          | Refer to the following Alibaba Cloud AccessKey authentication configuration | no       |
-| ramRoleARN               | Ram role arn                                                 | no       |
-| ramRoleSessionName       | Role session name                                            | no       |
-| oidcProviderARN          | OIDC provider arn                                            | no       |
-| oidcTokenFilePath        | OIDC token file path                                         | no       |
-| remoteRamRoleArn         | Cross-account ram role are                                   | no       |
-| remoteRamRoleSessionName | Cross-account ram role session name                          | no       |
+| Parameter                | Description                                                                        | Required |
+| ------------------------ | ---------------------------------------------------------------------------------- | -------- |
+| accessKey                | Refer to the following Alibaba Cloud AccessKey authentication configuration method | no       |
+| accessKeySecret          | Refer to the following Alibaba Cloud AccessKey authentication configuration method | no       |
+| ramRoleARN               | Ram role arn                                                                       | no       |
+| ramRoleSessionName       | Role session name                                                                  | no       |
+| oidcProviderARN          | OIDC provider arn                                                                  | no       |
+| oidcTokenFilePath        | OIDC token file path                                                               | no       |
+| remoteRamRoleArn         | Cross-account ram role are                                                         | no       |
+| remoteRamRoleSessionName | Cross-account ram role session name                                                | no       |
 
-
-
-**Alibaba Cloud AccessKey authentication configuration**
+**Alibaba Cloud AccessKey authentication configuration method**
 
 Alibaba Cloud AccessKey is the most important identity credentials for users to access cloud resources, it does not support direct configuration in the SecretStore field, it needs to reference in the Kubernetes Secrets instance, and the related configuration fields are described as follows：
 
@@ -398,13 +467,15 @@ Please report vulnerabilities by email to **kubernetes-security@service.aliyun.c
 
 ## Release Note
 
-| Version   | Date       | Changes                                                                                                                                                                                                                     |
-| --------- | ---------- |-----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path                                                                                                                               |
-| `0.5.0` | 2023/10/10 | 1.dedicated KMS credential synchronization<br />2.multiple Alibaba Cloud access credentials management,<br />3.self-resolving credentials and key rule replacement<br />4. Cross-account KMS credential synchronization.    |
-| `0.5.1` | 2023/10/18 | Function and performance optimization                                                                                                                                                                                       |
-| `0.5.2` | 2024/08/01 | Large-scale resource synchronization concurrency optimization                                                                                                                                                               |
-| `0.5.3` | 2024/10/10 | Supports resource synchronization with second-level rate limiting, fixes for certain software package CVEs                                                                                                                  |
-| `0.5.4` | 2024/10/31 | Supports OOS secret parameter synchronization                                                                                                                                                                               |
-| `0.5.5` | 2024/11/22 | Supports synchronization of binary-type secrets                                                                                                                                                                             |
-
+| Version   | Date       | Changes                                                                                                                                                                                                                  |
+| --------- | ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `0.4.0` | 2022/12/22 | Support sync specific key-value pairs extract from a JSON-formatted secret based on JMES path                                                                                                                            |
+| `0.5.0` | 2023/10/10 | 1.dedicated KMS credential synchronization<br />2.multiple Alibaba Cloud access credentials management,<br />3.self-resolving credentials and key rule replacement<br />4. Cross-account KMS credential synchronization. |
+| `0.5.1` | 2023/10/18 | Function and performance optimization                                                                                                                                                                                    |
+| `0.5.2` | 2024/08/01 | Large-scale resource synchronization concurrency optimization                                                                                                                                                            |
+| `0.5.3` | 2024/10/10 | Supports resource synchronization with second-level rate limiting, fixes for certain software package CVEs                                                                                                               |
+| `0.5.4` | 2024/10/31 | Supports OOS secret parameter synchronization                                                                                                                                                                            |
+| `0.5.5` | 2024/11/22 | Supports synchronization of binary-type secrets                                                                                                                                                                          |
+| `0.5.6` | 2025/3/3   | Supports cluster type of Acs                                                                                                                                                                                             |
+| `0.5.7` | 2025/3/26  | Support sync specific key-value pairs extract from a YAML-formatted secret                                                                                                                                               |
+| `0.5.8` | 2025/3/28  | 1.Support multi-architecture deployment<br />2.Support configuring Endpoint to obtain KMS secret                                                                                                                         |

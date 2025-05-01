@@ -6,19 +6,19 @@ import (
 	"fmt"
 	"time"
 
-	oos "github.com/alibabacloud-go/oos-20190601/v3/client"
-	"github.com/alibabacloud-go/tea/tea"
-	"k8s.io/klog"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+	oos "github.com/alibabacloud-go/oos-20190601/v3/client"
+	"github.com/alibabacloud-go/tea/tea"
+	"gopkg.in/yaml.v3"
+	"k8s.io/klog"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 // Client interface represent a backend client interface that should be implemented
 type OOSClient struct {
-	oosClient       *oos.Client
-	clientName      string
+	oosClient  *oos.Client
+	clientName string
 }
 
 func (c *OOSClient) GetName() string {
@@ -71,16 +71,28 @@ func (c *OOSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 	if err != nil {
 		return nil, err
 	}
+
 	tempKV := make(map[string]interface{})
-	err = json.Unmarshal(externalData, &tempKV)
-	if err != nil {
-		klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
-		return nil, err
+	marshalToYaml := true
+	// Attempt to parse the external data as YAML. If parsing fails, try parsing it as JSON.
+	// If both parsing attempts fail, log an error and return the error.
+	if err := yaml.Unmarshal(externalData, &tempKV); err != nil {
+		marshalToYaml = false
+		if err := json.Unmarshal(externalData, &tempKV); err != nil {
+			klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
+			return nil, err
+		}
 	}
+
 	kv := make(map[string]string)
 	for k, v := range tempKV {
-		kv[k] = utils.JsonStr(v)
+		if marshalToYaml {
+			kv[k] = utils.YamlStr(v)
+		} else {
+			kv[k] = utils.JsonStr(v)
+		}
 	}
+
 	if len(data.ReplaceKey) != 0 {
 		for _, rule := range data.ReplaceKey {
 			kv, err = utils.RewriteRegexp(rule, kv)
@@ -101,7 +113,7 @@ func (c *OOSClient) getExternalDataFromOOS(data v1alpha1.DataSource) ([]byte, er
 		return nil, fmt.Errorf("oos client is nil,oos key %v", data.Key)
 	}
 	req := &oos.GetSecretParameterRequest{
-		Name: tea.String(data.Key),
+		Name:           tea.String(data.Key),
 		WithDecryption: tea.Bool(true),
 	}
 	resp, err := c.oosClient.GetSecretParameter(req)

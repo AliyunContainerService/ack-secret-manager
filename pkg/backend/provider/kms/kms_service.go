@@ -7,10 +7,11 @@ import (
 	"fmt"
 	"time"
 
-	kms "github.com/alibabacloud-go/kms-20160120/v2/client"
+	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
 	dkmsopenapiutil "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/openapi-util"
 	dkms "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/sdk"
+	"gopkg.in/yaml.v3"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -57,6 +58,7 @@ func (c *KMSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSo
 		klog.Errorf("get external data error %v,key %v", err, data.Key)
 		return nil, err
 	}
+
 	// jmes
 	if len(data.JMESPath) > 0 {
 		klog.Infof("parse jmes format, key %v", data.Key)
@@ -71,6 +73,7 @@ func (c *KMSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSo
 			return secretDatas, nil
 		}
 	}
+
 	secretDatas[data.Name] = externalData
 	return secretDatas, nil
 }
@@ -80,19 +83,31 @@ func (c *KMSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 	if data.Extract == nil {
 		return nil, fmt.Errorf("extract data is empty")
 	}
+
 	externalData, err := c.getExternalData(ctx, *data.Extract)
 	if err != nil {
 		return nil, err
 	}
+
+	marshalToYaml := true
 	tempKV := make(map[string]interface{})
-	err = json.Unmarshal(externalData, &tempKV)
-	if err != nil {
-		klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
-		return nil, err
+	// Attempt to parse the external data as YAML. If parsing fails, try parsing it as JSON.
+	// If both parsing attempts fail, log an error and return the error.
+	if err := yaml.Unmarshal(externalData, &tempKV); err != nil {
+		marshalToYaml = false
+		if err := json.Unmarshal(externalData, &tempKV); err != nil {
+			klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
+			return nil, err
+		}
 	}
+
 	kv := make(map[string]string)
 	for k, v := range tempKV {
-		kv[k] = utils.JsonStr(v)
+		if marshalToYaml {
+			kv[k] = utils.YamlStr(v)
+		} else {
+			kv[k] = utils.JsonStr(v)
+		}
 	}
 	if len(data.ReplaceKey) != 0 {
 		for _, rule := range data.ReplaceKey {
@@ -103,6 +118,7 @@ func (c *KMSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 			}
 		}
 	}
+
 	for k, v := range kv {
 		secretDatas[k] = []byte(v)
 	}

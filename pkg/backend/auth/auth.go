@@ -1,13 +1,14 @@
 package auth
 
 import (
+	"errors"
 	"os"
 	"time"
 
-	"github.com/aliyun/credentials-go/credentials"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
-  backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
+	"github.com/aliyun/credentials-go/credentials"
 )
 
 const (
@@ -58,9 +59,17 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 		akProvider := provider.NewAccessKeyProvider(a.AccessKey, a.AccessSecretKey)
 		providers = append(providers, akProvider)
 	}
-	providers = append(providers, provider.NewECSMetadataProvider(provider.ECSMetadataProviderOptions{
-		RefreshPeriod: a.RefreshPeriod,
-	}))
+
+	if backend.EnableWorkerRole {
+		providers = append(providers, provider.NewECSMetadataProvider(provider.ECSMetadataProviderOptions{
+			RefreshPeriod: a.RefreshPeriod,
+		}))
+	} else {
+		if len(providers) == 0 {
+			return nil, errors.New("Please set auth config when EnableWorkerRole is false")
+		}
+	}
+
 	chainProvider := provider.NewChainProvider(providers...)
 	var remoteRoleProvider *provider.RoleArnProvider
 	var cred *provider.CredentialForV2SDK
