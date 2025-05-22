@@ -5,9 +5,8 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/klog/v2"
-
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
+	"k8s.io/klog/v2"
 )
 
 type Manager struct {

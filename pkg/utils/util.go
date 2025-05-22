@@ -19,7 +19,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io/ioutil"
+	"io"
 	"math"
 	"net/http"
 	"regexp"
@@ -133,7 +133,7 @@ func GetMetaData(resource string) (int, string, error) {
 		return http.StatusInternalServerError, "", err
 	}
 	defer resp.Body.Close()
-	body, err := ioutil.ReadAll(resp.Body)
+	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), err
 }
 

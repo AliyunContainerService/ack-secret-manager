@@ -13,7 +13,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.19
+        go-version: 1.23.0
         check-latest: true
         cache: true
     - name: golangci-lint
@@ -21,7 +21,7 @@ jobs:
       with:
         version: latest
         skip-pkg-cache: true
-        args: --verbose
+        args: --verbose --timeout=10m
   go-security-scan:
     runs-on: ubuntu-latest
     env:
@@ -43,7 +43,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v4
       with:
-        go-version: 1.19
+        go-version: 1.23.0
       env:
         GOPATH: ${{ env.HOME }}
 
