@@ -28,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -54,19 +53,9 @@ type ExternalSecretReconciler struct {
 
 	DisablePolling   bool
 	RotationInterval time.Duration // Key rotation job running interval.
-	rotationTicker   *time.Ticker
-	closing          chan bool // close channel.
 	KmsLimiter       KmsLimiter
 	OosLimiter       OosLimiter
 }
-
-var (
-	externalSecretGRV = schema.GroupVersionResource{
-		Group:    "alibabacloud.com",
-		Version:  "v1alpha1",
-		Resource: "externalsecrets",
-	}
-)
 
 // getCurrentData get the current data from secret api
 func (r *ExternalSecretReconciler) getCurrentData(namespace string, name string) (map[string][]byte, error) {

@@ -3,11 +3,11 @@ package oos
 import (
 	"fmt"
 	"sync"
-	"k8s.io/klog"
 
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
-	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
 	backendin "github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
+	"k8s.io/klog"
 )
 
 type Manager backendp.Manager
@@ -40,7 +40,7 @@ func (m *Manager) Delete(clientName string) {
 	// delete the client map, and stop the ram provider refresh go routine
 	m.OosClientMap.Delete(clientName)
 	backendp.StopProvider(clientName, &backendp.Manager{
-		RamLock: m.RamLock,
+		RamLock:     m.RamLock,
 		RamProvider: m.RamProvider,
 	})
 	klog.Infof("delete client, clientName %v", clientName)

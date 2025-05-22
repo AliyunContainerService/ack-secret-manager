@@ -19,17 +19,17 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"golang.org/x/time/rate"
 	"os"
 	"runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"strings"
 	"time"
 
 	"github.com/operator-framework/operator-lib/leader"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -108,6 +108,7 @@ func main() {
 	})
 
 	maxConcurrentKmsSecretPulls = finalMaxConcurrentSecretPulls
+
 	ctrl.SetLogger(zap.New())
 
 	printVersion()
