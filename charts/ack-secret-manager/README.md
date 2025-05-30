@@ -353,21 +353,30 @@ command.enableWorkerRole 配置与集群类型有关，以下是对应关系：
 | ACK Edge 集群 | true                     |
 | 其它集群      | false                    |
 
-### 6. kmsEndpoint 配置介绍
+### 6. kmsEndpoint 优先级规则
 
-访问 KMS 服务获取凭据当前支持专属网关和共享网关两种方式，需要配置不同的 endpoint，以下是配置说明：
+访问 KMS 服务获取凭据当前支持专属实例网关和共享网关两种方式，需要参考以下说明进行endpoint配置：
 
-**KMS Endpoint 配置优先级规则**
+**KMS Endpoint 优先级规则**
 
-1. 实例级配置 ExternalSecret.spec.data.kmsEndpoint
-   * 为每个KMS实例单独指定endpoint地址
-   * 优先级最高
-2. 全局配置 command.kmsEndpoint（启动参数）
-    * 适用于所有KMS请求的endpoint地址
-    * 优先级次之
-3. 默认配置
-    * 当上述两者均未配置时的默认endpoint地址
-    * 地址是 kms-vpc.{region}.aliyuncs.com（共享网关，需替换 {region} 为 KMS 实例所在的region）
+1. **实例级配置**
+
+   - **字段**： `ExternalSecret.spec.data.kmsEndpoint`
+   - **用途**：为每个KMS实例单独指定endpoint地址
+   - **优先级**： **最高**
+
+2. **全局配置**
+
+    - **字段**：`command.kmsEndpoint`（启动参数）
+    - **用途**： 用于所有KMS请求
+    - **优先级**：**中**
+
+3. **默认配置**
+
+    - **地址**： kms-vpc.{region}.aliyuncs.com
+    - **用途**：当未明确配置endpoint地址时使用
+    - **说明**：这是共享网关地址，需替换 {region} 为 KMS 实例所在的region
+    - **优先级**：**最低**
 
 **KMS Endpoint 配置地址说明**
 

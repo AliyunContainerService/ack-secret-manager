@@ -328,7 +328,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      type: Opaque
      ```
 
-### 4. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
+### 4. Currently supports cross-account credential synchronization. To configure, specify the `remoteRamRoleArn` and `remoteRamRoleSessionName` fields in `SecretStore.Spec.KMS.KMSAuth`. Below is an example configuration:
 
    ```yaml
    apiVersion: 'alibabacloud.com/v1alpha1'
@@ -348,28 +348,42 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
 
 The configuration of `command.enableWorkerRole` is related to the cluster type, and the corresponding relationship is as follows:
 
-   | Cluster Type          | command.enableWorkerRole |
+| Cluster Type          | command.enableWorkerRole |
    | --------------------- | ------------------------ |
-   | ACK Managed Cluster   | true                     |
-   | ACK Dedicated Cluster | true                     |
-   | ACK Edge Cluster      | true                     |
-   | Other Cluster         | false                    |
+| ACK Managed Cluster   | true                     |
+| ACK Dedicated Cluster | true                     |
+| ACK Edge Cluster      | true                     |
+| Other Cluster         | false                    |
 
-### 6. KMS Endpoint Configuration Guide
+### 6. KMS Endpoint Priority Rules
 
-The KMS service currently supports two access methods: dedicated gateway and shared gateway, requiring different endpoint configurations as described below:
+The KMS service currently supports two access methods: **dedicated instance** and **public gateway**, requiring the following endpoint configurations:
 
 **KMS Endpoint Priority Rules**
 
-1. Instance-level Configuration: ExternalSecret.spec.data.kmsEndpoint
-    * Specifies endpoint addresses for individual KMS instances
-    * Highest priority
-2. Global Configuration: command.kmsEndpoint (launch parameter)
-    * Applies to all KMS requests
-    * Medium priority
-3. Default Configuration
-    * Used when neither of the above is configured
-    * address is kms-vpc.{region}.aliyuncs.com (shared gateway, replace {region} with the KMS instance's region)
+1. **Instance-Level Configuration**
+
+    - **Field**: `ExternalSecret.spec.data.kmsEndpoint`
+    - **Purpose**: Specifies endpoint addresses for individual KMS instances.
+    - **Priority**: **Highest**
+
+2. **Global Configuration**
+
+    - **Field**: `command.kmsEndpoint` (launch parameter)
+    - **Purpose**: Applies to all KMS requests.
+    - **Priority**: **Medium**
+
+3. **Default Configuration**
+
+    - **Address**: `kms-vpc.{region}.aliyuncs.com`
+
+    - **Purpose**: Used when no explicit configuration is provided.
+
+    - **Note**: This is the shared gateway address; replace `{region}` with the KMS instance's region.
+
+    - **Priority**: **Lowest**
+
+
 
 **KMS Endpoint Address Reference**
 
@@ -479,7 +493,7 @@ The Alibaba Cloud AccessKey is critical for cloud resource access. For security 
 
 ## Security
 
-Please report vulnerabilities by email to **kubernetes-security@service.aliyun.com**. Also see our [SECURITY.md](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/SECURITY.md) file for details.
+Please report vulnerabilities by email to **kubernetes-security@service.aliyun.com**. Also see our [SECURITY.md](./SECURITY.md) file for details.
 
 ## Release Note
 
