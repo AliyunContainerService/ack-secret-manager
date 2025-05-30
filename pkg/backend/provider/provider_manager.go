@@ -13,8 +13,6 @@ type Manager struct {
 	Region string
 	// kms multi-account client pool
 	KmsClientMap sync.Map
-	// dkms multi-instance client pool
-	DedicateKmsClientMap sync.Map
 	// oos multi-account client pool
 	OosClientMap sync.Map
 	// ram lock

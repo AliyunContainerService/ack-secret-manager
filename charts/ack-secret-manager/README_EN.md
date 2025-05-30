@@ -108,46 +108,46 @@ helm -n kube-system uninstall ack-secret-manager
 
 ## Configuration instructions
 
-| **parameter**                                 | **introduction**                                                                                                                                                                                            | **default value** |
-| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------- |
-| env.WATCH_NAMESPACE                                 | Specify the namespace of the component watch (the default empty value represents all namespaces of watch)                                                                                                         |                         |
-| envVarsFromSecret.ACCESS_KEY_ID                     | You can build the SDK client by specifying the credential AK by setting the ACCESS_KEY_ID variable, which needs to be defined in the secret instance named alibaba-credentials                                    |                         |
-| envVarsFromSecret.SECRET_ACCESS_KEY                 | You can build the SDK client by specifying the credential SK by setting the SECRET_ACCESS_KEY variable, which needs to be defined in the secret instance named alibaba-credentials                                |                         |
-| envVarsFromSecret.ALICLOUD_ROLE_ARN                 | You can specify the RAM role ARN used to build the SDK client by setting the ALICLOUD_ROLE_ARN variable, which needs to be defined in the secret instance named alibaba-credentials                               |                         |
-| envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME        | You can specify the RAM role session name by setting the ALICLOUD_ROLE_SESSION_NAME variable to build the SDK client, which needs to be defined in the secret instance named alibaba-credentials                  |                         |
-| envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION  | You can specify the RAM role session expiration length by setting the ALICLOUD_ROLE_SESSION_EXPIRATION variable to build the SDK client. It needs to be defined in the secret instance named alibaba-credentials. |                         |
-| envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN       | You can specify the ARN of the RAM OIDC provider by setting the ALICLOUD_OIDC_PROVIDER_ARN variable to build the SDK client, which needs to be defined in the secret instance named alibaba-credentials           |                         |
-| envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE          | You can specify the oidc token file path in the pod by setting the ALICLOUD_OIDC_TOKEN_FILE variable to build the SDK client. It needs to be defined in the secret instance named alibaba-credentials.            |                         |
-| envVarsFromSecret.ALICLOUD_REMOTE_ROLE_ARN          | You can specify the RAM Role Arn of another account by setting the ALICLOUD_REMOTE_ROLE_ARN variable for role playing when pulling credential data across accounts.                                               |                         |
-| envVarsFromSecret.ALICLOUD_REMOTE_ROLE_SESSION_NAME | You can specify the RAM Role Session Name by setting the ALICLOUD_REMOTE_ROLE_SESSION_NAME variable to perform role play when pulling credential data across accounts.                                            |                         |
-| rrsa.enable                                         | Whether to enable the RRSA feature, the default is false. After enabling, you need to configure the ALICLOUD_ROLE_ARN and ALICLOUD_OIDC_PROVIDER_ARN parameters in envVarsFromSecret.                             | false                   |
-| command.reconcilePeriod                             | The interval for the controller to re-coordinate the externalSecret instance, the default is 5 seconds                                                                                                            | 5s                      |
-| command.reconcileCount                              | Specify the number of workers to concurrently coordinate the externalSecret instance. The default is 1                                                                                                            | 1                       |
-| command.tokenRotationPeriod                         | Polling time to check whether the client access STS token has expired                                                                                                                                             | 120s                    |
-| command.region                                      | Pull secret credentials from the specified region                                                                                                                                                                 |                         |
-| command.kmsEndpoint                                 | Pull secret credentials from the specified endpoint                                                                                                                                                               |                         |
-| command.disablePolling                              | Turn off automatic synchronization of pulling the latest credential content from the backend, default false                                                                                                       | false                   |
-| command.pollingInterval                             | The interval for synchronizing existing secret instances from the backend                                                                                                                                         | 120s                    |
-| command.maxConcurrentSecretPulls                    | Deprecated                                                                                                                                                                                                        | -                       |
-| command.maxConcurrentKmsSecretPulls                 | Maximum concurrent synchronization per second of kms secrets                                                                                                                                                      | 10                      |
-| command.maxConcurrentOosSecretPulls                 | Maximum concurrent synchronization per second of oos secrets                                                                                                                                                      | 10                      |
-| image.repository                                    | Specified ack-secret-manager mirror warehouse name                                                                                                                                                                | acs/ack-secret-manager  |
-| image.tag                                           | Specified ack-secret-manager image tag                                                                                                                                                                            | v0.5.0                  |
-| image.pullPolicy                                    | Image pull strategy, default is Always                                                                                                                                                                            | Always                  |
-| nameOverride                                        | Override app name                                                                                                                                                                                                 | nil                     |
-| fullnameOverride                                    | Override application full name                                                                                                                                                                                    | nil                     |
-| rbac.create                                         | Whether to create and use RBAC resources, the default is true                                                                                                                                                     | true                    |
-| securityContext.fsGroup                             | Specify the security context configuration of the application                                                                                                                                                     | {}                      |
-| serviceAccount.create                               | Whether to create serviceaccount                                                                                                                                                                                  | true                    |
-| serviceAccount.name                                 | Specify the name of the created serviceaccount                                                                                                                                                                    | Automatic generated     |
-| serviceAccount.annotations                          | Specify adding the serviceaccount annotation tag                                                                                                                                                                  | nil                     |
-| podAnnotations                                      | Specify the annotation label added to the pod                                                                                                                                                                     | {}                      |
-| podLabels                                           | Specify the Label added to the pod                                                                                                                                                                                | {}                      |
-| replicaCount                                        | Number of controller copies                                                                                                                                                                                       | 1                       |
-| nodeSelector                                        | The specified nodeSelector tag                                                                                                                                                                                    | {}                      |
-| tolerations                                         | Specified taint tolerance configuration                                                                                                                                                                           | []                      |
-| affinity                                            | Specified Pod affinity configuration                                                                                                                                                                              | {}                      |
-| resources                                           | Specified Pod requests and limits configuration                                                                                                                                                                   | {}                      |
+| **parameter**                                       | **introduction**                                                                                                                                          | **default value** |
+| --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| env.WATCH_NAMESPACE                                 | Specify the namespace of the component watch (the default empty value represents all namespaces of watch)                                                 |                   |
+| envVarsFromSecret.ACCESS_KEY_ID                     | You can build the SDK client by specifying the credential AK by setting the ACCESS_KEY_ID variable, which needs to be defined in the secret instance named alibaba-credentials | |
+| envVarsFromSecret.SECRET_ACCESS_KEY                 | You can build the SDK client by specifying the credential SK by setting the SECRET_ACCESS_KEY variable, which needs to be defined in the secret instance named alibaba-credentials | |
+| envVarsFromSecret.ALICLOUD_ROLE_ARN                 | You can specify the RAM role ARN used to build the SDK client by setting the ALICLOUD_ROLE_ARN variable, which needs to be defined in the secret instance named alibaba-credentials | |
+| envVarsFromSecret.ALICLOUD_ROLE_SESSION_NAME        | You can specify the RAM role session name by setting the ALICLOUD_ROLE_SESSION_NAME variable to build the SDK client, which needs to be defined in the secret instance named alibaba-credentials | |
+| envVarsFromSecret.ALICLOUD_ROLE_SESSION_EXPIRATION  | You can specify the RAM role session expiration length by setting the ALICLOUD_ROLE_SESSION_EXPIRATION variable to build the SDK client. It needs to be defined in the secret instance named alibaba-credentials. | |
+| envVarsFromSecret. ALICLOUD_OIDC_PROVIDER_ARN       | You can specify the ARN of the RAM OIDC provider by setting the ALICLOUD_OIDC_PROVIDER_ARN variable to build the SDK client, which needs to be defined in the secret instance named alibaba-credentials | |
+| envVarsFromSecret.ALICLOUD_OIDC_TOKEN_FILE          | You can specify the oidc token file path in the pod by setting the ALICLOUD_OIDC_TOKEN_FILE variable to build the SDK client. It needs to be defined in the secret instance named alibaba-credentials. | |
+| envVarsFromSecret.ALICLOUD_REMOTE_ROLE_ARN          | You can specify the RAM Role Arn of another account by setting the ALICLOUD_REMOTE_ROLE_ARN variable for role playing when pulling credential data across accounts. |         |
+| envVarsFromSecret.ALICLOUD_REMOTE_ROLE_SESSION_NAME | You can specify the RAM Role Session Name by setting the ALICLOUD_REMOTE_ROLE_SESSION_NAME variable to perform role play when pulling credential data across accounts. |      |
+| rrsa.enable                                         | Whether to enable the RRSA feature, the default is false. After enabling, you need to configure the ALICLOUD_ROLE_ARN and ALICLOUD_OIDC_PROVIDER_ARN parameters in envVarsFromSecret. | false |
+| command.reconcilePeriod                             | The interval for the controller to re-coordinate the externalSecret instance, the default is 5 seconds                                                              | 5s      |
+| command.reconcileCount                              | Specify the number of workers to concurrently coordinate the externalSecret instance. The default is 1                                                              | 1       |
+| command.tokenRotationPeriod                         | Polling time to check whether the client access STS token has expired                                                                                               | 120s    |
+| command.region                                      | Pull secret credentials from the specified region                                                                                                                   |         |
+| command.kmsEndpoint                                 | Pull secret credentials from the specified endpoint                                                                                                                 |         |
+| command.disablePolling                              | Turn off automatic synchronization of pulling the latest credential content from the backend, default false                                                         | false   |
+| command.pollingInterval                             | The interval for synchronizing existing secret instances from the backend                                                                                           | 120s    |
+| command.maxConcurrentSecretPulls                    | Deprecated                                                                                                                                                          | -       |
+| command.maxConcurrentKmsSecretPulls                 | Maximum concurrent synchronization per second of kms secrets                                                                                                        | 10      |
+| command.maxConcurrentOosSecretPulls                 | Maximum concurrent synchronization per second of oos secrets                                                                                                        | 10      |
+| image.repository                                    | Specified ack-secret-manager mirror warehouse name                                                                                                                  | acs/ack-secret-manager |
+| image.tag                                           | Specified ack-secret-manager image tag                                                                                                                              | v0.5.0  |
+| image.pullPolicy                                    | Image pull strategy, default is Always                                                                                                                              | Always  |
+| nameOverride                                        | Override app name                                                                                                                                                   | nil     |
+| fullnameOverride                                    | Override application full name                                                                                                                                      | nil     |
+| rbac.create                                         | Whether to create and use RBAC resources, the default is true                                                                                                       | true    |
+| securityContext.fsGroup                             | Specify the security context configuration of the application                                                                                                       | {}      |
+| serviceAccount.create                               | Whether to create serviceaccount                                                                                                                                    | true    |
+| serviceAccount.name                                 | Specify the name of the created serviceaccount                                                                                                                      | Automatic generated |
+| serviceAccount.annotations                          | Specify adding the serviceaccount annotation tag                                                                                                                    | nil     |
+| podAnnotations                                      | Specify the annotation label added to the pod                                                                                                                       | {}      |
+| podLabels                                           | Specify the Label added to the pod                                                                                                                                  | {}      |
+| replicaCount                                        | Number of controller copies                                                                                                                                         | 1       |
+| nodeSelector                                        | The specified nodeSelector tag                                                                                                                                      | {}      |
+| tolerations                                         | Specified taint tolerance configuration                                                                                                                             | []      |
+| affinity                                            | Specified Pod affinity configuration                                                                                                                                | {}      |
+| resources                                           | Specified Pod requests and limits configuration                                                                                                                     | {}      |
 
 ## Usage Instructions
 
@@ -166,7 +166,7 @@ Tip: The ciphertext synchronization method for other Alibaba Cloud service mirro
 
 ack-secret-manager involves two CRDs. SecretStore is used to store access credentials (such as RRSA configuration, ClientKey, AK configuration, etc.), and ExternalSecret is used to store basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore. It ensures the separation of permissions and data and enhances the flexibility of use. See below for details **CRD configuration introduction**
 
-1. Create ciphertexts
+### 1. Create ciphertexts
    Currently supports synchronization of KMS credentials and OOS encryption parameters. The following are references to how to create two ciphertexts.
 
    - Add the following credential in the KMS Secrets Manager. For detailed procedures, please refer to [Manage Common Credentials](https://www.alibabacloud.com/help/en/key-management-service/latest/manage-generic-secrets)
@@ -182,7 +182,8 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      Name: test2
      Value: {"name":"tom","age":"14","friends":[{"name":"lili"},{"name":"edf"}]} 
      ```
-2. Create SecretStore & ExternalSecret
+
+### 2. Create SecretStore & ExternalSecret
 
    Prerequisite: Enable RRSA for the cluster and properly configure the relevant RAM Role permissions
 
@@ -212,6 +213,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
          - key: test1 # Key name to be synchronized, currently supports kms credentials and oos encryption parameters, this example is kms credential name
            name: test1 # the secret name in target Kubernetes cluster
            versionId: v1 # kms credential version, this field does not need to be configured when the provider is not kms
+           kmsEndpoint: kms.cn-hangzhou.aliyuncs.com # KMS service endpoint, field should only be configured when kms is the selected provider. For configuration details, see Part 6 of the usage instructions
            secretStoreRef: # no need to be specified when using worker node RAM Role authentication
              name: scdemo
              namespace: default
@@ -240,7 +242,8 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
      type: Opaque
      ```
    - Without turning off the automatic synchronization configuration, you can modify the key content in the KMS Secrets Manager and wait for a while to check whether the target secret has been synchronized.
-3. JSON/YAML-formatted support
+
+### 3. JSON/YAML-formatted support
 
    **data**
 
@@ -256,6 +259,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
          - key: test1 
            name: test1 
            versionId: v1
+           kmsEndpoint: kms.cn-hangzhou.aliyuncs.com # KMS service endpoint, field should only be configured when kms is the selected provider. For configuration details, see Part 6 of the usage instructions
            secretStoreRef:
              name: scdemo
              namespace: default
@@ -300,6 +304,7 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
              key: test1
              name: extract
              versionId: v1
+             kmsEndpoint: kms.cn-hangzhou.aliyuncs.com # KMS service endpoint, field should only be configured when kms is the selected provider. For configuration details, see Part 6 of the usage instructions
              secretStoreRef:
                name: scdemo
                namespace: default
@@ -322,7 +327,8 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
        namespace: default
      type: Opaque
      ```
-4. Currently supports cross-account synchronization of credentials. Just configure `remoteRamRoleArn` and `remoteRamRoleSessionName` in SecretStore.Spec.KMS.KMSAuth. The following is a sample SecretStore
+
+### 4. Currently supports cross-account credential synchronization. To configure, specify the `remoteRamRoleArn` and `remoteRamRoleSessionName` fields in `SecretStore.Spec.KMS.KMSAuth`. Below is an example configuration:
 
    ```yaml
    apiVersion: 'alibabacloud.com/v1alpha1'
@@ -337,23 +343,55 @@ ack-secret-manager involves two CRDs. SecretStore is used to store access creden
          remoteRamRoleArn: "acs:ram::{accountID}:role/{roleName}"  #Replace with the ARN of the specified cross-account RAM role
          remoteRamRoleSessionName: ""
    ```
-5. command.enableWorkerRole Configuration Introduction
-   The configuration of `command.enableWorkerRole` is related to the cluster type, and the corresponding relationship is as follows:
 
-   | Cluster Type          | command.enableWorkerRole |
+### 5. command.enableWorkerRole Configuration Introduction
+
+The configuration of `command.enableWorkerRole` is related to the cluster type, and the corresponding relationship is as follows:
+
+| Cluster Type          | command.enableWorkerRole |
    | --------------------- | ------------------------ |
-   | ACK Managed Cluster   | true                     |
-   | ACK Dedicated Cluster | true                     |
-   | ACK Edge Cluster      | true                     |
-   | Other Cluster         | false                    |
-6. commands.kmsEndpoint Configuration Introduction
-   KMS currently supports two access methods: dedicated gateway and shared gateway. The application supports both methods, and different Endpoints need to be configured for each method. Below are the Endpoint address configurations for different gateways:
+| ACK Managed Cluster   | true                     |
+| ACK Dedicated Cluster | true                     |
+| ACK Edge Cluster      | true                     |
+| Other Cluster         | false                    |
 
-   | Gateway Type          | Endpoint Address                                 | Usage Instructions                                                                                                                                                                                                                                                |
-   | --------------------- | ------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-   | Dedicated Gateway     | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. Requires the KMS instance and the cluster to be in the same Region and VPC.<br />2. Replace {kms-instance-id} with the actual KMS instance ID.<br />3. KMS instance version must be 3.0 or above.                                                              |
-   | VPC Shared Gateway    | kms-vpc.{region}.aliyuncs.com                    | 1. Requires the KMS instance and the cluster to be in the same Region.<br />2. This is the default Endpoint configuration for the application; no additional configuration is needed.<br />3. Replace {region} with the Region where the KMS instance is located. |
-   | Public Shared Gateway | kms.{region}.aliyuncs.com                        | 1. Replace {region} with the Region where the KMS instance is located.<br />2. The cluster must have public network access capability.                                                                                                                            |
+### 6. KMS Endpoint Priority Rules
+
+The KMS service currently supports two access methods: **dedicated instance gateway** and **public gateway**, requiring the following endpoint configurations:
+
+**KMS Endpoint Priority Rules**
+
+1. **Instance-Level Configuration**
+
+    - **Field**: `ExternalSecret.spec.data.kmsEndpoint`
+    - **Purpose**: Specifies endpoint addresses for individual KMS instances.
+    - **Priority**: **Highest**
+
+2. **Global Configuration**
+
+    - **Field**: `command.kmsEndpoint` (launch parameter)
+    - **Purpose**: Applies to all KMS requests.
+    - **Priority**: **Medium**
+
+3. **Default Configuration**
+
+    - **Address**: `kms-vpc.{region}.aliyuncs.com`
+
+    - **Purpose**: Used when no explicit configuration is provided.
+
+    - **Note**: This is the public gateway address; replace `{region}` with the KMS instance's region.
+
+    - **Priority**: **Lowest**
+
+
+
+**KMS Endpoint Address Reference**
+
+| Gateway Type               | Domain Type        | Endpoint Address                                 | Usage Instructions                                                                                                             |
+| -------------------------- | ------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Dedicated Instance Gateway | KMS Private Domain | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. Requires the KMS instance and the cluster to be in the same Region and VPC.<br />2. Replace {kms-instance-id} with the actual KMS instance ID.<br />3. KMS instance version must be 3.0 or above. |
+| Public Gateway             | VPC Domain         | kms-vpc.{region}.aliyuncs.com                    | 1. Requires the KMS instance and the cluster to be in the same Region.<br />2. Replace {region} with the Region where the KMS instance is located.<br />3. This is the default configuration for the application; no additional configuration is needed. |
+| Public Gateway             | Public Network     | kms.{region}.aliyuncs.com                        | 1. Replace {region} with the Region where the KMS instance is located.<br />2. The cluster must have public network access capability. |
 
 ## CRD configuration introduction
 
@@ -455,7 +493,7 @@ The Alibaba Cloud AccessKey is critical for cloud resource access. For security 
 
 ## Security
 
-Please report vulnerabilities by email to **kubernetes-security@service.aliyun.com**. Also see our [SECURITY.md](https://github.com/AliyunContainerService/ack-secret-manager/blob/master/SECURITY.md) file for details.
+Please report vulnerabilities by email to **kubernetes-security@service.aliyun.com**. Also see our [SECURITY.md](./SECURITY.md) file for details.
 
 ## Release Note
 
@@ -471,3 +509,4 @@ Please report vulnerabilities by email to **kubernetes-security@service.aliyun.c
 | `0.5.6` | 2025/3/3   | Supports cluster type of Acs                                 |
 | `0.5.7` | 2025/3/26  | Support sync specific key-value pairs extract from a YAML-formatted secret |
 | `0.5.8` | 2025/3/28  | 1.Support multi-architecture deployment<br />2.Support configuring Endpoint to obtain KMS secret |
+| `0.5.9` | 2025/5/29  | Support using ExternalSecret to configure the endpoint address of the KMS instance dimension to connect multiple KMS instances |
