@@ -82,12 +82,11 @@ func NewProviderClientByENV() error {
 type Provider interface {
 	ClientManager
 	// NewClient constructs secrets client by secret store
-	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
+	NewClient(ctx context.Context, endpoint, name string, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
 	// NewClientByENV constructs secrets client by environment variable
 	NewClientByENV() (SecretClient, error)
 	GetName() string
 	GetRegion() string
-	GetEndpoint() string
 }
 
 type SecretClient interface {

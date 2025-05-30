@@ -7,23 +7,19 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
-	dkmsopenapiutil "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/openapi-util"
-	dkms "github.com/aliyun/alibabacloud-dkms-gcs-go-sdk/sdk"
 	"gopkg.in/yaml.v3"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
-
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 // Client interface represent a backend client interface that should be implemented
 type KMSClient struct {
-	dedicatedClient *dkms.Client
-	kmsClient       *kms.Client
-	clientName      string
+	kmsClient  *kms.Client
+	clientName string
 }
 
 func (c *KMSClient) GetName() string {
@@ -31,16 +27,6 @@ func (c *KMSClient) GetName() string {
 }
 
 func (c *KMSClient) getExternalData(ctx context.Context, data v1alpha1.DataSource) ([]byte, error) {
-	// dkms
-	if c.dedicatedClient != nil {
-		dkmsData, err := c.getExternalDataFromDKMS(data)
-		if err != nil {
-			klog.Errorf("get external data from dkms error %v,key %v", err, data.Key)
-			return nil, err
-		}
-		return dkmsData, nil
-	}
-
 	// kms
 	kmsData, err := c.getExternalDataFromKMS(data)
 	if err != nil {
@@ -50,6 +36,7 @@ func (c *KMSClient) getExternalData(ctx context.Context, data v1alpha1.DataSourc
 	return kmsData, nil
 
 }
+
 func (c *KMSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
 	secretDatas := make(map[string][]byte)
 	//getExternalData
@@ -109,6 +96,7 @@ func (c *KMSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 			kv[k] = utils.JsonStr(v)
 		}
 	}
+
 	if len(data.ReplaceKey) != 0 {
 		for _, rule := range data.ReplaceKey {
 			kv, err = utils.RewriteRegexp(rule, kv)
@@ -165,41 +153,4 @@ func (c *KMSClient) getExternalDataFromKMS(data v1alpha1.DataSource) ([]byte, er
 	}
 	klog.Infof("got secret data from kms service,key %v", data.Key)
 	return []byte(*resp.Body.SecretData), nil
-}
-
-func (c *KMSClient) getExternalDataFromDKMS(data v1alpha1.DataSource) ([]byte, error) {
-	if c.dedicatedClient == nil {
-		return nil, fmt.Errorf("dkms client is nil,kms key %v", data.Key)
-	}
-	req := &dkms.GetSecretValueRequest{
-		SecretName: tea.String(data.Key),
-	}
-	if data.VersionStage != "" {
-		req.VersionStage = tea.String(data.VersionStage)
-	}
-	if data.VersionId != "" {
-		req.VersionId = tea.String(data.VersionId)
-	}
-
-	runtimeOptions := &dkmsopenapiutil.RuntimeOptions{}
-	resp, err := c.dedicatedClient.GetSecretValueWithOptions(req, runtimeOptions)
-	if err != nil {
-		if !utils.JudgeNeedRetry(err) {
-			klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
-			return nil, err
-		} else {
-			time.Sleep(utils.GetWaitTimeExponential(1))
-			resp, err = c.dedicatedClient.GetSecretValueWithOptions(req, runtimeOptions)
-			if err != nil {
-				klog.Errorf("retry to get secret value from kms failed,key %v,error %v", data.Key, err)
-				return nil, err
-			}
-		}
-	}
-	if *resp.SecretDataType == utils.BinaryType {
-		klog.Errorf("not support binary type yet,key %v", data.Key)
-		return nil, utils.BackendSecretTypeNotSupportError{ErrType: utils.EmptySecretKeyErrorType, Key: data.Key}
-	}
-	klog.Infof("got secret data from kms service,key %v", data.Key)
-	return []byte(*resp.SecretData), nil
 }

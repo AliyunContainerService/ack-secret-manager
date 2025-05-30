@@ -33,7 +33,7 @@ type AuthConfig struct {
 	RefreshPeriod         time.Duration
 }
 
-func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backendp.Manager) (credentials.Credential, error) {
+func (a *AuthConfig) GetAuthCred(region string, isByEnv bool, maxConcurrentCount int, m *backendp.Manager) (credentials.Credential, error) {
 	providers := make([]provider.CredentialsProvider, 0)
 	var semaphoreProvider *provider.SemaphoreProvider
 	if a.OidcArn != "" && a.RoleArn != "" {
@@ -60,7 +60,7 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 		providers = append(providers, akProvider)
 	}
 
-	if backend.EnableWorkerRole {
+	if backend.EnableWorkerRole && !isByEnv {
 		providers = append(providers, provider.NewECSMetadataProvider(provider.ECSMetadataProviderOptions{
 			RefreshPeriod: a.RefreshPeriod,
 		}))
@@ -91,6 +91,7 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	cred = provider.NewCredentialForV2SDK(semaphoreProvider, provider.CredentialForV2SDKOptions{
 		CredentialRetrievalTimeout: 10 * time.Minute,
 	})
+
 	return cred, nil
 }
 

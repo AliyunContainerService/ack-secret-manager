@@ -37,7 +37,8 @@ type DataSource struct {
 	VersionStage   string          `json:"versionStage,omitempty"`
 	VersionId      string          `json:"versionId,omitempty"`
 	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
-	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
+	JMESPath    []JMESPathObject `json:"jmesPath,omitempty"`
+	KmsEndpoint string           `json:"kmsEndpoint,omitempty"`
 }
 
 type SecretStoreRef struct {
@@ -58,8 +59,9 @@ type ReplaceRule struct {
 
 // ExternalSecretStatus defines the observed state of ExternalSecret
 type ExternalSecretStatus struct {
-	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
-	// Important: Run "make" to regenerate code after modifying this file
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object
