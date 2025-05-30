@@ -357,7 +357,7 @@ The configuration of `command.enableWorkerRole` is related to the cluster type, 
 
 ### 6. KMS Endpoint Priority Rules
 
-The KMS service currently supports two access methods: **dedicated instance** and **public gateway**, requiring the following endpoint configurations:
+The KMS service currently supports two access methods: **dedicated instance gateway** and **public gateway**, requiring the following endpoint configurations:
 
 **KMS Endpoint Priority Rules**
 
@@ -379,7 +379,7 @@ The KMS service currently supports two access methods: **dedicated instance** an
 
     - **Purpose**: Used when no explicit configuration is provided.
 
-    - **Note**: This is the shared gateway address; replace `{region}` with the KMS instance's region.
+    - **Note**: This is the public gateway address; replace `{region}` with the KMS instance's region.
 
     - **Priority**: **Lowest**
 
@@ -387,11 +387,11 @@ The KMS service currently supports two access methods: **dedicated instance** an
 
 **KMS Endpoint Address Reference**
 
-| Gateway Type      | Domain Type        | Endpoint Address                                 | Usage Instructions                                                                                                                     |
-| ----------------- | ------------------ | ------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------- |
-| Dedicated Gateway | KMS Private Domain | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. Requires the KMS instance and the cluster to be in the same Region and VPC.<br />2. Replace {kms-instance-id} with the actual KMS instance ID.<br />3. KMS instance version must be 3.0 or above. |
-| Shared Gateway    | VPC Domain         | kms-vpc.{region}.aliyuncs.com                    | 1. Requires the KMS instance and the cluster to be in the same Region.<br />2. Replace {region} with the Region where the KMS instance is located.<br />3. This is the default configuration for the application; no additional configuration is needed. |
-| Shared Gateway    | Public Network     | kms.{region}.aliyuncs.com                        | 1. Replace {region} with the Region where the KMS instance is located.<br />2. The cluster must have public network access capability. |
+| Gateway Type               | Domain Type        | Endpoint Address                                 | Usage Instructions                                                                                                             |
+| -------------------------- | ------------------ | ------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------ |
+| Dedicated Instance Gateway | KMS Private Domain | {kms-instance-id}.cryptoservice.kms.aliyuncs.com | 1. Requires the KMS instance and the cluster to be in the same Region and VPC.<br />2. Replace {kms-instance-id} with the actual KMS instance ID.<br />3. KMS instance version must be 3.0 or above. |
+| Public Gateway             | VPC Domain         | kms-vpc.{region}.aliyuncs.com                    | 1. Requires the KMS instance and the cluster to be in the same Region.<br />2. Replace {region} with the Region where the KMS instance is located.<br />3. This is the default configuration for the application; no additional configuration is needed. |
+| Public Gateway             | Public Network     | kms.{region}.aliyuncs.com                        | 1. Replace {region} with the Region where the KMS instance is located.<br />2. The cluster must have public network access capability. |
 
 ## CRD configuration introduction
 
