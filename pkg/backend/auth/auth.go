@@ -91,6 +91,7 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	cred = provider.NewCredentialForV2SDK(semaphoreProvider, provider.CredentialForV2SDKOptions{
 		CredentialRetrievalTimeout: 10 * time.Minute,
 	})
+
 	return cred, nil
 }
 

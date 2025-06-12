@@ -220,7 +220,7 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 	for _, jmesPathEntry := range jmesObj {
 		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
 		if err != nil {
-			klog.Errorf("Invalid JMES Path: %s.", jmesPathEntry.Path)
+			klog.Errorf("Invalid JMES Path: %s, err = %s", jmesPathEntry.Path, err.Error())
 			continue
 		}
 
