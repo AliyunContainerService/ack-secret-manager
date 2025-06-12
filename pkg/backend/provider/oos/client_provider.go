@@ -52,68 +52,52 @@ func (p *Provider) GetRegion() string {
 	return p.region
 }
 
-func (p *Provider) GetEndpoint() string {
-	return ""
-}
-
-func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
-	clientName := fmt.Sprintf("%s/%s", store.Namespace, store.Name)
+func (p *Provider) NewClient(ctx context.Context, endpoint, name string, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
 	region := p.GetRegion()
-	shareClient, err := NewOOSClient(ctx, store, kube, region, p)
-	if err != nil {
-		klog.Errorf("new share oos client error %v", err)
-		return nil, err
-	}
-	cl := &OOSClient{
-		oosClient:  shareClient,
-		clientName: clientName,
-	}
-	return cl, nil
-}
+	authConfig := auth.GetCredentialParameterFromEnv()
+	authConfig.ClientName = name
+	authConfig.RefreshPeriod = time.Minute * 10
 
-func NewOOSClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, region string, p *Provider) (*oos.Client, error) {
-	if store.Spec.OOS == nil {
-		return nil, fmt.Errorf("oos config is empty")
-	}
-
-	var ak, sk string
-	oosConfig := store.Spec.OOS.OOS
-	auth := auth.AuthConfig{
-		ClientName:    fmt.Sprintf("%s/%s", store.Namespace, store.Name),
-		RefreshPeriod: time.Minute * 10,
-	}
-
-	if oosConfig != nil {
+	if store != nil && store.Spec.OOS != nil && store.Spec.OOS.OOS != nil {
+		oosConfig := store.Spec.OOS.OOS
 		if oosConfig.AccessKey != nil {
 			accessKey, err := utils.GetConfigFromSecret(ctx, kube, oosConfig.AccessKey)
 			if err != nil {
 				klog.Errorf("get ak config from secret error %v", err)
-				ak = ""
-			} else {
-				ak = string(accessKey)
+			} else if len(accessKey) > 0 {
+				authConfig.AccessKey = string(accessKey)
 			}
-			auth.AccessKey = ak
 		}
 		if oosConfig.AccessKeySecret != nil {
 			accessKeySecret, err := utils.GetConfigFromSecret(ctx, kube, oosConfig.AccessKeySecret)
 			if err != nil {
 				klog.Errorf("get sk config from secret error %v", err)
-				sk = ""
-			} else {
-				sk = string(accessKeySecret)
+			} else if len(accessKeySecret) > 0 {
+				authConfig.AccessSecretKey = string(accessKeySecret)
 			}
-			auth.AccessSecretKey = sk
 		}
-		auth.RoleArn = oosConfig.RAMRoleARN
-		auth.OidcArn = oosConfig.OIDCProviderARN
-		auth.RoleSessionName = oosConfig.RAMRoleSessionName
-		auth.RoleSessionExpiration = oosConfig.RoleSessionExpiration
-		auth.RemoteRoleSessionName = oosConfig.RemoteRAMRoleSessionName
-		auth.RemoteRoleArn = oosConfig.RemoteRAMRoleARN
+		if oosConfig.RAMRoleARN != "" {
+			authConfig.RoleArn = oosConfig.RAMRoleARN
+		}
+		if oosConfig.OIDCProviderARN != "" {
+			authConfig.OidcArn = oosConfig.OIDCProviderARN
+		}
+		if oosConfig.RAMRoleSessionName != "" {
+			authConfig.RoleSessionName = oosConfig.RAMRoleSessionName
+		}
+		if oosConfig.RoleSessionExpiration != "" {
+			authConfig.RoleSessionExpiration = oosConfig.RoleSessionExpiration
+		}
+		if oosConfig.RemoteRAMRoleSessionName != "" {
+			authConfig.RemoteRoleSessionName = oosConfig.RemoteRAMRoleSessionName
+		}
+		if oosConfig.RemoteRAMRoleARN != "" {
+			authConfig.RemoteRoleArn = oosConfig.RemoteRAMRoleARN
+		}
 	}
 
 	//get ram auth credential
-	cred, err := auth.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
+	cred, err := authConfig.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
 		RamLock:     p.Manager.RamLock,
 		RamProvider: p.Manager.RamProvider,
 	})
@@ -123,33 +107,10 @@ func NewOOSClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.
 	if cred == nil {
 		return nil, fmt.Errorf("cred is empty")
 	}
-	endpoint := fmt.Sprintf(defaultOosDomain, region)
-	client, err := oos.NewClient(&openapi.Config{
-		Endpoint:   tea.String(endpoint),
-		RegionId:   tea.String(region),
-		Credential: cred,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
-}
 
-func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
-	authEnvs := auth.GetCredentialParameterFromEnv()
-	region := p.GetRegion()
-	//get ram auth credential
-	cred, err := authEnvs.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock:     p.Manager.RamLock,
-		RamProvider: p.Manager.RamProvider,
-	})
-	if err != nil {
-		return nil, err
+	if endpoint == "" {
+		endpoint = fmt.Sprintf(defaultOosDomain, region)
 	}
-	if cred == nil {
-		return nil, fmt.Errorf("cred is empty")
-	}
-	endpoint := fmt.Sprintf(defaultOosDomain, region)
 	client, err := oos.NewClient(&openapi.Config{
 		Endpoint:   tea.String(endpoint),
 		RegionId:   tea.String(region),
@@ -158,9 +119,11 @@ func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
 	if err != nil {
 		return nil, err
 	}
+
 	cl := &OOSClient{
 		oosClient:  client,
-		clientName: backend.EnvClient,
+		clientName: name,
 	}
+
 	return cl, nil
 }
