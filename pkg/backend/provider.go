@@ -2,7 +2,6 @@ package backend
 
 import (
 	"context"
-	"fmt"
 	"sync"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -56,38 +55,12 @@ func GetProviderByName(providerName string) Provider {
 	return provider
 }
 
-func NewProviderClientByENV() error {
-	errs := make([]error, 0)
-	providerMap.Range(func(k, v any) bool {
-		provider, ok := v.(Provider)
-		if !ok {
-			err := fmt.Errorf("provider type error,provider name %v", k)
-			errs = append(errs, err)
-			return true
-		}
-		secretClient, err := provider.NewClientByENV()
-		if err != nil {
-			errs = append(errs, fmt.Errorf("%v new client by env error %v", k, err))
-			return true
-		}
-		provider.Register(EnvClient, secretClient)
-		return true
-	})
-	if len(errs) != 0 {
-		return fmt.Errorf("new provider client by env error %v", errs)
-	}
-	return nil
-}
-
 type Provider interface {
 	ClientManager
 	// NewClient constructs secrets client by secret store
-	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
-	// NewClientByENV constructs secrets client by environment variable
-	NewClientByENV() (SecretClient, error)
+	NewClient(ctx context.Context, endpoint, name string, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
 	GetName() string
 	GetRegion() string
-	GetEndpoint() string
 }
 
 type SecretClient interface {
