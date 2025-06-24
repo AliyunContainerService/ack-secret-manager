@@ -43,7 +43,7 @@ func (p ExternalSecretsPredicate[object]) Update(e event.TypedUpdateEvent[object
 	if !ok {
 		return false
 	}
-	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) || !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) ||
 		oldObj.GetDeletionTimestamp() != newObj.GetDeletionTimestamp() ||
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true

@@ -74,6 +74,7 @@ func main() {
 	var maxConcurrentOosSecretPulls int
 	var enableWorkerRole bool
 	var kmsEndpoint string
+	var cleanUpSecretOnFailure bool
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -81,7 +82,7 @@ func main() {
 	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
-	flag.StringVar(&region, "region", "cn-hangzhou", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
 	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
@@ -89,6 +90,7 @@ func main() {
 	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
 	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
 	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
+	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "clean up the corresponding secret in the Kubernetes cluster when the secret sync operation fails.")
 
 	flag.Parse()
 
@@ -180,14 +182,15 @@ func main() {
 		}
 	}
 	esReconciler := externalsecret.ExternalSecretReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
-		Ctx:                  ctx,
-		DisablePolling:       disablePolling,
-		ReconciliationPeriod: reconcilePeriod,
-		WatchNamespaces:      watchNs,
-		RotationInterval:     rotationInterval,
+		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		Log:                    ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
+		Ctx:                    ctx,
+		DisablePolling:         disablePolling,
+		CleanUpSecretOnFailure: cleanUpSecretOnFailure,
+		ReconciliationPeriod:   reconcilePeriod,
+		WatchNamespaces:        watchNs,
+		RotationInterval:       rotationInterval,
 	}
 	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
 	esReconciler.OosLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentOosSecretPulls), 1)

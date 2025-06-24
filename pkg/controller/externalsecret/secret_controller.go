@@ -45,11 +45,12 @@ const (
 // ExternalSecretReconciler reconciles a ExternalSecret object
 type ExternalSecretReconciler struct {
 	client.Client
-	APIReader            client.Reader
-	Log                  logr.Logger
-	Ctx                  context.Context
-	WatchNamespaces      map[string]bool
-	ReconciliationPeriod time.Duration
+	APIReader              client.Reader
+	Log                    logr.Logger
+	Ctx                    context.Context
+	WatchNamespaces        map[string]bool
+	ReconciliationPeriod   time.Duration
+	CleanUpSecretOnFailure bool
 
 	DisablePolling   bool
 	RotationInterval time.Duration // Key rotation job running interval.
@@ -76,7 +77,8 @@ func (r *ExternalSecretReconciler) getCurrentData(namespace string, name string)
 }
 
 // upsertSecret will create or update a secret
-func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret, data map[string][]byte) error {
+func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret, secretMap, dataSecretMap, dataExtractSecretMap map[string][]byte,
+	currentData map[string][]byte, dataErrorMap, extractDataErrorMap map[string]error) error {
 	secType := corev1.SecretTypeOpaque
 	if externalSec.Spec.Type != "" {
 		secType = corev1.SecretType(externalSec.Spec.Type)
@@ -90,7 +92,24 @@ func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret,
 			},
 			Name: externalSec.Name,
 		},
-		Data: data,
+	}
+	if r.CleanUpSecretOnFailure {
+		klog.Infof("flag cleanup-secret-on-failure is enabled, replace old data with the new data")
+		// If cleanup on failure is enabled , just replace the old data with the new data.
+		secret.Data = secretMap
+	} else if len(dataErrorMap) == 0 && len(extractDataErrorMap) == 0 {
+		// If there is no error, just replace the old data with the new data.
+		secret.Data = secretMap
+	} else {
+		// If there is any sync issue, only overwrite the fields that were successfully synced, and do not delete other fields.
+		var mergedMap = currentData
+		for k, v := range dataSecretMap {
+			mergedMap[k] = v
+		}
+		for k, v := range dataExtractSecretMap {
+			mergedMap[k] = v
+		}
+		secret.Data = mergedMap
 	}
 	err := r.Create(r.Ctx, secret)
 	if errors.IsAlreadyExists(err) {
@@ -234,83 +253,95 @@ func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 	return nil
 }
 
-func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, dataSources []api.DataSource) (map[string][]byte, error) {
+func setEndpoint(provider backend.Provider, data *api.DataSource, secretClient backend.SecretClient) {
+	if provider.GetName() == backend.ProviderKMSName {
+		if data.KmsEndpoint != "" {
+			secretClient.SetEndpoint(data.KmsEndpoint)
+		} else {
+			secretClient.SetEndpoint(provider.GetEndpoint())
+		}
+	}
+}
+
+func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, dataSources []api.DataSource) (map[string][]byte, map[string]error) {
 	out := make(map[string][]byte)
-	errors := make([]error, 0)
+	errorsMap := make(map[string]error)
 	for _, data := range dataSources {
 		clientName := backend.EnvClient
 		if data.SecretStoreRef != nil {
 			clientName = fmt.Sprintf("%s/%s", data.SecretStoreRef.Namespace, data.SecretStoreRef.Name)
 		}
 		klog.Infof("client name %v,data key %v", clientName, data.Key)
+
 		secretClient, err := provider.GetClient(clientName)
 		if err != nil {
 			//err, "get client error,client name", clientName
 			klog.Errorf("client %v get client error %v", clientName, err)
 			store, err := r.getSecretStore(data.SecretStoreRef)
 			if err != nil {
-				errors = append(errors, fmt.Errorf("get secret store %v error %v", clientName, err))
+				errorsMap[data.Key] = fmt.Errorf("get client %s failed: %v", clientName, err)
 				continue
 			}
+
 			secretClient, err = provider.NewClient(context.Background(), store, r.Client)
 			if err != nil {
-				errors = append(errors, fmt.Errorf("new client from secretstore %v error %v", clientName, err))
+				errorsMap[data.Key] = fmt.Errorf("init client %s failed: %v", clientName, err)
 				continue
 			}
 			provider.Register(clientName, secretClient)
 		}
+
+		setEndpoint(provider, &data, secretClient)
 		singleMap, err := secretClient.GetExternalSecret(context.Background(), &data, r.Client)
 		if err != nil {
-			errors = append(errors, fmt.Errorf("client %v get data error %v", clientName, err))
+			errorsMap[data.Key] = fmt.Errorf("client %v get data error %v", clientName, err)
 			continue
 		}
 		for k, v := range singleMap {
 			out[k] = v
 		}
 	}
-	if len(errors) != 0 {
-		return out, fmt.Errorf("%v", errors)
-	}
-	return out, nil
+	return out, errorsMap
 }
 
-func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend.Provider, dataSources []api.DataProcess) (map[string][]byte, error) {
+func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend.Provider, dataSources []api.DataProcess) (map[string][]byte, map[string]error) {
 	out := make(map[string][]byte)
-	errors := make([]error, 0)
+	errorsMap := make(map[string]error)
 	for _, data := range dataSources {
 		clientName := backend.EnvClient
 		if data.Extract.SecretStoreRef != nil {
 			clientName = fmt.Sprintf("%s/%s", data.Extract.SecretStoreRef.Namespace, data.Extract.SecretStoreRef.Name)
 		}
 		klog.Infof("client name %v,data key %v", clientName, data.Extract.Key)
+
 		secretClient, err := provider.GetClient(clientName)
 		if err != nil {
 			klog.Errorf("client %v get client error %v", clientName, err)
 			store, err := r.getSecretStore(data.Extract.SecretStoreRef)
 			if err != nil {
-				errors = append(errors, fmt.Errorf("get secret store %v error %v", clientName, err))
+				errorsMap[data.Extract.Key] = fmt.Errorf("get client %s failed: %v", clientName, err)
 				continue
 			}
+
 			secretClient, err = provider.NewClient(context.Background(), store, r.Client)
 			if err != nil {
-				errors = append(errors, fmt.Errorf("new client from secretstore %v error %v", clientName, err))
+				errorsMap[data.Extract.Key] = fmt.Errorf("new client from secretstore %s failed: %v", clientName, err)
 				continue
 			}
 			provider.Register(clientName, secretClient)
 		}
+
+		setEndpoint(provider, data.Extract, secretClient)
 		singleMap, err := secretClient.GetExternalSecretWithExtract(context.Background(), &data, r.Client)
 		if err != nil {
-			errors = append(errors, fmt.Errorf("client %v get data error", clientName))
+			errorsMap[data.Extract.Key] = fmt.Errorf("client %s get data failed: %v", clientName, err)
 			continue
 		}
 		for k, v := range singleMap {
 			out[k] = v
 		}
 	}
-	if len(errors) != 0 {
-		return out, fmt.Errorf("%v", errors)
-	}
-	return out, nil
+	return out, errorsMap
 }
 
 func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSecret) (bool, error) {
@@ -336,30 +367,37 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 
 	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
 	log := r.Log.WithValues("secret", esIndex)
-
 	provider := backend.GetProviderByName(providerName)
 	if provider == nil {
 		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
 	}
 
 	secretMap := make(map[string][]byte)
-	if len(externalSec.Spec.Data) != 0 {
-		out, err := r.getExternalSecret(provider, externalSec.Spec.Data)
-		if err != nil {
-			klog.Errorf("get external secret error %v", err)
-		}
+	dataSecretMap := make(map[string][]byte)
+	extractDataSecretMap := make(map[string][]byte)
+	dataErrorsMap := make(map[string]error)
+	extractDataErrorsMap := make(map[string]error)
 
+	if len(externalSec.Spec.Data) != 0 {
+		out, errorsMap := r.getExternalSecret(provider, externalSec.Spec.Data)
+		if len(errorsMap) > 0 {
+			klog.Errorf("get external secret error %v", errorsMap)
+		}
+		dataErrorsMap = errorsMap
 		for k, v := range out {
+			dataSecretMap[k] = v
 			secretMap[k] = v
 		}
 	}
-	if len(externalSec.Spec.DataProcess) != 0 {
-		out, err := r.getExternalSecretWithExtract(provider, externalSec.Spec.DataProcess)
-		if err != nil {
-			klog.Errorf("get external secret error %v", err)
-		}
 
+	if len(externalSec.Spec.DataProcess) != 0 {
+		out, errorsMap := r.getExternalSecretWithExtract(provider, externalSec.Spec.DataProcess)
+		if len(errorsMap) > 0 {
+			klog.Errorf("get extract external secret error %v", errorsMap)
+		}
+		extractDataErrorsMap = errorsMap
 		for k, v := range out {
+			extractDataSecretMap[k] = v
 			secretMap[k] = v
 		}
 	}
@@ -373,13 +411,17 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 	eq := reflect.DeepEqual(secretMap, currentData)
 	if !eq {
 		log.Info("found secret need to update")
-		if err := r.updateSecret(externalSec, secretMap); err != nil {
+		if err := r.updateSecret(externalSec, secretMap, dataSecretMap,
+			extractDataSecretMap, currentData, dataErrorsMap, extractDataErrorsMap); err != nil {
 			log.Error(err, "failed to update secret")
 			return false, err
 		}
+		r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
 		log.Info("secret has sync from external backend")
 		return true, nil
 	}
+
+	r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
 	return false, nil
 }
 
@@ -396,4 +438,38 @@ func (r *ExternalSecretReconciler) getSecretStore(secretStoreRef *api.SecretStor
 		return nil, err
 	}
 	return secretStore, nil
+}
+
+func (r *ExternalSecretReconciler) updateExternalSecretStatus(externalSec *api.ExternalSecret, dataErrorMap, extractDataErrorMap map[string]error) {
+	externalSec.Status.DataSyncResults = make([]api.DataSyncResult, 0)
+	for k, v := range dataErrorMap {
+		result := api.DataSyncResult{
+			KMSSecretKey:        k,
+			Status:              "Failed",
+			Reason:              v.Error(),
+			SynchronizationTime: metav1.Time{Time: time.Now()},
+		}
+		externalSec.Status.DataSyncResults = append(externalSec.Status.DataSyncResults, result)
+	}
+	for k, v := range extractDataErrorMap {
+		result := api.DataSyncResult{
+			KMSSecretKey:        k,
+			Status:              "Failed",
+			Reason:              v.Error(),
+			SynchronizationTime: metav1.Time{Time: time.Now()},
+		}
+		externalSec.Status.DataSyncResults = append(externalSec.Status.DataSyncResults, result)
+	}
+	if len(externalSec.Status.DataSyncResults) == 0 {
+		result := api.DataSyncResult{
+			Status:              "Succeeded",
+			SynchronizationTime: metav1.Time{Time: time.Now()},
+		}
+		externalSec.Status.DataSyncResults = append(externalSec.Status.DataSyncResults, result)
+	}
+	err := r.Status().Update(r.Ctx, externalSec)
+	if err != nil {
+		klog.Errorf("update external secret status error %v", err)
+		return
+	}
 }

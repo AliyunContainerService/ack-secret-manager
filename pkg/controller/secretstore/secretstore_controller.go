@@ -18,19 +18,24 @@ package secretstore
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"time"
 
-	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/source"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/kms"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+	"github.com/go-logr/logr"
 )
 
 const (
@@ -62,7 +67,7 @@ type SecretStoreReconciler struct {
 func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("SecretStore", req.NamespacedName)
 	secretStore := &v1alpha1.SecretStore{}
-	//
+
 	err := r.Get(r.Ctx, req.NamespacedName, secretStore)
 	if err != nil {
 		log.Error(err, fmt.Sprintf("could not get SecretStore '%s'", req.NamespacedName))
@@ -70,13 +75,72 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	}
 	r.Log.Info("secret store info", req.NamespacedName)
 
-	// SecretStoreSpec kubebuilder:validation:MaxProperties=1
+	clientName := fmt.Sprintf("%s/%s", secretStore.Namespace, secretStore.Name)
+	kmsProvider := backend.GetProviderByName(backend.ProviderKMSName)
+	oosProvider := backend.GetProviderByName(backend.ProviderOOSName)
+	// clean up the old client if it exists
+	kmsProvider.Delete(clientName)
+	oosProvider.Delete(clientName)
+
+	// if secret store is marked to be deleted, remove the finalizer
+	isSecretStoretMarkedToBeDeleted := secretStore.GetDeletionTimestamp() != nil
+	if isSecretStoretMarkedToBeDeleted {
+		log.Info("SecretStore kms is marked to be deleted")
+		if utils.Contains(secretStore.GetFinalizers(), secretFinalizer) {
+			// exec the clean work in secretFinalizer
+			// do not delete Finalizer if clean failed, the clean work will exec in next reconcile
+
+			// remove secretFinalizer
+			log.Info("removing finalizer", "currentFinalizers", secretStore.GetFinalizers())
+			secretStore.SetFinalizers(utils.Remove(secretStore.GetFinalizers(), secretFinalizer))
+			err := r.Update(context.TODO(), secretStore)
+			if err != nil {
+				log.Error(err, "failed to update externalSec when clean finalizers")
+				return reconcile.Result{}, err
+			}
+		}
+		return reconcile.Result{}, nil
+	}
+
+	// if secret store is not marked to be deleted, ensure the finalizer is present
+	if !utils.Contains(secretStore.GetFinalizers(), secretFinalizer) {
+		if err := r.addFinalizer(log, secretStore); err != nil {
+			log.Error(err, "failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+	}
+
+	// init the secret store client
 	if secretStore.Spec.KMS != nil {
-		return r.ReconcileKMS(ctx, log, secretStore)
+		secretClient, err := kmsProvider.NewClient(ctx, secretStore, r.Client)
+		if err != nil {
+			log.Error(err, fmt.Sprintf("could not new kms client %s", clientName))
+			return ctrl.Result{}, err
+		}
+		kmsClient, ok := secretClient.(*kms.KMSClient)
+		if !ok {
+			log.Error(errors.New("client type error"), fmt.Sprintf("could not new kms client %s", clientName))
+			return ctrl.Result{}, err
+		}
+		kmsProvider.Register(kmsClient.GetName(), kmsClient)
+		return ctrl.Result{}, nil
 	}
+
 	if secretStore.Spec.OOS != nil {
-		return r.ReconcileOOS(ctx, log, secretStore)
+		secretClient, err := oosProvider.NewClient(ctx, secretStore, r.Client)
+		if err != nil {
+			log.Error(err, fmt.Sprintf("could not new oos client %s", clientName))
+			return ctrl.Result{}, err
+		}
+		oosClient, ok := secretClient.(*oos.OOSClient)
+		if !ok {
+			log.Error(errors.New("client type error"), fmt.Sprintf("could not new kms client %s", clientName))
+			return ctrl.Result{}, err
+		}
+		oosProvider.Register(oosClient.GetName(), oosClient)
+		return ctrl.Result{}, nil
 	}
+
 	return ctrl.Result{}, nil
 }
 

@@ -39,8 +39,6 @@ type SecretStoreSpec struct {
 type KMSProvider struct {
 	// +optional
 	KMS *KMSAuth `json:"KMSAuth,omitempty"`
-	// +optional
-	DedicatedKMS *DedicatedKMSAuth `json:"dedicatedKMSAuth,omitempty"`
 }
 
 type KMSAuth struct {
@@ -69,16 +67,6 @@ type OOSAuth struct {
 	RoleSessionExpiration    string     `json:"roleSessionExpiration,omitempty"`
 	RemoteRAMRoleARN         string     `json:"remoteRamRoleARN,omitempty"`
 	RemoteRAMRoleSessionName string     `json:"remoteRamRoleSessionName,omitempty"`
-}
-
-type DedicatedKMSAuth struct {
-	Protocol string `json:"protocol"`
-	Endpoint string `json:"endpoint"`
-	CA       string `json:"ca,omitempty"`
-	// if ignoreSSL=true custom don't need fill the CA
-	IgnoreSSL        bool       `json:"ignoreSSL,omitempty"`
-	ClientKeyContent *SecretRef `json:"clientKeyContent"`
-	Password         *SecretRef `json:"password"`
 }
 
 type SecretRef struct {
