@@ -1,4 +1,4 @@
-FROM --platform=$BUILDPLATFORM golang:1.23.1 as builder
+FROM --platform=$BUILDPLATFORM golang:1.23.10 as builder
 ARG TARGETOS TARGETARCH
 ENV GOPROXY=https://goproxy.cn,direct
 ENV GO111MODULE off

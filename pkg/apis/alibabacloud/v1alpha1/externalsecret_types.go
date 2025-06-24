@@ -37,7 +37,8 @@ type DataSource struct {
 	VersionStage   string          `json:"versionStage,omitempty"`
 	VersionId      string          `json:"versionId,omitempty"`
 	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
-	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
+	JMESPath    []JMESPathObject `json:"jmesPath,omitempty"`
+	KmsEndpoint string           `json:"kmsEndpoint,omitempty"`
 }
 
 type SecretStoreRef struct {

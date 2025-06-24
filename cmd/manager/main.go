@@ -24,13 +24,12 @@ import (
 	"strings"
 	"time"
 
-	"golang.org/x/time/rate"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
-
 	"github.com/operator-framework/operator-lib/leader"
+	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -83,7 +82,7 @@ func main() {
 	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
-	flag.StringVar(&region, "region", "cn-hangzhou", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
 	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")

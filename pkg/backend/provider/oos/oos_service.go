@@ -26,14 +26,30 @@ func (c *OOSClient) GetName() string {
 }
 
 func (c *OOSClient) getExternalData(ctx context.Context, data v1alpha1.DataSource) ([]byte, error) {
-	// oos
-	oosData, err := c.getExternalDataFromOOS(data)
+	if c.oosClient == nil {
+		return nil, fmt.Errorf("oos client is nil,oos key %v", data.Key)
+	}
+	req := &oos.GetSecretParameterRequest{
+		Name:           tea.String(data.Key),
+		WithDecryption: tea.Bool(true),
+	}
+	resp, err := c.oosClient.GetSecretParameter(req)
 	if err != nil {
-		klog.Errorf("get external data from oos error %v,key %v", err, data.Key)
-		return nil, err
+		if !utils.JudgeNeedRetry(err) {
+			klog.Errorf("failed to get secret value from oos,key %v,error %v", data.Key, err)
+			return nil, err
+		} else {
+			time.Sleep(utils.GetWaitTimeExponential(1))
+			resp, err = c.oosClient.GetSecretParameter(req)
+			if err != nil {
+				klog.Errorf("retry to get secret value from oos failed,key %v,error %v", data.Key, err)
+				return nil, err
+			}
+		}
 	}
 
-	return oosData, nil
+	klog.Infof("got secret data from oos service,key %v", data.Key)
+	return []byte(*resp.Body.Parameter.Value), nil
 }
 
 func (c *OOSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
@@ -44,6 +60,7 @@ func (c *OOSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSo
 		klog.Errorf("get external data error %v,key %v", err, data.Key)
 		return nil, err
 	}
+
 	// jmes
 	if len(data.JMESPath) > 0 {
 		klog.Infof("parse jmes format, key %v", data.Key)
@@ -58,6 +75,7 @@ func (c *OOSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSo
 			return secretDatas, nil
 		}
 	}
+
 	secretDatas[data.Name] = externalData
 	return secretDatas, nil
 }
@@ -67,6 +85,7 @@ func (c *OOSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 	if data.Extract == nil {
 		return nil, fmt.Errorf("extract data is empty")
 	}
+
 	externalData, err := c.getExternalData(ctx, *data.Extract)
 	if err != nil {
 		return nil, err
@@ -102,35 +121,23 @@ func (c *OOSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1al
 			}
 		}
 	}
+
 	for k, v := range kv {
 		secretDatas[k] = []byte(v)
 	}
 	return secretDatas, nil
 }
 
-func (c *OOSClient) getExternalDataFromOOS(data v1alpha1.DataSource) ([]byte, error) {
+func (c *OOSClient) SetEndpoint(endpoint string) {
 	if c.oosClient == nil {
-		return nil, fmt.Errorf("oos client is nil,oos key %v", data.Key)
-	}
-	req := &oos.GetSecretParameterRequest{
-		Name:           tea.String(data.Key),
-		WithDecryption: tea.Bool(true),
-	}
-	resp, err := c.oosClient.GetSecretParameter(req)
-	if err != nil {
-		if !utils.JudgeNeedRetry(err) {
-			klog.Errorf("failed to get secret value from oos,key %v,error %v", data.Key, err)
-			return nil, err
-		} else {
-			time.Sleep(utils.GetWaitTimeExponential(1))
-			resp, err = c.oosClient.GetSecretParameter(req)
-			if err != nil {
-				klog.Errorf("retry to get secret value from oos failed,key %v,error %v", data.Key, err)
-				return nil, err
-			}
-		}
+		klog.Errorf("oos client is nil, cannot set endpoint %v", endpoint)
+		return
 	}
 
-	klog.Infof("got secret data from oos service,key %v", data.Key)
-	return []byte(*resp.Body.Parameter.Value), nil
+	if endpoint == "" {
+		klog.Errorf("endpoint is empty, cannot set endpoint")
+		return
+	}
+
+	c.oosClient.Endpoint = tea.String(endpoint)
 }

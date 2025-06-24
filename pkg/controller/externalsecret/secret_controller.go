@@ -28,7 +28,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -55,19 +54,9 @@ type ExternalSecretReconciler struct {
 
 	DisablePolling   bool
 	RotationInterval time.Duration // Key rotation job running interval.
-	rotationTicker   *time.Ticker
-	closing          chan bool // close channel.
 	KmsLimiter       KmsLimiter
 	OosLimiter       OosLimiter
 }
-
-var (
-	externalSecretGRV = schema.GroupVersionResource{
-		Group:    "alibabacloud.com",
-		Version:  "v1alpha1",
-		Resource: "externalsecrets",
-	}
-)
 
 // getCurrentData get the current data from secret api
 func (r *ExternalSecretReconciler) getCurrentData(namespace string, name string) (map[string][]byte, error) {
@@ -264,6 +253,16 @@ func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 	return nil
 }
 
+func setEndpoint(provider backend.Provider, data *api.DataSource, secretClient backend.SecretClient) {
+	if provider.GetName() == backend.ProviderKMSName {
+		if data.KmsEndpoint != "" {
+			secretClient.SetEndpoint(data.KmsEndpoint)
+		} else {
+			secretClient.SetEndpoint(provider.GetEndpoint())
+		}
+	}
+}
+
 func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, dataSources []api.DataSource) (map[string][]byte, map[string]error) {
 	out := make(map[string][]byte)
 	errorsMap := make(map[string]error)
@@ -273,6 +272,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 			clientName = fmt.Sprintf("%s/%s", data.SecretStoreRef.Namespace, data.SecretStoreRef.Name)
 		}
 		klog.Infof("client name %v,data key %v", clientName, data.Key)
+
 		secretClient, err := provider.GetClient(clientName)
 		if err != nil {
 			//err, "get client error,client name", clientName
@@ -282,6 +282,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 				errorsMap[data.Key] = fmt.Errorf("get client %s failed: %v", clientName, err)
 				continue
 			}
+
 			secretClient, err = provider.NewClient(context.Background(), store, r.Client)
 			if err != nil {
 				errorsMap[data.Key] = fmt.Errorf("init client %s failed: %v", clientName, err)
@@ -289,6 +290,8 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 			}
 			provider.Register(clientName, secretClient)
 		}
+
+		setEndpoint(provider, &data, secretClient)
 		singleMap, err := secretClient.GetExternalSecret(context.Background(), &data, r.Client)
 		if err != nil {
 			errorsMap[data.Key] = fmt.Errorf("client %v get data error %v", clientName, err)
@@ -310,6 +313,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 			clientName = fmt.Sprintf("%s/%s", data.Extract.SecretStoreRef.Namespace, data.Extract.SecretStoreRef.Name)
 		}
 		klog.Infof("client name %v,data key %v", clientName, data.Extract.Key)
+
 		secretClient, err := provider.GetClient(clientName)
 		if err != nil {
 			klog.Errorf("client %v get client error %v", clientName, err)
@@ -318,6 +322,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 				errorsMap[data.Extract.Key] = fmt.Errorf("get client %s failed: %v", clientName, err)
 				continue
 			}
+
 			secretClient, err = provider.NewClient(context.Background(), store, r.Client)
 			if err != nil {
 				errorsMap[data.Extract.Key] = fmt.Errorf("new client from secretstore %s failed: %v", clientName, err)
@@ -325,6 +330,8 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 			}
 			provider.Register(clientName, secretClient)
 		}
+
+		setEndpoint(provider, data.Extract, secretClient)
 		singleMap, err := secretClient.GetExternalSecretWithExtract(context.Background(), &data, r.Client)
 		if err != nil {
 			errorsMap[data.Extract.Key] = fmt.Errorf("client %s get data failed: %v", clientName, err)
@@ -360,7 +367,6 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 
 	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
 	log := r.Log.WithValues("secret", esIndex)
-
 	provider := backend.GetProviderByName(providerName)
 	if provider == nil {
 		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
@@ -371,9 +377,10 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 	extractDataSecretMap := make(map[string][]byte)
 	dataErrorsMap := make(map[string]error)
 	extractDataErrorsMap := make(map[string]error)
+
 	if len(externalSec.Spec.Data) != 0 {
 		out, errorsMap := r.getExternalSecret(provider, externalSec.Spec.Data)
-		if errorsMap != nil && len(errorsMap) > 0 {
+		if len(errorsMap) > 0 {
 			klog.Errorf("get external secret error %v", errorsMap)
 		}
 		dataErrorsMap = errorsMap
@@ -382,12 +389,12 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 			secretMap[k] = v
 		}
 	}
+
 	if len(externalSec.Spec.DataProcess) != 0 {
 		out, errorsMap := r.getExternalSecretWithExtract(provider, externalSec.Spec.DataProcess)
-		if errorsMap != nil && len(errorsMap) > 0 {
+		if len(errorsMap) > 0 {
 			klog.Errorf("get extract external secret error %v", errorsMap)
 		}
-
 		extractDataErrorsMap = errorsMap
 		for k, v := range out {
 			extractDataSecretMap[k] = v
@@ -413,6 +420,7 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 		log.Info("secret has sync from external backend")
 		return true, nil
 	}
+
 	r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
 	return false, nil
 }

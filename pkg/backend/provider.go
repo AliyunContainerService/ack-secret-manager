@@ -5,9 +5,8 @@ import (
 	"fmt"
 	"sync"
 
-	"sigs.k8s.io/controller-runtime/pkg/client"
-
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const EnvClient = "env.client"
@@ -95,6 +94,7 @@ type SecretClient interface {
 	// GetSecret gets secret via externalSecret
 	GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
 	GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
+	SetEndpoint(endpoint string)
 }
 
 type ClientManager interface {
