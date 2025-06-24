@@ -24,12 +24,13 @@ import (
 	"strings"
 	"time"
 
-	"github.com/operator-framework/operator-lib/leader"
 	"golang.org/x/time/rate"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
+
+	"github.com/operator-framework/operator-lib/leader"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/cache"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
@@ -74,6 +75,7 @@ func main() {
 	var maxConcurrentOosSecretPulls int
 	var enableWorkerRole bool
 	var kmsEndpoint string
+	var cleanUpSecretOnFailure bool
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -89,6 +91,7 @@ func main() {
 	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
 	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
 	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
+	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "clean up the corresponding secret in the Kubernetes cluster when the secret sync operation fails.")
 
 	flag.Parse()
 
@@ -180,14 +183,15 @@ func main() {
 		}
 	}
 	esReconciler := externalsecret.ExternalSecretReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
-		Ctx:                  ctx,
-		DisablePolling:       disablePolling,
-		ReconciliationPeriod: reconcilePeriod,
-		WatchNamespaces:      watchNs,
-		RotationInterval:     rotationInterval,
+		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		Log:                    ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
+		Ctx:                    ctx,
+		DisablePolling:         disablePolling,
+		CleanUpSecretOnFailure: cleanUpSecretOnFailure,
+		ReconciliationPeriod:   reconcilePeriod,
+		WatchNamespaces:        watchNs,
+		RotationInterval:       rotationInterval,
 	}
 	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
 	esReconciler.OosLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentOosSecretPulls), 1)

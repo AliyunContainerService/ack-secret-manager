@@ -56,10 +56,18 @@ type ReplaceRule struct {
 	Source string `json:"source"`
 }
 
+type DataSyncResult struct {
+	KMSSecretKey        string      `json:"KMSSecretKey,omitempty"`
+	Status              string      `json:"status,omitempty"`
+	Reason              string      `json:"reason,omitempty"`
+	SynchronizationTime metav1.Time `json:"synchronizationTime,omitempty"`
+}
+
 // ExternalSecretStatus defines the observed state of ExternalSecret
 type ExternalSecretStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	DataSyncResults []DataSyncResult `json:"dataSyncResults,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

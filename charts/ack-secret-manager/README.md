@@ -129,6 +129,7 @@ helm -n kube-system uninstall ack-secret-manager
 | command.maxConcurrentSecretPulls                    | 已弃用                                                                                                                                          | -                      |
 | command.maxConcurrentKmsSecretPulls                 | kms secret 每秒同步的最大并发数量                                                                                                               | 10                     |
 | command.maxConcurrentOosSecretPulls                 | oos secret 每秒同步的最大并发数量                                                                                                               | 10                     |
+| command.cleanupSecretOnFailure | kms 凭据同步失败时是否删除集群 Secret | false |
 | image.repository                                    | 指定的ack-secret-manager 镜像仓库名称                                                                                                           | acs/ack-secret-manager |
 | image.tag                                           | 指定的ack-secret-manager 镜像tag                                                                                                                | v0.5.0                 |
 | image.pullPolicy                                    | 镜像拉取策略，默认为Always                                                                                                                      | Always                 |
@@ -481,3 +482,4 @@ ack-secret-manager 涉及了两种 CRD，SecretStore 用于存放访问凭据（
 | `0.5.6` | 2025年3月3日   | 支持Acs集群                                                                                                        |
 | `0.5.7` | 2025年3月26日  | 支持解析提取YAML格式的密文字段                                                                                     |
 | `0.5.8` | 2025年3月28日  | 1.支持多架构部署<br />2.支持配置 Endpoint 获取 KMS 凭据                                                            |
+| `0.5.11` | 2025年6月17日  | 支持配置是否在KMS凭据或OOS加密参数同步失败时删除集群secret                                                      |

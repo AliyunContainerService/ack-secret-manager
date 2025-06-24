@@ -131,6 +131,7 @@ helm -n kube-system uninstall ack-secret-manager
 | command.maxConcurrentSecretPulls                    | Deprecated                                                                                                                                                                                                        | -                       |
 | command.maxConcurrentKmsSecretPulls                 | Maximum concurrent synchronization per second of kms secrets                                                                                                                                                      | 10                      |
 | command.maxConcurrentOosSecretPulls                 | Maximum concurrent synchronization per second of oos secrets                                                                                                                                                      | 10                      |
+| command.cleanupSecretOnFailure | Remove cluster secret on failed KMS secret sync | false |
 | image.repository                                    | Specified ack-secret-manager mirror warehouse name                                                                                                                                                                | acs/ack-secret-manager  |
 | image.tag                                           | Specified ack-secret-manager image tag                                                                                                                                                                            | v0.5.0                  |
 | image.pullPolicy                                    | Image pull strategy, default is Always                                                                                                                                                                            | Always                  |
@@ -471,3 +472,4 @@ Please report vulnerabilities by email to **kubernetes-security@service.aliyun.c
 | `0.5.6` | 2025/3/3   | Supports cluster type of Acs                                 |
 | `0.5.7` | 2025/3/26  | Support sync specific key-value pairs extract from a YAML-formatted secret |
 | `0.5.8` | 2025/3/28  | 1.Support multi-architecture deployment<br />2.Support configuring Endpoint to obtain KMS secret |
+| `0.5.11` | 2025/6/17  | Provide an option to control deletion of the cluster Secret in case of KMS credential or OOS encryption parameter sync failure |
