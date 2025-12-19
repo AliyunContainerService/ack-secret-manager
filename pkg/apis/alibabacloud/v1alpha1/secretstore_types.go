@@ -17,6 +17,7 @@ limitations under the License.
 package v1alpha1
 
 import (
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
@@ -39,12 +40,12 @@ type SecretStoreSpec struct {
 type KMSProvider struct {
 	// +optional
 	KMS *KMSAuth `json:"KMSAuth,omitempty"`
-	// +optional
-	DedicatedKMS *DedicatedKMSAuth `json:"dedicatedKMSAuth,omitempty"`
 }
 
 type KMSAuth struct {
-	AccessKey                *SecretRef `json:"accessKey,omitempty"`
+	// +optional
+	AccessKey *SecretRef `json:"accessKey,omitempty"`
+	// +optional
 	AccessKeySecret          *SecretRef `json:"accessKeySecret,omitempty"`
 	RAMRoleARN               string     `json:"ramRoleARN,omitempty"`
 	RAMRoleSessionName       string     `json:"ramRoleSessionName,omitempty"`
@@ -53,6 +54,8 @@ type KMSAuth struct {
 	RoleSessionExpiration    string     `json:"roleSessionExpiration,omitempty"`
 	RemoteRAMRoleARN         string     `json:"remoteRamRoleARN,omitempty"`
 	RemoteRAMRoleSessionName string     `json:"remoteRamRoleSessionName,omitempty"`
+	// +optional
+	ServiceAccountRef *ServiceAccountRef `json:"serviceAccountRef,omitempty"`
 }
 
 type OOSProvider struct {
@@ -60,7 +63,9 @@ type OOSProvider struct {
 }
 
 type OOSAuth struct {
-	AccessKey                *SecretRef `json:"accessKey,omitempty"`
+	// +optional
+	AccessKey *SecretRef `json:"accessKey,omitempty"`
+	// +optional
 	AccessKeySecret          *SecretRef `json:"accessKeySecret,omitempty"`
 	RAMRoleARN               string     `json:"ramRoleARN,omitempty"`
 	RAMRoleSessionName       string     `json:"ramRoleSessionName,omitempty"`
@@ -69,28 +74,93 @@ type OOSAuth struct {
 	RoleSessionExpiration    string     `json:"roleSessionExpiration,omitempty"`
 	RemoteRAMRoleARN         string     `json:"remoteRamRoleARN,omitempty"`
 	RemoteRAMRoleSessionName string     `json:"remoteRamRoleSessionName,omitempty"`
+	// +optional
+	ServiceAccountRef *ServiceAccountRef `json:"serviceAccountRef,omitempty"`
 }
 
-type DedicatedKMSAuth struct {
-	Protocol string `json:"protocol"`
-	Endpoint string `json:"endpoint"`
-	CA       string `json:"ca,omitempty"`
-	// if ignoreSSL=true custom don't need fill the CA
-	IgnoreSSL        bool       `json:"ignoreSSL,omitempty"`
-	ClientKeyContent *SecretRef `json:"clientKeyContent"`
-	Password         *SecretRef `json:"password"`
-}
-
+// SecretRef references a Secret resource.
+// For SecretStore, this Secret must be in the same namespace as the SecretStore.
+// For ClusterSecretStore, the Namespace field specifies which namespace the Secret exists in.
 type SecretRef struct {
-	Name      string `json:"name"`
-	Namespace string `json:"namespace"`
+	Name string `json:"name"`
+	// +optional
+	// Namespace of the Secret.
+	// For SecretStore, this field is ignored and the namespace of the SecretStore is used.
+	// For ClusterSecretStore, this field is required to specify the namespace where the Secret exists.
+	Namespace string `json:"namespace,omitempty"`
 	Key       string `json:"key"`
 }
+
+// ServiceAccountRef references a ServiceAccount resource.
+// For SecretStore, it is in the same namespace as the SecretStore.
+// For ClusterSecretStore, Namespace is required to specify the namespace of the ServiceAccount.
+type ServiceAccountRef struct {
+	// Name of the ServiceAccount
+	Name string `json:"name"`
+	// +optional
+	// Namespace of the ServiceAccount.
+	// For SecretStore, this field is ignored and the namespace of the SecretStore is used.
+	// For ClusterSecretStore, this field is required to specify the namespace where the ServiceAccount exists.
+	Namespace string `json:"namespace,omitempty"`
+	// +optional
+	Audiences []string `json:"audiences,omitempty"`
+}
+
+// SecretStoreConditionType represents the condition of the SecretStore.
+type SecretStoreConditionType string
+
+// These are valid conditions of a secret store.
+const (
+	// SecretStoreReady indicates that the store is ready and able to serve requests.
+	SecretStoreReady SecretStoreConditionType = "Ready"
+
+	ReasonInvalidStore          = "InvalidStoreConfiguration"
+	ReasonInvalidProviderConfig = "InvalidProviderConfig"
+	ReasonValidationFailed      = "ValidationFailed"
+	ReasonValidationUnknown     = "ValidationUnknown"
+	ReasonStoreValid            = "Valid"
+	StoreUnmaintained           = "StoreUnmaintained"
+)
+
+// SecretStoreStatusCondition contains condition information for a SecretStore.
+type SecretStoreStatusCondition struct {
+	Type   SecretStoreConditionType `json:"type"`
+	Status corev1.ConditionStatus   `json:"status"`
+
+	// +optional
+	Reason string `json:"reason,omitempty"`
+
+	// +optional
+	Message string `json:"message,omitempty"`
+
+	// +optional
+	LastTransitionTime metav1.Time `json:"lastTransitionTime,omitempty"`
+
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+}
+
+// SecretStoreCapabilities defines the possible operations a SecretStore can do.
+type SecretStoreCapabilities string
+
+// These are the valid capabilities of a secret store.
+const (
+	// SecretStoreReadOnly indicates that the store can only read secrets.
+	SecretStoreReadOnly SecretStoreCapabilities = "ReadOnly"
+	// SecretStoreWriteOnly indicates that the store can only write secrets.
+	SecretStoreWriteOnly SecretStoreCapabilities = "WriteOnly"
+	// SecretStoreReadWrite indicates that the store can both read and write secrets.
+	SecretStoreReadWrite SecretStoreCapabilities = "ReadWrite"
+)
 
 // SecretStoreStatus defines the observed state of SecretStore
 type SecretStoreStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	// +optional
+	Conditions []SecretStoreStatusCondition `json:"conditions,omitempty"`
+	// +optional
+	Capabilities SecretStoreCapabilities `json:"capabilities,omitempty"`
 }
 
 //+kubebuilder:object:root=true

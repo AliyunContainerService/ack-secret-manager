@@ -3,19 +3,17 @@ package oos
 import (
 	"context"
 	"fmt"
-	"time"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	oos "github.com/alibabacloud-go/oos-20190601/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
-	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/auth"
 	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
+	commonp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
 )
 
 const (
@@ -30,6 +28,8 @@ func init() {
 type Provider struct {
 	*Manager
 	region             string
+	cluster            string
+	uid                string
 	name               string
 	maxConcurrentCount int
 }
@@ -38,6 +38,8 @@ func NewProvider(opts *backend.ProviderOptions) {
 	provider := &Provider{
 		Manager:            NewManager(opts.Region),
 		region:             opts.Region,
+		cluster:            opts.ClusterId,
+		uid:                opts.Uid,
 		name:               backend.ProviderOOSName,
 		maxConcurrentCount: opts.OosMaxConcurrent,
 	}
@@ -56,90 +58,39 @@ func (p *Provider) GetEndpoint() string {
 	return ""
 }
 
-func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
-	clientName := fmt.Sprintf("%s/%s", store.Namespace, store.Name)
-	region := p.GetRegion()
-	shareClient, err := NewOOSClient(ctx, store, kube, region, p)
-	if err != nil {
-		klog.Errorf("new share oos client error %v", err)
-		return nil, err
-	}
-	cl := &OOSClient{
-		oosClient:  shareClient,
-		clientName: clientName,
-	}
-	return cl, nil
+func (p *Provider) GetClusterId() string {
+	return p.cluster
 }
 
-func NewOOSClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, region string, p *Provider) (*oos.Client, error) {
-	if store.Spec.OOS == nil {
-		return nil, fmt.Errorf("oos config is empty")
+func (p *Provider) GetUid() string {
+	return p.uid
+}
+
+func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
+	var authProvider commonp.AuthConfigProvider
+	if store.Spec.OOS != nil && store.Spec.OOS.OOS != nil {
+		authProvider = &commonp.OOSAuthAdapter{OOSAuth: store.Spec.OOS.OOS}
 	}
 
-	var ak, sk string
-	oosConfig := store.Spec.OOS.OOS
-	auth := auth.AuthConfig{
-		ClientName:    fmt.Sprintf("%s/%s", store.Namespace, store.Name),
-		RefreshPeriod: time.Minute * 10,
-	}
-
-	if oosConfig != nil {
-		if oosConfig.AccessKey != nil {
-			accessKey, err := utils.GetConfigFromSecret(ctx, kube, oosConfig.AccessKey)
-			if err != nil {
-				klog.Errorf("get ak config from secret error %v", err)
-				ak = ""
-			} else {
-				ak = string(accessKey)
-			}
-			auth.AccessKey = ak
-		}
-		if oosConfig.AccessKeySecret != nil {
-			accessKeySecret, err := utils.GetConfigFromSecret(ctx, kube, oosConfig.AccessKeySecret)
-			if err != nil {
-				klog.Errorf("get sk config from secret error %v", err)
-				sk = ""
-			} else {
-				sk = string(accessKeySecret)
-			}
-			auth.AccessSecretKey = sk
-		}
-		auth.RoleArn = oosConfig.RAMRoleARN
-		auth.OidcArn = oosConfig.OIDCProviderARN
-		auth.RoleSessionName = oosConfig.RAMRoleSessionName
-		auth.RoleSessionExpiration = oosConfig.RoleSessionExpiration
-		auth.RemoteRoleSessionName = oosConfig.RemoteRAMRoleSessionName
-		auth.RemoteRoleArn = oosConfig.RemoteRAMRoleARN
-	}
-
-	//get ram auth credential
-	cred, err := auth.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock:     p.Manager.RamLock,
-		RamProvider: p.Manager.RamProvider,
-	})
+	authConfig, err := commonp.BuildAuthConfig(ctx, store, kube, authProvider, p.cluster, p.uid)
 	if err != nil {
 		return nil, err
 	}
-	if cred == nil {
-		return nil, fmt.Errorf("cred is empty")
-	}
-	endpoint := fmt.Sprintf(defaultOosDomain, region)
-	client, err := oos.NewClient(&openapi.Config{
-		Endpoint:   tea.String(endpoint),
-		RegionId:   tea.String(region),
-		Credential: cred,
-	})
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
+
+	return p.newClientWithAuth(authConfig.ClientName, authConfig)
 }
 
 func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
-	authEnvs := auth.GetCredentialParameterFromEnv()
+	authEnvs := commonp.BuildAuthConfigFromEnv()
+
+	return p.newClientWithAuth(backend.EnvClient, authEnvs)
+}
+
+func (p *Provider) newClientWithAuth(clientName string, authConfig auth.AuthConfig) (*OOSClient, error) {
 	region := p.GetRegion()
+
 	//get ram auth credential
-	cred, err := authEnvs.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
+	cred, err := authConfig.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
 		RamLock:     p.Manager.RamLock,
 		RamProvider: p.Manager.RamProvider,
 	})
@@ -149,18 +100,22 @@ func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
 	if cred == nil {
 		return nil, fmt.Errorf("cred is empty")
 	}
+
 	endpoint := fmt.Sprintf(defaultOosDomain, region)
+
 	client, err := oos.NewClient(&openapi.Config{
 		Endpoint:   tea.String(endpoint),
 		RegionId:   tea.String(region),
 		Credential: cred,
 	})
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to create OOS client: %v", err)
 	}
+
 	cl := &OOSClient{
 		oosClient:  client,
-		clientName: backend.EnvClient,
+		clientName: clientName,
 	}
+
 	return cl, nil
 }
