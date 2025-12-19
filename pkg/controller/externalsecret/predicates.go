@@ -19,31 +19,30 @@ import (
 	"reflect"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+
 	"sigs.k8s.io/controller-runtime/pkg/event"
 )
 
-type ExternalSecretsPredicate[object any] struct{}
+type ExternalSecretsPredicate struct{}
 
-func (p ExternalSecretsPredicate[object]) Create(e event.TypedCreateEvent[object]) bool {
+func (p ExternalSecretsPredicate) Create(e event.CreateEvent) bool {
 	return true
 }
 
-func (p ExternalSecretsPredicate[object]) Delete(e event.TypedDeleteEvent[object]) bool {
+func (p ExternalSecretsPredicate) Delete(e event.DeleteEvent) bool {
 	return true
 }
 
-func (p ExternalSecretsPredicate[object]) Update(e event.TypedUpdateEvent[object]) bool {
-	var oldObjInterface interface{} = e.ObjectOld
-	var newObjInterface interface{} = e.ObjectNew
-	oldObj, ok := oldObjInterface.(*api.ExternalSecret)
+func (p ExternalSecretsPredicate) Update(e event.UpdateEvent) bool {
+	oldObj, ok := e.ObjectOld.(*api.ExternalSecret)
 	if !ok {
 		return false
 	}
-	newObj, ok := newObjInterface.(*api.ExternalSecret)
+	newObj, ok := e.ObjectNew.(*api.ExternalSecret)
 	if !ok {
 		return false
 	}
-	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) || !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) ||
 		oldObj.GetDeletionTimestamp() != newObj.GetDeletionTimestamp() ||
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true
@@ -51,6 +50,6 @@ func (p ExternalSecretsPredicate[object]) Update(e event.TypedUpdateEvent[object
 	return false
 }
 
-func (p ExternalSecretsPredicate[object]) Generic(e event.TypedGenericEvent[object]) bool {
+func (p ExternalSecretsPredicate) Generic(e event.GenericEvent) bool {
 	return true
 }

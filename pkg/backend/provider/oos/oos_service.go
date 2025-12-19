@@ -1,18 +1,17 @@
 package oos
 
 import (
-	"context"
-	"encoding/json"
 	"fmt"
 	"time"
 
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	oos "github.com/alibabacloud-go/oos-20190601/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
-	"gopkg.in/yaml.v3"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 // Client interface represent a backend client interface that should be implemented
@@ -25,90 +24,7 @@ func (c *OOSClient) GetName() string {
 	return c.clientName
 }
 
-func (c *OOSClient) getExternalData(ctx context.Context, data v1alpha1.DataSource) ([]byte, error) {
-	// oos
-	oosData, err := c.getExternalDataFromOOS(data)
-	if err != nil {
-		klog.Errorf("get external data from oos error %v,key %v", err, data.Key)
-		return nil, err
-	}
-
-	return oosData, nil
-}
-
-func (c *OOSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
-	secretDatas := make(map[string][]byte)
-	//getExternalData
-	externalData, err := c.getExternalData(ctx, *data)
-	if err != nil {
-		klog.Errorf("get external data error %v,key %v", err, data.Key)
-		return nil, err
-	}
-	// jmes
-	if len(data.JMESPath) > 0 {
-		klog.Infof("parse jmes format, key %v", data.Key)
-		jsonDataMap, err := utils.GetJsonSecrets(data.JMESPath, string(externalData), data.Key)
-		if err != nil {
-			klog.Errorf("parse jmes format error %v, key %v, jmes %v, data.JMESPath", err, data.Key, data.JMESPath)
-		} else if len(jsonDataMap) > 0 {
-			//use parsed k-value in target secret
-			for k, v := range jsonDataMap {
-				secretDatas[k] = []byte(v)
-			}
-			return secretDatas, nil
-		}
-	}
-	secretDatas[data.Name] = externalData
-	return secretDatas, nil
-}
-
-func (c *OOSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
-	secretDatas := make(map[string][]byte)
-	if data.Extract == nil {
-		return nil, fmt.Errorf("extract data is empty")
-	}
-	externalData, err := c.getExternalData(ctx, *data.Extract)
-	if err != nil {
-		return nil, err
-	}
-
-	tempKV := make(map[string]interface{})
-	marshalToYaml := true
-	// Attempt to parse the external data as YAML. If parsing fails, try parsing it as JSON.
-	// If both parsing attempts fail, log an error and return the error.
-	if err := yaml.Unmarshal(externalData, &tempKV); err != nil {
-		marshalToYaml = false
-		if err := json.Unmarshal(externalData, &tempKV); err != nil {
-			klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
-			return nil, err
-		}
-	}
-
-	kv := make(map[string]string)
-	for k, v := range tempKV {
-		if marshalToYaml {
-			kv[k] = utils.YamlStr(v)
-		} else {
-			kv[k] = utils.JsonStr(v)
-		}
-	}
-
-	if len(data.ReplaceKey) != 0 {
-		for _, rule := range data.ReplaceKey {
-			kv, err = utils.RewriteRegexp(rule, kv)
-			if err != nil {
-				klog.Errorf("replace data key failed, error %v", err)
-				continue
-			}
-		}
-	}
-	for k, v := range kv {
-		secretDatas[k] = []byte(v)
-	}
-	return secretDatas, nil
-}
-
-func (c *OOSClient) getExternalDataFromOOS(data v1alpha1.DataSource) ([]byte, error) {
+func (c *OOSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 	if c.oosClient == nil {
 		return nil, fmt.Errorf("oos client is nil,oos key %v", data.Key)
 	}
@@ -133,4 +49,45 @@ func (c *OOSClient) getExternalDataFromOOS(data v1alpha1.DataSource) ([]byte, er
 
 	klog.Infof("got secret data from oos service,key %v", data.Key)
 	return []byte(*resp.Body.Parameter.Value), nil
+}
+
+func (c *OOSClient) GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
+	// getExternalData
+	externalData, err := c.getExternalData(*data)
+	if err != nil {
+		klog.Errorf("get external data error %v,key %v", err, data.Key)
+		return nil, err
+	}
+
+	// Process data with common function
+	return common.ProcessExternalSecretData(data, externalData)
+}
+
+func (c *OOSClient) GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
+	if data.Extract == nil {
+		return nil, fmt.Errorf("extract data is empty")
+	}
+
+	// getExternalData
+	externalData, err := c.getExternalData(*data.Extract)
+	if err != nil {
+		return nil, err
+	}
+
+	// Process extracted data with common function
+	return common.ProcessExtractedExternalSecretData(data, externalData)
+}
+
+func (c *OOSClient) SetEndpoint(endpoint string) {
+	if c.oosClient == nil {
+		klog.Errorf("oos client is nil, cannot set endpoint %v", endpoint)
+		return
+	}
+
+	if endpoint == "" {
+		klog.Errorf("endpoint is empty, cannot set endpoint")
+		return
+	}
+
+	c.oosClient.Endpoint = tea.String(endpoint)
 }

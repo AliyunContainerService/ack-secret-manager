@@ -3,6 +3,7 @@ package externalsecret
 import (
 	"context"
 	"fmt"
+
 	"golang.org/x/time/rate"
 )
 

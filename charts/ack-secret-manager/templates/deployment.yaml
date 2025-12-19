@@ -28,20 +28,57 @@ spec:
       {{- end }}
     spec:
       serviceAccountName: {{ template "ack-secret-manager.serviceAccountName" . }}
+{{- if .Values.rrsa.enable }}
+      volumes:
+        - name: {{ template "ack-secret-manager.serviceAccountName" . }}
+          projected:
+            sources:
+            - serviceAccountToken:
+                path: ack-secret-manager
+                expirationSeconds: 7200
+                audience: "sts.aliyuncs.com"
+{{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
       containers:
         - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+{{- if .Values.rrsa.enable }}
+          volumeMounts:
+            - name: {{ template "ack-secret-manager.serviceAccountName" . }}
+              mountPath: /var/run/secrets/tokens
+{{- end }}
           command:
             - ack-secret-manager
-            - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
+          args:
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --reconcile-count={{ .Values.command.reconcileCount }}
-            - --polling-interval={{ .Values.command.pollingInterval }}
-            - --disable-polling={{ .Values.command.disablePolling }}
+            - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
+{{- if .Values.command.region }}
             - --region={{ .Values.command.region }}
+{{- end }}
+{{- if .Values.command.kmsEndpoint }}
             - --kms-endpoint={{ .Values.command.kmsEndpoint }}
+{{- end }}
+            - --disable-polling={{ .Values.command.disablePolling }}
+            - --polling-interval={{ .Values.command.pollingInterval }}
             - --max-concurrent-kms-secret-pulls={{ .Values.command.maxConcurrentKmsSecretPulls }}
             - --max-concurrent-oos-secret-pulls={{ .Values.command.maxConcurrentOosSecretPulls }}
             - --enable-worker-role={{ .Values.command.enableWorkerRole }}
+            - --cleanup-secret-on-failure={{ .Values.command.cleanupSecretOnFailure }}
+            - --process-cluster-secret-store={{ .Values.command.processClusterSecretStore }}
+            - --process-cluster-external-secret={{ .Values.command.processClusterExternalSecret }}
+            - --enable-cross-namespace-secret-store={{ .Values.command.enableCrossNamespaceSecretStore }}
+            - --enable-cross-namespace-auth-ref={{ .Values.command.enableCrossNamespaceAuthRef }}
+            - --cluster-id={{ .Values.command.clusterId }}
+            - --uid={{ .Values.command.aliuid }}
+{{- if .Values.command.watchNamespaces }}
+            - --watch-namespaces={{ .Values.command.watchNamespaces }}
+{{- end }}
+{{- if .Values.command.excludeNamespaces }}
+            - --exclude-namespaces={{ .Values.command.excludeNamespaces }}
+{{- end }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           resources:
@@ -53,29 +90,20 @@ spec:
                   fieldPath: metadata.name
             - name: WATCH_NAMESPACE
               value: {{ .Values.env.WATCH_NAMESPACE }}
-          {{- range $name, $value := .Values.env }}
-          {{- if not (empty $value) }}
+{{- range $name, $value := .Values.env }}
+{{- if not (empty $value) }}
             - name: {{ $name | quote }}
               value: {{ $value | quote }}
-          {{- end }}
-          {{- end }}
+{{- end }}
+{{- end }}
             # Params for env vars populated from k8s secrets
-          {{- range $key, $value := .Values.envVarsFromSecret }}
+{{- range $key, $value := .Values.envVarsFromSecret }}
             - name: {{ $key }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $value.secretKeyRef | quote }}
                   key: {{ $value.key | quote }}
-          {{- end }}
-          {{- if .Values.rrsa.enable }}
-          volumeMounts:
-          - mountPath: /var/run/secrets/tokens
-            name: {{ template "ack-secret-manager.serviceAccountName" . }}
-          {{- end }}
-      {{- with .Values.securityContext }}
-      securityContext:
-        {{- toYaml . | nindent 8 }}
-      {{- end }}
+{{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}
@@ -87,14 +115,4 @@ spec:
       {{- with .Values.tolerations }}
       tolerations:
         {{- toYaml . | nindent 8 }}
-      {{- end }}
-      volumes:
-      {{- if .Values.rrsa.enable }}
-      - name: {{ template "ack-secret-manager.serviceAccountName" . }}
-        projected:
-          sources:
-          - serviceAccountToken:
-              path: ack-secret-manager
-              expirationSeconds: 7200
-              audience: "sts.aliyuncs.com"
       {{- end }}

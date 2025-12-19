@@ -28,6 +28,8 @@ type ExternalSecretSpec struct {
 	Data        []DataSource  `json:"data,omitempty"`
 	DataProcess []DataProcess `json:"dataProcess,omitempty"`
 	Type        string        `json:"type,omitempty"`
+	// The time in which the controller should reconcile its objects and recheck namespaces for labels.
+	RotationInterval *metav1.Duration `json:"rotationInterval,omitempty"`
 }
 
 type DataSource struct {
@@ -37,11 +39,19 @@ type DataSource struct {
 	VersionStage   string          `json:"versionStage,omitempty"`
 	VersionId      string          `json:"versionId,omitempty"`
 	//Optional array to specify what json key value pairs to extract from a secret and mount as individual secrets
-	JMESPath []JMESPathObject `json:"jmesPath,omitempty"`
+	JMESPath    []JMESPathObject `json:"jmesPath,omitempty"`
+	KmsEndpoint string           `json:"kmsEndpoint,omitempty"`
 }
 
 type SecretStoreRef struct {
-	Name      string `json:"name"`
+	Name string `json:"name"`
+	// Kind of the SecretStore resource (SecretStore or ClusterSecretStore)
+	// Defaults to `SecretStore`
+	// +optional
+	// +kubebuilder:validation:Enum=SecretStore;ClusterSecretStore
+	Kind string `json:"kind,omitempty"`
+	// Deprecated : Namespace field is deprecated, use SecretStore in the same namespace as ExternalSecret, or use ClusterSecretStore
+	// +optional
 	Namespace string `json:"namespace"`
 }
 
@@ -56,10 +66,18 @@ type ReplaceRule struct {
 	Source string `json:"source"`
 }
 
+type DataSyncResult struct {
+	ExternalSecretKey   string      `json:"ExternalSecretKey,omitempty"`
+	Status              string      `json:"status,omitempty"`
+	Reason              string      `json:"reason,omitempty"`
+	SynchronizationTime metav1.Time `json:"synchronizationTime,omitempty"`
+}
+
 // ExternalSecretStatus defines the observed state of ExternalSecret
 type ExternalSecretStatus struct {
 	// INSERT ADDITIONAL STATUS FIELD - define observed state of cluster
 	// Important: Run "make" to regenerate code after modifying this file
+	DataSyncResults []DataSyncResult `json:"dataSyncResults,omitempty"`
 }
 
 // +k8s:deepcopy-gen:interfaces=k8s.io/apimachinery/pkg/runtime.Object

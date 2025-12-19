@@ -35,8 +35,10 @@ import (
 
 	apis "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
 	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/kms"
 	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/clusterexternalsecret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/externalsecret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
 	"github.com/AliyunContainerService/ack-secret-manager/version"
@@ -68,12 +70,19 @@ func main() {
 	var watchNamespaces string
 	var excludeNamespaces string
 	var region string
+	var clusterId string
+	var uid string
 	var tokenRotationPeriod time.Duration
 	var maxConcurrentSecretPulls int
 	var maxConcurrentKmsSecretPulls int
 	var maxConcurrentOosSecretPulls int
 	var enableWorkerRole bool
 	var kmsEndpoint string
+	var cleanUpSecretOnFailure bool
+	var processClusterSecretStore bool
+	var processClusterExternalSecret bool
+	var enableCrossNamespaceSecretStore bool
+	var enableCrossNamespaceAuthRef bool
 
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
@@ -81,7 +90,9 @@ func main() {
 	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
-	flag.StringVar(&region, "region", "cn-hangzhou", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
+	flag.StringVar(&clusterId, "cluster-id", "", "Cluster ID for deployment")
+	flag.StringVar(&uid, "uid", "", "RAM User ID for the deployment cluster")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
 	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
@@ -89,10 +100,18 @@ func main() {
 	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
 	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
 	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
+	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "clean up the corresponding secret in the Kubernetes cluster when the secret sync operation fails.")
+	flag.BoolVar(&processClusterSecretStore, "process-cluster-secret-store", true, "Enable processing of ClusterSecretStore resources")
+	flag.BoolVar(&processClusterExternalSecret, "process-cluster-external-secret", true, "Enable processing of ClusterExternalSecret resources")
+	flag.BoolVar(&enableCrossNamespaceSecretStore, "enable-cross-namespace-secret-store", true, "Enable cross namespace SecretStore reference in ExternalSecret. Set to false to disable.")
+	flag.BoolVar(&enableCrossNamespaceAuthRef, "enable-cross-namespace-auth-ref", true, "Enable cross namespace AuthRef reference in SecretStore. Set to false to disable.")
 
 	flag.Parse()
 
 	backend.EnableWorkerRole = enableWorkerRole
+
+	// Set the cross namespace auth ref flag for backend providers
+	common.EnableCrossNamespaceAuthRef = enableCrossNamespaceAuthRef
 
 	finalMaxConcurrentSecretPulls := maxConcurrentKmsSecretPulls
 
@@ -129,6 +148,8 @@ func main() {
 		KmsEndpoint:      kmsEndpoint,
 		KmsMaxConcurrent: maxConcurrentKmsSecretPulls,
 		OosMaxConcurrent: maxConcurrentOosSecretPulls,
+		ClusterId:        clusterId,
+		Uid:              uid,
 	}
 	for providerName, f := range backend.SupportProvider {
 		log.Info("new provider ", providerName)
@@ -143,6 +164,7 @@ func main() {
 	if disablePolling {
 		syncPeriod = 365 * 24 * time.Hour
 	}
+
 	// Create a new Cmd to provide shared dependencies and start components
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
@@ -179,16 +201,20 @@ func main() {
 			watchNs[ns] = false
 		}
 	}
+
 	esReconciler := externalsecret.ExternalSecretReconciler{
-		Client:               mgr.GetClient(),
-		APIReader:            mgr.GetAPIReader(),
-		Log:                  ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
-		Ctx:                  ctx,
-		DisablePolling:       disablePolling,
-		ReconciliationPeriod: reconcilePeriod,
-		WatchNamespaces:      watchNs,
-		RotationInterval:     rotationInterval,
+		Client:                 mgr.GetClient(),
+		APIReader:              mgr.GetAPIReader(),
+		Log:                    ctrl.Log.WithName("controllers").WithName("ExternalSecret"),
+		Ctx:                    ctx,
+		DisablePolling:         disablePolling,
+		CleanUpSecretOnFailure: cleanUpSecretOnFailure,
+		ReconciliationPeriod:   reconcilePeriod,
+		WatchNamespaces:        watchNs,
+		RotationInterval:       rotationInterval,
+		EnableCrossNamespace:   enableCrossNamespaceSecretStore,
 	}
+
 	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
 	esReconciler.OosLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentOosSecretPulls), 1)
 	err = (&esReconciler).SetupWithManager(mgr, reconcileCount)
@@ -196,7 +222,12 @@ func main() {
 		log.Error(err, "unable to create controller", "controller", "ExternalSecret")
 		os.Exit(1)
 	}
+
 	scReconciler := secretstore.SecretStoreReconciler{
+		CommonReconciler: &secretstore.CommonReconciler{
+			Client:                      mgr.GetClient(),
+			EnableCrossNamespaceAuthRef: enableCrossNamespaceAuthRef,
+		},
 		Client:               mgr.GetClient(),
 		Scheme:               mgr.GetScheme(),
 		Log:                  ctrl.Log.WithName("controllers").WithName("SecretStore"),
@@ -206,6 +237,49 @@ func main() {
 	if err = (&scReconciler).SetupWithManager(mgr, reconcileCount); err != nil {
 		log.Error(err, "unable to create controller", "controller", "SecretStore")
 		os.Exit(1)
+	}
+
+	// Setup ClusterSecretStore controller if enabled
+	if processClusterSecretStore {
+		cssReconciler := secretstore.ClusterSecretStoreReconciler{
+			CommonReconciler: &secretstore.CommonReconciler{
+				Client:                      mgr.GetClient(),
+				EnableCrossNamespaceAuthRef: enableCrossNamespaceAuthRef,
+			},
+			Client:               mgr.GetClient(),
+			Scheme:               mgr.GetScheme(),
+			Log:                  ctrl.Log.WithName("controllers").WithName("ClusterSecretStore"),
+			Ctx:                  ctx,
+			ReconciliationPeriod: reconcilePeriod,
+		}
+		if err = (&cssReconciler).SetupWithManager(mgr, reconcileCount); err != nil {
+			log.Error(err, "unable to create controller", "controller", "ClusterSecretStore")
+			os.Exit(1)
+		}
+		log.Info("ClusterSecretStore controller started")
+	} else {
+		log.Info("ClusterSecretStore controller disabled")
+	}
+
+	// Setup ClusterExternalSecret controller if enabled
+	if processClusterExternalSecret {
+		cesReconciler := clusterexternalsecret.ClusterExternalSecretReconciler{
+			Client:               mgr.GetClient(),
+			Scheme:               mgr.GetScheme(),
+			Log:                  ctrl.Log.WithName("controllers").WithName("ClusterExternalSecret"),
+			Ctx:                  ctx,
+			ReconciliationPeriod: reconcilePeriod,
+			RotationInterval:     rotationInterval,
+			DisablePolling:       disablePolling,
+			EnableCrossNamespace: enableCrossNamespaceSecretStore,
+		}
+		if err = (&cesReconciler).SetupWithManager(mgr, reconcileCount); err != nil {
+			log.Error(err, "unable to create controller", "controller", "ClusterExternalSecret")
+			os.Exit(1)
+		}
+		log.Info("ClusterExternalSecret controller started")
+	} else {
+		log.Info("ClusterExternalSecret controller disabled")
 	}
 
 	log.Info("starting ack-secret-manager")

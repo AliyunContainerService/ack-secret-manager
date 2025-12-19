@@ -25,30 +25,38 @@ import (
 	"regexp"
 	"time"
 
+	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
+	"github.com/jmespath/go-jmespath"
 	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
-	"github.com/jmespath/go-jmespath"
-	"k8s.io/klog"
 )
 
 const (
-	BinaryType   = "binary"
-	METADATA_URL = "http://100.100.100.200/latest/meta-data/"
-	REGIONID_TAG = "region-id"
-	RAM          = "ram/"
+	BinaryType               = "binary"
+	METADATA_URL             = "http://100.100.100.200/latest/meta-data/"
+	REGIONID_TAG             = "region-id"
+	RAM                      = "ram/"
+	oidcProviderNameTemplate = "ack-rrsa-%s"
 )
 
 const (
 	REJECTED_THROTTLING           = "Rejected.Throttling"
 	SERVICE_UNAVAILABLE_TEMPORARY = "ServiceUnavailableTemporary"
 	INTERNAL_FAILURE              = "InternalFailure"
+)
+
+var (
+	// reRoleArn         = regexp.MustCompile(`^acs:ram:[^:]*:\d+:role/[^/]+$`)
+	reOidcProviderArn = regexp.MustCompile(`^acs:ram:[^:]*:\d+:oidc-provider/[^/]+$`)
 )
 
 var (
@@ -220,7 +228,7 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 	for _, jmesPathEntry := range jmesObj {
 		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
 		if err != nil {
-			klog.Errorf("Invalid JMES Path: %s.", jmesPathEntry.Path)
+			klog.Errorf("Invalid JMES Path: %s, err = %s", jmesPathEntry.Path, err.Error())
 			continue
 		}
 
@@ -294,4 +302,113 @@ func GetWaitTimeExponential(retryTimes int) time.Duration {
 	} else {
 		return sleepInterval
 	}
+}
+
+// IsNamespaceAllowedForClusterSecretStore checks if the given namespace is allowed to access the ClusterSecretStore
+func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.ClusterSecretStore, namespaceName string, getClient func(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error) bool {
+	// If no conditions are specified, allow access from all namespaces
+	if len(clusterSecretStore.Spec.Conditions) == 0 {
+		klog.Infof("ClusterSecretStore %s has no conditions, allowing access from namespace %s", clusterSecretStore.Name, namespaceName)
+		return true
+	}
+
+	// Get namespace object
+	namespace := &corev1.Namespace{}
+	err := getClient(context.Background(), client.ObjectKey{Name: namespaceName}, namespace)
+	if err != nil {
+		klog.Errorf("Failed to get namespace %s for ClusterSecretStore %s access check: %v", namespaceName, clusterSecretStore.Name, err)
+		return false
+	}
+
+	klog.Infof("Checking access to ClusterSecretStore %s from namespace %s with labels: %v",
+		clusterSecretStore.Name, namespaceName, namespace.Labels)
+
+	// Check each condition
+	for i, condition := range clusterSecretStore.Spec.Conditions {
+		klog.Infof("Evaluating condition %d for ClusterSecretStore %s", i, clusterSecretStore.Name)
+
+		// Check namespace selector
+		if condition.NamespaceSelector != nil {
+			selector, err := metav1.LabelSelectorAsSelector(condition.NamespaceSelector)
+			if err != nil {
+				klog.Errorf("Invalid label selector in ClusterSecretStore %s condition %d: %v", clusterSecretStore.Name, i, err)
+				continue
+			}
+
+			if selector.Matches(labels.Set(namespace.Labels)) {
+				klog.Infof("Namespace %s matches namespace selector in condition %d of ClusterSecretStore %s",
+					namespaceName, i, clusterSecretStore.Name)
+				return true
+			} else {
+				klog.Infof("Namespace %s does not match namespace selector in condition %d of ClusterSecretStore %s",
+					namespaceName, i, clusterSecretStore.Name)
+			}
+		}
+
+		// Check namespace name list
+		for _, allowedNamespace := range condition.Namespaces {
+			if allowedNamespace == namespaceName {
+				klog.Infof("Namespace %s found in namespaces list in condition %d of ClusterSecretStore %s",
+					namespaceName, i, clusterSecretStore.Name)
+				return true
+			} else {
+				klog.Infof("Namespace %s does not match namespaces in condition %d of ClusterSecretStore %s",
+					namespaceName, i, clusterSecretStore.Name)
+			}
+		}
+
+		// Check namespace regex
+		for j, regex := range condition.NamespaceRegexes {
+			matched, err := regexp.MatchString(regex, namespaceName)
+			if err != nil {
+				klog.Errorf("Invalid regex %s in ClusterSecretStore %s condition %d regex %d: %v",
+					regex, clusterSecretStore.Name, i, j, err)
+				continue
+			}
+
+			if matched {
+				klog.Infof("Namespace %s matches regex %s in condition %d of ClusterSecretStore %s",
+					namespaceName, regex, i, clusterSecretStore.Name)
+				return true
+			} else {
+				klog.Infof("Namespace %s does not match regex %s in condition %d of ClusterSecretStore %s",
+					namespaceName, regex, i, clusterSecretStore.Name)
+			}
+		}
+	}
+
+	// No matching condition
+	klog.Infof("Namespace %s is not allowed to access ClusterSecretStore %s", namespaceName, clusterSecretStore.Name)
+	return false
+}
+
+// NamespaceMatchesSelectors checks if a namespace matches any of the given label selectors
+func NamespaceMatchesSelectors(namespace corev1.Namespace, selectors []*metav1.LabelSelector) bool {
+	// If no selectors are specified, match all namespaces
+	if len(selectors) == 0 {
+		return true
+	}
+
+	for _, selector := range selectors {
+		labelSelector, err := metav1.LabelSelectorAsSelector(selector)
+		if err != nil {
+			klog.Errorf("Invalid label selector: %v", err)
+			continue
+		}
+
+		// Check if namespace matches selector
+		if labelSelector.Matches(labels.Set(namespace.Labels)) {
+			return true
+		}
+	}
+	return false
+}
+
+func GenerateDefaultOidcProviderArn(clusterId string, uid int64) string {
+	name := fmt.Sprintf(oidcProviderNameTemplate, clusterId)
+	return fmt.Sprintf("acs:ram::%d:oidc-provider/%s", uid, name)
+}
+
+func IsValidOidcProviderArn(arn string) bool {
+	return reOidcProviderArn.Match([]byte(arn))
 }
