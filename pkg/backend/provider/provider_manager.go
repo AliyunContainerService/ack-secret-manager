@@ -5,16 +5,15 @@ import (
 	"sync"
 	"time"
 
-	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
 	"k8s.io/klog/v2"
+
+	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
 )
 
 type Manager struct {
 	Region string
 	// kms multi-account client pool
 	KmsClientMap sync.Map
-	// dkms multi-instance client pool
-	DedicateKmsClientMap sync.Map
 	// oos multi-account client pool
 	OosClientMap sync.Map
 	// ram lock

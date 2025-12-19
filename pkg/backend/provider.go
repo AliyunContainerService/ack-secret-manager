@@ -23,6 +23,8 @@ type CreateProvider func(opt *ProviderOptions)
 
 type ProviderOptions struct {
 	Region           string
+	ClusterId        string
+	Uid              string
 	KmsEndpoint      string
 	KmsMaxConcurrent int
 	OosMaxConcurrent int
@@ -88,13 +90,16 @@ type Provider interface {
 	GetName() string
 	GetRegion() string
 	GetEndpoint() string
+	GetClusterId() string
+	GetUid() string
 }
 
 type SecretClient interface {
 	GetName() string
 	// GetSecret gets secret via externalSecret
-	GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
-	GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
+	GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
+	GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
+	SetEndpoint(endpoint string)
 }
 
 type ClientManager interface {

@@ -62,7 +62,7 @@ deploy: manifests
 
 # Generate manifests e.g. CRD, RBAC etc.
 manifests: controller-gen
-	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths="./..." output:crd:artifacts:config=deploy/crds
+	$(CONTROLLER_GEN) crd rbac:roleName=manager-role webhook paths="./pkg/apis/alibabacloud/v1alpha1/" output:crd:artifacts:config=deploy/crds
 
 # Run go fmt against code
 fmt:
@@ -74,7 +74,7 @@ vet:
 
 # Generate code
 generate: controller-gen
-	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths=./api/...
+	$(CONTROLLER_GEN) object:headerFile=./hack/boilerplate.go.txt paths=./pkg/apis/alibabacloud/v1alpha1
 
 # Build the docker image
 docker-build: test

@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"sync"
 
+	"k8s.io/klog"
+
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
 	backendin "github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
-	"k8s.io/klog"
 )
 
 type Manager backendp.Manager

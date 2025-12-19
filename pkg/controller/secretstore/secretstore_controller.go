@@ -19,82 +19,142 @@ package secretstore
 import (
 	"context"
 	"fmt"
-	"sigs.k8s.io/controller-runtime/pkg/handler"
-	"sigs.k8s.io/controller-runtime/pkg/source"
 	"time"
 
 	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/runtime"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	v1alpha1 "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
-)
-
-const (
-	secretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
 )
 
 // SecretStoreReconciler reconciles a SecretStore object
 type SecretStoreReconciler struct {
-	client.Client
+	*CommonReconciler
+	Client               client.Client
 	Scheme               *runtime.Scheme
 	Log                  logr.Logger
 	Ctx                  context.Context
 	ReconciliationPeriod time.Duration
 }
 
-//+kubebuilder:rbac:groups=alibabacloud.com.my.domain,resources=secretstores,verbs=get;list;watch;create;update;patch;delete
-//+kubebuilder:rbac:groups=alibabacloud.com.my.domain,resources=secretstores/status,verbs=get;update;patch
-//+kubebuilder:rbac:groups=alibabacloud.com.my.domain,resources=secretstores/finalizers,verbs=update
+//+kubebuilder:rbac:groups=alibabacloud.com,resources=secretstores,verbs=get;list;watch;create;update;patch;delete
+//+kubebuilder:rbac:groups=alibabacloud.com,resources=secretstores/status,verbs=get;update;patch
+//+kubebuilder:rbac:groups=alibabacloud.com,resources=secretstores/finalizers,verbs=update
 
 // Reconcile is part of the main kubernetes reconciliation loop which aims to
 // move the current state of the cluster closer to the desired state.
-// TODO(user): Modify the Reconcile function to compare the state specified by
-// the SecretStore object against the actual cluster state, and then
-// perform operations to make the cluster state reflect the state specified by
-// the user.
-//
-// For more details, check Reconcile and its Result here:
-// - https://pkg.go.dev/sigs.k8s.io/controller-runtime@v0.14.1/pkg/reconcile
 func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("SecretStore", req.NamespacedName)
 	secretStore := &v1alpha1.SecretStore{}
-	//
+
 	err := r.Get(r.Ctx, req.NamespacedName, secretStore)
 	if err != nil {
 		log.Error(err, fmt.Sprintf("could not get SecretStore '%s'", req.NamespacedName))
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
-	r.Log.Info("secret store info", req.NamespacedName)
+	log.Info("secret store info", "name", req.NamespacedName.String())
 
-	// SecretStoreSpec kubebuilder:validation:MaxProperties=1
-	if secretStore.Spec.KMS != nil {
-		return r.ReconcileKMS(ctx, log, secretStore)
+	clientName := fmt.Sprintf("namespace/%s/%s", secretStore.Namespace, secretStore.Name)
+	kmsProvider := backend.GetProviderByName(backend.ProviderKMSName)
+	oosProvider := backend.GetProviderByName(backend.ProviderOOSName)
+
+	// Wrap the SecretStore to implement StoreInterface
+	storeWrapper := &SecretStoreWrapper{secretStore}
+
+	// Handle deletion
+	if secretStore.GetDeletionTimestamp() != nil {
+		return r.handleDeletion(log, secretStore.GetFinalizers(), secretStore, clientName, kmsProvider, oosProvider, func(obj client.Object) error {
+			return r.Update(context.TODO(), obj)
+		})
 	}
-	if secretStore.Spec.OOS != nil {
-		return r.ReconcileOOS(ctx, log, secretStore)
+
+	// Add finalizer if not present
+	if !utils.Contains(secretStore.GetFinalizers(), secretFinalizer) {
+		if err := r.addFinalizer(log, secretStore); err != nil {
+			log.Error(err, "failed to add finalizer")
+			return ctrl.Result{}, err
+		}
+		// Re-fetch the secretStore after updating finalizers
+		if err := r.Get(r.Ctx, req.NamespacedName, secretStore); err != nil {
+			log.Error(err, "failed to re-fetch SecretStore after adding finalizer")
+			return ctrl.Result{}, err
+		}
 	}
+
+	// Validate the SecretStore spec
+	validationErr := r.validateSecretStoreSpec(storeWrapper)
+	if validationErr != nil {
+		log.Error(validationErr, "SecretStore validation failed")
+		err := r.updateStatusWithError(log, secretStore, ReasonStoreInvalid, validationErr.Error())
+		if err != nil {
+			log.Error(err, "failed to update SecretStore status")
+			return ctrl.Result{}, err
+		}
+		return ctrl.Result{}, validationErr
+	}
+
+	// Check if we need to recreate the client
+	needRecreateClient := r.needRecreateClient(clientName, secretStore.Generation, secretStore.Status.Conditions, kmsProvider, oosProvider)
+
+	// Recreate client if needed
+	if needRecreateClient {
+		err := r.recreateClient(ctx, log, clientName, kmsProvider, oosProvider, storeWrapper)
+		if err != nil {
+			updateErr := r.updateStatusWithError(log, secretStore, "ClientCreationFailed", err.Error())
+			if updateErr != nil {
+				log.Error(updateErr, "failed to update SecretStore status with error")
+			}
+			return ctrl.Result{}, err
+		}
+		// Update status to indicate readiness
+		if statusErr := r.updateStatusWithReadyAndGeneration(log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
+			log.Error(statusErr, "failed to update SecretStore status")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Ensure status is initialized even if no changes are detected
+	// If no conditions exist, initialize the status
+	if len(secretStore.Status.Conditions) == 0 {
+		if statusErr := r.updateStatusWithReadyAndGeneration(log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
+			log.Error(statusErr, "failed to initialize SecretStore status")
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, nil
+	}
+
+	// Check if we need to update status
+	statusUpdated, err := r.updateStatus(log, secretStore)
+	if err != nil {
+		log.Error(err, "failed to update SecretStore status")
+		return ctrl.Result{}, err
+	}
+
+	if statusUpdated {
+		return ctrl.Result{Requeue: true}, nil
+	}
+
 	return ctrl.Result{}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
 func (r *SecretStoreReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCount int) error {
-	options := controller.Options{
-		MaxConcurrentReconciles: reconcileCount,
-		Reconciler:              r,
-	}
-	secretStoreController, err := controller.New("secretStore-controller", mgr, options)
-	if err != nil {
-		return err
-	}
-	err = secretStoreController.Watch(source.Kind(mgr.GetCache(), &v1alpha1.SecretStore{}, &handler.TypedEnqueueRequestForObject[*v1alpha1.SecretStore]{}, SecretStorePredicate[*v1alpha1.SecretStore]{}))
-	if err != nil {
-		return err
-	}
-	return nil
+	// Store the rest.Config for later use in creating kubernetes.Interface
+	r.RestConfig = mgr.GetConfig()
+
+	return ctrl.NewControllerManagedBy(mgr).
+		For(&v1alpha1.SecretStore{}, builder.WithPredicates(SecretStorePredicate{})).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: reconcileCount,
+		}).
+		Complete(r)
 }
 
 func (r *SecretStoreReconciler) addFinalizer(logger logr.Logger, ss *v1alpha1.SecretStore) error {
@@ -107,4 +167,21 @@ func (r *SecretStoreReconciler) addFinalizer(logger logr.Logger, ss *v1alpha1.Se
 		return err
 	}
 	return nil
+}
+
+// updateStatus updates the status of the SecretStore based on validation results
+func (r *SecretStoreReconciler) updateStatus(logger logr.Logger, secretStore *v1alpha1.SecretStore) (bool, error) {
+	storeWrapper := &SecretStoreWrapper{secretStore}
+	return r.CommonReconciler.updateStatusWithReady(logger, storeWrapper)
+}
+
+func (r *SecretStoreReconciler) updateStatusWithError(logger logr.Logger, secretStore *v1alpha1.SecretStore, reason, message string) error {
+	storeWrapper := &SecretStoreWrapper{secretStore}
+	return r.CommonReconciler.updateStatusWithError(logger, storeWrapper, reason, message)
+}
+
+// updateStatusWithReadyAndGeneration updates the status to indicate the store is ready with specified capabilities and records the observed generation
+func (r *SecretStoreReconciler) updateStatusWithReadyAndGeneration(logger logr.Logger, secretStore *v1alpha1.SecretStore, capabilities v1alpha1.SecretStoreCapabilities) error {
+	storeWrapper := &SecretStoreWrapper{secretStore}
+	return r.CommonReconciler.updateStatusWithReadyAndGeneration(logger, storeWrapper, capabilities)
 }

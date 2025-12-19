@@ -10,7 +10,7 @@ metadata:
     app.kubernetes.io/managed-by: {{ .Release.Service }}
 rules:
   - apiGroups: [""]
-    resources: ["namespaces", "pods", "nodes", "events"]
+    resources: ["namespaces", "pods", "nodes", "events", "serviceaccounts"]
     verbs: ["get", "watch", "list"]
   - apiGroups: [""]
     resources: ["configmaps", "secrets"]
@@ -37,6 +37,22 @@ rules:
   - apiGroups: [ "alibabacloud.com" ]
     resources: [ "secretstores/status" ]
     verbs: [ "get", "update", "patch" ]
+  - apiGroups: [ "alibabacloud.com" ]
+    resources: [ "clusterexternalsecrets" ]
+    verbs: [ "create", "delete", "get", "list", "patch", "update", "watch"]
+  - apiGroups: [ "alibabacloud.com" ]
+    resources: [ "clusterexternalsecrets/status" ]
+    verbs: [ "get", "update", "patch" ]
+  - apiGroups: [ "alibabacloud.com" ]
+    resources: [ "clustersecretstores" ]
+    verbs: [ "create", "delete", "get", "list", "patch", "update", "watch", "deletecollection" ]
+  - apiGroups: [ "alibabacloud.com" ]
+    resources: [ "clustersecretstores/status" ]
+    verbs: [ "get", "update", "patch" ]
+  - apiGroups: [ "" ]
+    resources: [ "serviceaccounts/token" ]
+    verbs: [ "create" ]
+
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
