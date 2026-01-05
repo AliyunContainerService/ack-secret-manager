@@ -1,0 +1,26 @@
+# .github/workflows/helm-release.yml
+name: Publish Helm Chart
+on:
+  push:
+    branches: [master]
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Helm
+        uses: azure/setup-helm@v4.2.0
+        with:
+          version: v3.17.0
+      - name: Package chart
+        run: |
+          helm package ./charts/ack-secret-manager -d ./charts
+      - name: Update index.yaml
+        run: |
+          helm repo index ./charts --url https://aliyuncontainerservice.github.io/ack-secret-manager/charts
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./charts
