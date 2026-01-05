@@ -18,7 +18,7 @@ jobs:
           helm package ./charts/ack-secret-manager -d ./charts
       - name: Update index.yaml
         run: |
-          helm repo index ./charts --url https://aliyuncontainerservice.github.io/ack-secret-manager/charts
+          helm repo index ./charts --url https://aliyuncontainerservice.github.io/ack-secret-manager
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
