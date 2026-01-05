@@ -1,0 +1,118 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "ack-secret-manager.fullname" . }}
+  namespace: {{ .Release.Namespace | quote }}
+  labels:
+    app.kubernetes.io/name: {{ include "ack-secret-manager.name" . }}
+    helm.sh/chart: {{ include "ack-secret-manager.chart" . }}
+    app.kubernetes.io/instance: {{ .Release.Name }}
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: {{ include "ack-secret-manager.name" . }}
+      app.kubernetes.io/instance: {{ .Release.Name }}
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: {{ include "ack-secret-manager.name" . }}
+        app.kubernetes.io/instance: {{ .Release.Name }}
+      {{- if .Values.podLabels }}
+          {{- toYaml .Values.podLabels | nindent 8 }}
+      {{- end }}
+      {{- if .Values.podAnnotations }}
+      annotations:
+        {{- toYaml .Values.podAnnotations | nindent 8 }}
+      {{- end }}
+    spec:
+      serviceAccountName: {{ template "ack-secret-manager.serviceAccountName" . }}
+{{- if .Values.rrsa.enable }}
+      volumes:
+        - name: {{ template "ack-secret-manager.serviceAccountName" . }}
+          projected:
+            sources:
+            - serviceAccountToken:
+                path: ack-secret-manager
+                expirationSeconds: 7200
+                audience: "sts.aliyuncs.com"
+{{- end }}
+      securityContext:
+        {{- toYaml .Values.securityContext | nindent 8 }}
+      containers:
+        - name: {{ .Chart.Name }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+{{- if .Values.rrsa.enable }}
+          volumeMounts:
+            - name: {{ template "ack-secret-manager.serviceAccountName" . }}
+              mountPath: /var/run/secrets/tokens
+{{- end }}
+          command:
+            - ack-secret-manager
+          args:
+            - --reconcile-period={{ .Values.command.reconcilePeriod }}
+            - --reconcile-count={{ .Values.command.reconcileCount }}
+            - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
+{{- if .Values.command.region }}
+            - --region={{ .Values.command.region }}
+{{- end }}
+{{- if .Values.command.kmsEndpoint }}
+            - --kms-endpoint={{ .Values.command.kmsEndpoint }}
+{{- end }}
+            - --disable-polling={{ .Values.command.disablePolling }}
+            - --polling-interval={{ .Values.command.pollingInterval }}
+            - --max-concurrent-kms-secret-pulls={{ .Values.command.maxConcurrentKmsSecretPulls }}
+            - --max-concurrent-oos-secret-pulls={{ .Values.command.maxConcurrentOosSecretPulls }}
+            - --enable-worker-role={{ .Values.command.enableWorkerRole }}
+            - --cleanup-secret-on-failure={{ .Values.command.cleanupSecretOnFailure }}
+            - --process-cluster-secret-store={{ .Values.command.processClusterSecretStore }}
+            - --process-cluster-external-secret={{ .Values.command.processClusterExternalSecret }}
+            - --enable-cross-namespace-secret-store={{ .Values.command.enableCrossNamespaceSecretStore }}
+            - --enable-cross-namespace-auth-ref={{ .Values.command.enableCrossNamespaceAuthRef }}
+            - --cluster-id={{ .Values.command.clusterId }}
+            - --uid={{ .Values.command.aliuid }}
+{{- if .Values.command.watchNamespaces }}
+            - --watch-namespaces={{ .Values.command.watchNamespaces }}
+{{- end }}
+{{- if .Values.command.excludeNamespaces }}
+            - --exclude-namespaces={{ .Values.command.excludeNamespaces }}
+{{- end }}
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          env:
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: WATCH_NAMESPACE
+              value: {{ .Values.env.WATCH_NAMESPACE }}
+{{- range $name, $value := .Values.env }}
+{{- if not (empty $value) }}
+            - name: {{ $name | quote }}
+              value: {{ $value | quote }}
+{{- end }}
+{{- end }}
+            # Params for env vars populated from k8s secrets
+{{- range $key, $value := .Values.envVarsFromSecret }}
+            - name: {{ $key }}
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $value.secretKeyRef | quote }}
+                  key: {{ $value.key | quote }}
+{{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
