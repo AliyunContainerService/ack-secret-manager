@@ -99,7 +99,6 @@ type SecretClient interface {
 	// GetSecret gets secret via externalSecret
 	GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
 	GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
-	SetEndpoint(endpoint string)
 }
 
 type ClientManager interface {

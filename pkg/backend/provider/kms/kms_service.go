@@ -101,17 +101,3 @@ func (c *KMSClient) GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kub
 	// Process extracted data with common function
 	return common.ProcessExtractedExternalSecretData(data, externalData)
 }
-
-func (c *KMSClient) SetEndpoint(endpoint string) {
-	if c.kmsClient == nil {
-		klog.Errorf("kms client is nil, cannot set endpoint %v", endpoint)
-		return
-	}
-
-	if endpoint == "" {
-		klog.Errorf("endpoint is empty, cannot set endpoint")
-		return
-	}
-
-	c.kmsClient.Endpoint = tea.String(endpoint)
-}

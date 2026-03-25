@@ -5,9 +5,11 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -22,9 +24,6 @@ import (
 )
 
 const (
-	ReasonStoreValid   = "Valid"
-	ReasonStoreInvalid = "Invalid"
-
 	secretFinalizer        = "finalizer.ack.secrets-manager.alibabacloud.com"
 	clusterSecretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
 )
@@ -236,12 +235,16 @@ type CommonReconciler struct {
 
 // validateStoreSpec validates the common part of store spec
 func (r *CommonReconciler) validateStoreSpec(kms, oos interface{}, storeType string) error {
+	// Cast to the correct types
+	kmsProvider, kmsOk := kms.(*v1alpha1.KMSProvider)
+	oosProvider, oosOk := oos.(*v1alpha1.OOSProvider)
+
 	// Validate provider count (must be exactly one)
 	providerCount := 0
-	if kms != nil {
+	if kmsOk && kmsProvider != nil && kmsProvider.KMS != nil {
 		providerCount++
 	}
-	if oos != nil {
+	if oosOk && oosProvider != nil && oosProvider.OOS != nil {
 		providerCount++
 	}
 
@@ -341,8 +344,18 @@ func (r *CommonReconciler) needRecreateClient(clientName string, generation int6
 		clientExists = client != nil
 	}
 
-	// Check if spec has changed by comparing generation or if client doesn't exist
-	if !clientExists || (len(conditions) > 0 && generation != conditions[0].ObservedGeneration) {
+	// If client doesn't exist, we definitely need to create it
+	if !clientExists {
+		return true
+	}
+
+	// Check if generation has changed (primary indicator of spec changes)
+	if len(conditions) > 0 && generation != conditions[0].ObservedGeneration {
+		return true
+	}
+
+	// If no conditions exist, this is initial reconcile, so recreate
+	if len(conditions) == 0 {
 		return true
 	}
 
@@ -553,28 +566,86 @@ func (r *CommonReconciler) updateStatus(logger logr.Logger, store StoreInterface
 
 	r.setCondition(store, condition)
 
-	// compare status
+	// Compare status
 	statusEqual := r.statusEqual(oldStatus, store.GetStatus())
-	if !statusEqual {
-		err := r.Status().Update(context.Background(), store.(client.Object))
-		if err != nil {
-			logger.Error(err, "failed to update store status")
+	// If there were no conditions before, force update to initialize status
+	shouldUpdate := !statusEqual || len(oldStatus.GetConditions()) == 0
+
+	if shouldUpdate {
+		// Update the actual Kubernetes object status, not the wrapper
+		var objKey client.ObjectKey
+
+		switch s := store.(type) {
+		case *SecretStoreWrapper:
+			objKey = client.ObjectKey{
+				Namespace: s.SecretStore.Namespace,
+				Name:      s.SecretStore.Name,
+			}
+		case *ClusterSecretStoreWrapper:
+			objKey = client.ObjectKey{
+				Name: s.ClusterSecretStore.Name,
+			}
+		default:
+			return false, fmt.Errorf("unknown store type: %T", store)
+		}
+
+		// Retry logic for handling resource version conflicts
+		maxRetries := 3
+		for i := 0; i < maxRetries; i++ {
+			// Get fresh copy of the object
+			var freshObj client.Object
+			switch store.(type) {
+			case *SecretStoreWrapper:
+				freshObj = &v1alpha1.SecretStore{}
+			case *ClusterSecretStoreWrapper:
+				freshObj = &v1alpha1.ClusterSecretStore{}
+			}
+
+			if err := r.Get(context.Background(), objKey, freshObj); err != nil {
+				logger.Error(err, "failed to get fresh object for status update")
+				return false, err
+			}
+
+			// Update the status on the fresh object
+			switch t := freshObj.(type) {
+			case *v1alpha1.SecretStore:
+				modifiedStore := store.(*SecretStoreWrapper).SecretStore
+				t.Status = *modifiedStore.Status.DeepCopy()
+			case *v1alpha1.ClusterSecretStore:
+				modifiedStore := store.(*ClusterSecretStoreWrapper).ClusterSecretStore
+				t.Status = *modifiedStore.Status.DeepCopy()
+			}
+
+			// Attempt to update the status subresource
+			err := r.Status().Update(context.Background(), freshObj)
+			if err == nil {
+				logger.Info("successfully updated store status subresource")
+				return true, nil
+			}
+
+			// If it's a conflict error, retry after getting the latest version
+			if errors.IsConflict(err) {
+				if i < maxRetries-1 {
+					logger.V(2).Info("conflict when updating status, retrying", "attempt", i+1, "error", err)
+					time.Sleep(100 * time.Millisecond) // Brief pause before retry
+					continue
+				}
+			}
+
+			logger.Error(err, "failed to update store status after retries")
 			return false, err
 		}
-		logger.Info("updated store status")
-		return true, nil
 	}
 
 	return false, nil
 }
 
-// updateStatus updates the status of the store to indicate success
+// updateStatusWithReady updates the status to indicate the store is ready
 func (r *CommonReconciler) updateStatusWithReady(logger logr.Logger, store StoreInterface) (bool, error) {
-	// Set successful condition
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:   v1alpha1.SecretStoreReady,
 		Status: corev1.ConditionTrue,
-		Reason: ReasonStoreValid,
+		Reason: v1alpha1.ReasonStoreValid,
 	}
 
 	return r.updateStatus(logger, store, condition)
@@ -593,12 +664,13 @@ func (r *CommonReconciler) updateStatusWithError(logger logr.Logger, store Store
 	return err
 }
 
-// updateStatusWithReadyAndGeneration updates the status to indicate the store is ready with specified capabilities and records the observed generation
+// updateStatusWithReadyAndGeneration updates the status to indicate the store is ready
+// with specified capabilities and records the observed generation
 func (r *CommonReconciler) updateStatusWithReadyAndGeneration(logger logr.Logger, store StoreInterface, capabilities v1alpha1.SecretStoreCapabilities) error {
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:               v1alpha1.SecretStoreReady,
 		Status:             corev1.ConditionTrue,
-		Reason:             ReasonStoreValid,
+		Reason:             v1alpha1.ReasonStoreValid,
 		ObservedGeneration: store.GetGeneration(),
 	}
 

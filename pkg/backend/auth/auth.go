@@ -90,11 +90,27 @@ func (p *TokenOIDCProvider) Credentials(context.Context) (*provider.Credentials,
 
 // GetCredential gets credential from STS service using OIDC token
 func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
+	// Define refresh threshold: refresh when 10% of validity period remains
+	// This ensures that we refresh credentials proportionally to their validity duration
+	const refreshPercentage = 0.2
+
 	// check if token refresh function is available
-	needTokenRefresh := p.getTokenFunc != nil && time.Now().After(p.tokenExpireTime.Add(-5*time.Minute))
+	tokenRemaining := time.Until(p.tokenExpireTime)
+	tokenRefreshAmount := time.Duration(float64(tokenRemaining) * refreshPercentage)
+	// If token is already expired, refresh immediately
+	if tokenRefreshAmount <= 0 {
+		tokenRefreshAmount = time.Nanosecond // Use minimal positive duration to calculate refresh amount
+	}
+	needTokenRefresh := p.getTokenFunc != nil && time.Now().After(p.tokenExpireTime.Add(-tokenRefreshAmount))
 
 	// check if need to refresh credential
-	needCredentialRefresh := p.credential == nil || time.Now().After(p.expireTime.Add(-5*time.Minute))
+	credRemaining := time.Until(p.expireTime)
+	credRefreshAmount := time.Duration(float64(credRemaining) * refreshPercentage)
+	// If credential is already expired, refresh immediately
+	if credRefreshAmount <= 0 {
+		credRefreshAmount = time.Nanosecond // Use minimal positive duration to calculate refresh amount
+	}
+	needCredentialRefresh := p.credential == nil || time.Now().After(p.expireTime.Add(-credRefreshAmount))
 
 	if !needTokenRefresh && !needCredentialRefresh {
 		return p.credential, nil
@@ -123,7 +139,7 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 			p.tokenExpireTime = time.Now().Add(1 * time.Hour)
 		}
 
-		klog.Infof("Successfully refreshed OIDC token, next refresh in %v", p.tokenExpireTime.Add(-5*time.Minute))
+		klog.Infof("Successfully refreshed OIDC token")
 	}
 
 	// create STS client

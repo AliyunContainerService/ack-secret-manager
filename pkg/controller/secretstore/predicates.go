@@ -8,6 +8,11 @@ import (
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
+const (
+	TriggerReconcileAnnotation = "ack-secret-manager.alibabacloud.com/trigger-reconcile"
+	LastTriggerReconcileKey    = "ack-secret-manager.alibabacloud.com/last-trigger-reconcile"
+)
+
 type SecretStorePredicate struct{}
 
 func (p SecretStorePredicate) Create(e event.CreateEvent) bool {
@@ -32,6 +37,14 @@ func (p SecretStorePredicate) Update(e event.UpdateEvent) bool {
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true
 	}
+
+	// Check for trigger annotation changes
+	oldTriggerAnnotation := oldObj.GetAnnotations()[TriggerReconcileAnnotation]
+	newTriggerAnnotation := newObj.GetAnnotations()[TriggerReconcileAnnotation]
+	if oldTriggerAnnotation != newTriggerAnnotation && newTriggerAnnotation != "" {
+		return true
+	}
+
 	return false
 }
 
@@ -63,7 +76,11 @@ func (p ClusterSecretStorePredicate) Update(e event.UpdateEvent) bool {
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true
 	}
-	return false
+
+	// Check for trigger annotation changes
+	oldTriggerAnnotation := oldObj.GetAnnotations()[TriggerReconcileAnnotation]
+	newTriggerAnnotation := newObj.GetAnnotations()[TriggerReconcileAnnotation]
+	return oldTriggerAnnotation != newTriggerAnnotation
 }
 
 func (p ClusterSecretStorePredicate) Generic(e event.GenericEvent) bool {

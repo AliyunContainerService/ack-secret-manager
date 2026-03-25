@@ -10,6 +10,21 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
+// isValidJSON checks if the given byte slice is valid JSON
+func isValidJSON(data []byte) bool {
+	if len(data) == 0 {
+		return false
+	}
+	// Quick check: JSON must start with { or [
+	firstChar := data[0]
+	if firstChar != '{' && firstChar != '[' {
+		return false
+	}
+	// Attempt to unmarshal as JSON
+	var js interface{}
+	return json.Unmarshal(data, &js) == nil
+}
+
 // ProcessExternalSecretData processes external secret data with JMESPath support
 func ProcessExternalSecretData(data *v1alpha1.DataSource, externalData []byte) (map[string][]byte, error) {
 	secretDatas := make(map[string][]byte)
@@ -35,28 +50,35 @@ func ProcessExternalSecretData(data *v1alpha1.DataSource, externalData []byte) (
 }
 
 // ProcessExtractedExternalSecretData processes extracted secret data from YAML/JSON
+// Preserves the original format: JSON input -> JSON output, YAML input -> YAML output
 func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData []byte) (map[string][]byte, error) {
 	secretDatas := make(map[string][]byte)
 
 	tempKV := make(map[string]interface{})
-	marshalToYaml := true
 
-	// Attempt to parse the external data as YAML. If parsing fails, try parsing it as JSON.
-	// If both parsing attempts fail, log an error and return the error.
-	if err := yaml.Unmarshal(externalData, &tempKV); err != nil {
-		marshalToYaml = false
-		if err := json.Unmarshal(externalData, &tempKV); err != nil {
-			klog.Errorf("extract secret error %v key %v", err, data.Extract.Key)
-			return nil, err
-		}
+	// Detect format by checking if it's valid JSON first
+	// JSON is stricter, so we validate it before attempting YAML parsing
+	isJSON := isValidJSON(externalData)
+
+	var err error
+	if isJSON {
+		err = json.Unmarshal(externalData, &tempKV)
+	} else {
+		err = yaml.Unmarshal(externalData, &tempKV)
 	}
 
+	if err != nil {
+		klog.Errorf("extract secret error: failed to parse data, key %v, err %v", data.Extract.Key, err)
+		return nil, err
+	}
+
+	// Serialize using the same format as input
 	kv := make(map[string]string)
 	for k, v := range tempKV {
-		if marshalToYaml {
-			kv[k] = utils.YamlStr(v)
-		} else {
+		if isJSON {
 			kv[k] = utils.JsonStr(v)
+		} else {
+			kv[k] = utils.YamlStr(v)
 		}
 	}
 

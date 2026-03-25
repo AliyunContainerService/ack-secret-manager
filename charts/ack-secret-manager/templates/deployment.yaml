@@ -40,6 +40,10 @@ spec:
 {{- end }}
       securityContext:
         {{- toYaml .Values.securityContext | nindent 8 }}
+      {{- if .Values.imagePullSecrets }}
+      imagePullSecrets:
+{{ toYaml .Values.imagePullSecrets | indent 8 }}
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           securityContext:

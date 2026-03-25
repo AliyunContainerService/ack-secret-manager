@@ -401,13 +401,207 @@ spec:
         kind: SecretStore
 ```
 
-### 8. New ClusterExternalSecret and ClusterSecretStore Resources
+### 8. Template Processing Feature
+
+ack-secret-manager supports advanced template parsing capabilities, allowing you to transform and customize secret data before synchronizing secret credentials to Kubernetes Secrets.
+
+#### Template Fields Overview
+
+The `ExternalSecret.spec.target.template` field supports the following configurations:
+
+**Inline Templates (`template.data`)**
+Define template transformations directly in the ExternalSecret specification:
+
+```yaml
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: template-example
+spec:
+  provider: kms
+  data:
+    - key: my-secret
+      name: raw-data
+  target:
+    template:
+      data:
+        # Transform data using Go templates and Sprig functions
+        formatted-config: |
+          {
+            "database": {
+              "host": "{{ .raw-data | quote }}",
+              "port": {{ "5432" | int }}
+            }
+          }
+        # Conditional processing
+        is-active: |
+          {{ if eq .status "active" }}true{{ else }}false{{ end }}
+```
+
+**Template References (`templateFrom`)**
+Reference templates from existing ConfigMaps or Secrets:
+
+```yaml
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: template-from-example
+spec:
+  provider: kms
+  data:
+    - key: db-password
+      name: password
+    - key: db-host
+      name: host
+  target:
+    template:
+      templateFrom:
+        # Reference ConfigMap templates
+        - configMap:
+            name: app-config-templates
+            items:
+              - key: database-config
+                templateAs: Values  # Process as values only
+          target: Data
+        
+        # Reference Secret templates
+        - secret:
+            name: secure-templates
+            items:
+              - key: connection-string
+                templateAs: KeysAndValues  # Process as key-value pairs
+          target: Data
+        
+        # Inline literal template
+        - literal: |
+            APP_ENV={{ .environment | default "production" }}
+          target: Data
+```
+
+**Template Targets**
+Control where template results are placed:
+
+- `Data` (default): Place results in Secret data
+- `Annotations`: Place results in Secret annotations
+- `Labels`: Place results in Secret labels
+
+**Template Scopes**
+Define how template keys are interpreted:
+
+- `Values`: Process template as values only
+- `KeysAndValues`: Process template as key-value pairs (newline separated)
+
+**Supported Template Functions**
+
+The template processor includes [Sprig functions](http://masterminds.github.io/sprig/) for advanced processing:
+
+```yaml
+# String operations
+uppercase: {{ .username | upper }}
+lowercase: {{ .service | lower }}
+
+# Default values
+port: {{ .port | default "8080" }}
+
+# Type conversion
+timeout: {{ "30" | int }}
+
+# JSON operations
+config-json: {{ .config | fromJson | toJson }}
+
+# Conditional logic
+is-prod: {{ if eq .env "prod" }}true{{ else }}false{{ end }}
+
+# String formatting
+connection-url: postgresql://{{ .user }}:{{ .password }}@{{ .host }}:{{ .port }}/{{ .db }}
+
+# Bcrypt password hashing
+hashed-password: {{ bcrypt .password }}
+
+# Htpasswd format (for basic auth)
+htpasswd-auth: {{ htpasswd "admin" .password }}
+
+# JSON path query (recommended for nested access)
+db-host: {{ jsonPath .config "database.host" }}
+
+# JSON merge
+merged: {{ mergeJson .default .override }}
+
+# Regex replacement
+cleaned: {{ regexReplace .text "\\d+" "" }}
+
+# Safe Base64 decode
+decoded: {{ b64decSafe .encoded }}
+
+# Key=Value parsing
+{{ $kv := parseKeyValue .env }}
+DB_URL: {{ index $kv "DATABASE_URL" }}
+```
+
+#### Template Context Access
+
+Access secret data in templates using:
+- .KEY: Direct field access (standard Go template syntax)
+- index . "KEY": Using index function
+- jsonPath .jsonKey "path.to.field": Extract from nested JSON (recommended)
+
+Example:
+```yaml
+target:
+  template:
+    data:
+      # Standard field access
+      username: {{ .username }}
+      password: {{ .password }}
+      
+      # Nested JSON access (recommended)
+      db-host: {{ jsonPath .dbConfig "host" }}
+      db-port: {{ jsonPath .dbConfig "port" }}
+      
+      # Or use fromJson + index
+      db-user: {{ index (.dbConfig | fromJson) "user" }}
+      
+      # Conditional processing
+      {{ if eq .environment "production" }}
+      log-level: error
+      {{ else }}
+      log-level: debug
+      {{ end }}
+      
+      # Loop iteration
+      {{ range .ports | fromJson }}
+      - port: {{ . }}
+      {{ end }}
+      
+      # Bcrypt password hashing
+      hashed-pwd: {{ bcrypt .password }}
+      
+      # Generate htpasswd auth file
+      auth: |
+        {{- $creds := list }}
+        {{- range $user, $pw := . }}
+        {{- $creds = append $creds (htpasswd $user $pw) }}
+        {{- end }}
+        {{ $creds | join "\n" }}
+```
+
+#### Template Validation
+
+The processor validates output formats:
+
+- Secret data keys: Must follow Kubernetes naming conventions
+- Annotation keys: Must follow DNS subdomain format
+- Label keys: Must follow DNS label format
+
+Invalid keys are automatically filtered out to prevent Secret creation failures.
+
+### 9. New ClusterExternalSecret and ClusterSecretStore Resources
 
 ack-secret-manager introduces ClusterExternalSecret and ClusterSecretStore resources. The following are resource descriptions and examples:
 
 **ClusterExternalSecret**
 
-A cluster-level resource for managing and coordinating ExternalSecrets across multiple namespaces. It can automatically create ExternalSecrets in matching namespaces and supports using `spec.namespaceSelectors` to configure matching namespaces.
+A cluster-level resource for managing and coordinating ExternalSecrets across multiple namespaces. It supports using `spec.conditions` to configure matching namespaces and can automatically create ExternalSecrets in matching namespaces.
 
 For field descriptions, please refer to the ClusterExternalSecret section in the CRD Configuration Introduction.
 
@@ -417,25 +611,37 @@ kind: ClusterExternalSecret
 metadata:
   name: cluster-kms
 spec:
-  externalSecretName: kms
-  namespaceSelectors:
-  - matchLabels:
-      kubernetes.io/metadata.name: default
-  - matchExpressions: 
-    - key: kubernetes.io/metadata.name
-      operator: In
-      values:
-      - test
-  rotationInterval: 10s
   externalSecretSpec:
     provider: kms
     data:
-      - key: test-json
-        name: test-json
+      - key: test
+        name: test
         versionId: v1
         secretStoreRef:
           name: alibaba-credentials
           kind: ClusterSecretStore
+  externalSecretName: kms
+  externalSecretMetadata:
+    labels:
+      app: "my-app"
+      team: "backend"
+    annotations:
+      annotation-key1: "annotation-value1"
+      annotation-key2: "annotation-value2"
+  conditions:
+  - namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: default
+      matchExpressions: 
+      - key: environment
+        operator: In
+        values:
+        - dev
+  - namespaces:
+    - test
+  - namespaceRegexes:
+    - "dev-.*"
+  rotationInterval: 10s
 ```
 
 **ClusterSecretStore**
@@ -487,9 +693,9 @@ Currently, four Custom Resource Definitions (CRDs) are provided, divided into tw
 1. **ExternalSecret**: Namespace-level resource used to define the basic credential information that needs to be synchronized (such as credential name, version, etc.) and specify the SecretStore
 2. **ClusterExternalSecret**: Cluster-level resource used to manage and coordinate ExternalSecrets across multiple namespaces, and can automatically create ExternalSecrets in matching namespaces
 
-### Cross-Namespace Access Control
+### Cross-Namespace Control Mechanisms
 
-To enhance security and flexibility, ack-secret-manager provides multiple cross-namespace access control mechanisms:
+To enhance security and flexibility, ack-secret-manager provides multiple cross-namespace control mechanisms:
 
 **ExternalSecret Reference to SecretStore Control**
 
@@ -502,6 +708,15 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
 - Control whether SecretStore can reference authentication resources (ServiceAccount, AccessKey Secret) across namespaces through the `command.enableCrossNamespaceAuthRef` parameter
 - The default value is true, which means cross-namespace references are allowed
 - When set to false, SecretStore can only reference authentication resources in the same namespace
+
+**ClusterExternalSecret Match Mechanism**
+
+- ClusterExternalSecret creates ExternalSecret resources in matching namespaces by defining namespace selection criteria through the spec.conditions field.
+- Supports three match methods, with an OR relationship between conditions:
+
+    1. namespaceSelector: Use label selectors to match namespaces that are allowed to access
+    2. namespaces: Explicitly list the allowed namespace name list
+    3. namespaceRegexes: Use regular expressions to match the allowed namespace name list
 
 **ClusterSecretStore Access Control**
 
@@ -533,7 +748,7 @@ For scenarios that require cross-namespace access, it is recommended to use the 
     - Prefer RRSA or ServiceAccount-based authentication, and avoid directly exposing AccessKeys in configuration.
     - Separate authentication configuration from data configuration to enhance security.
 4. **Avoid using `ClusterExternalSecret` unless absolutely necessary**, to reduce the risk of secret leakage across namespaces:
-    - If your workload requires synchronizing secrets across multiple namespaces, use `spec.namespaceSelectors` to precisely control the target namespaces for `ExternalSecret` creation.
+    - If your workload requires synchronizing secrets across multiple namespaces, use `spec.conditions` to precisely control the target namespaces for `ExternalSecret` creation.
 
 ## CRD configuration introduction
 
@@ -541,12 +756,83 @@ For scenarios that require cross-namespace access, it is recommended to use the 
 
 **spec**
 
-| Parameter   | Description                                                               | Required |
-| ----------- | ------------------------------------------------------------------------- | -------- |
-| provider    | The target cloud service for credential synchronization, such as KMS, OOS | no       |
-| data        | Data source (identifier for the target data)                              | no       |
-| dataProcess | Data source requiring special processing (identifier for the target data) | no       |
-| type        | Kubernetes Secret types (e.g., Opaque)                                    | no       |
+| Parameter        | Description                                                               | Required |
+| ---------------- | ------------------------------------------------------------------------- | -------- |
+| provider         | The target cloud service for credential synchronization, such as KMS, OOS | no       |
+| data             | Data source (identifier for the target data)                              | no       |
+| dataProcess      | Data source requiring special processing (identifier for the target data) | no       |
+| type             | Kubernetes Secret types (e.g., Opaque)                                    | no       |
+| target           | Defines the configuration for the Kubernetes Secret to be generated       | no       |
+| rotationInterval | The time in which the controller should reconcile its objects             | no       |
+
+**target**
+
+| Parameter        | Description                                         | Required | Default |
+| ---------------- | --------------------------------------------------- | -------- | ------- |
+| name             | Name of the target Kubernetes Secret                | no       |         |
+| template         | Template configuration for transforming secret data | no       |         |
+
+**template**
+
+| Parameter    | Description                                              | Required | Default   |
+| ------------ | -------------------------------------------------------- | -------- | --------- |
+| data         | Inline template definitions                              | no       |           |
+| templateFrom | References to external templates (ConfigMap/Secret)      | no       |           |
+| metadata     | Template for Secret metadata (labels/annotations)        | no       |           |
+| type         | Type of the target secret                                | no       |           |
+| mergePolicy  | How template results should be merged with original data | no       | Replace   |
+
+**metadata**
+
+| Parameter   | Description                        | Required |
+| ----------- | ---------------------------------- | -------- |
+| annotations | Annotations to apply to the secret | no       |
+| labels      | Labels to apply to the secret      | no       |
+
+**templateFrom**
+
+| Parameter  | Description                                               | Required | Default |
+| ---------- | --------------------------------------------------------- | -------- | ------- |
+| configMap  | Reference to ConfigMap containing templates               | no       |         |
+| secret     | Reference to Secret containing templates                  | no       |         |
+| literal    | Inline literal template string                            | no       |         |
+| target     | Target location for template results (Data/Annotations/Labels) | no       | Data    |
+
+**configMap/secret**
+
+| Parameter | Description                                               | Required |
+| --------- | --------------------------------------------------------- | -------- |
+| name      | The name of the ConfigMap/Secret resource                 | yes      |
+| items     | List of keys in the ConfigMap/Secret to use as templates  | yes      |
+
+**items**
+
+| Parameter   | Description                                    | Required | Default |
+| ----------- | ---------------------------------------------- | -------- | ------- |
+| key         | A key in the ConfigMap/Secret                  | yes      |         |
+| templateAs  | How the template keys should be interpreted    | no       | Values  |
+
+**templateAs**
+
+| Value          | Description                                    |
+| -------------- | ---------------------------------------------- |
+| Values         | Process template as values only                |
+| KeysAndValues  | Process template as key-value pairs            |
+
+**templateFrom.target**
+
+| Value         | Description                                    |
+| ------------- | ---------------------------------------------- |
+| Data          | Store template results in Secret data field    |
+| Annotations   | Store template results in Secret annotations   |
+| Labels        | Store template results in Secret labels        |
+
+**mergePolicy**
+
+| Value    | Description                                                                                                                                                          |
+| -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Replace  | Uses template field names exclusively (clears existing field names in the secret)                                                                                    |
+| Merge    | Merges template field names with existing secret field names; if field names in the template match those in the existing secret, the template values take precedence |
 
 **data**
 
@@ -669,13 +955,14 @@ ClusterExternalSecret is a resource that manages and coordinates ExternalSecrets
 
 **spec**
 
-| Parameter              | Description                                                                     | Required |
-| ---------------------- | ------------------------------------------------------------------------------- | -------- |
-| externalSecretSpec     | Specification definition of ExternalSecret to create                            | Yes      |
-| externalSecretName     | Name of ExternalSecret to create, defaults to the name of ClusterExternalSecret | No       |
-| externalSecretMetadata | Metadata of ExternalSecret to create                                            | No       |
-| namespaceSelectors     | List of label selectors to select target namespaces                             | No       |
-| rotationInterval       | Time interval for controller to check namespace labels and reconcile objects    | No       |
+| Parameter              | Description                                                                                                         | Required |
+| ---------------------- | ------------------------------------------------------------------------------------------------------------------- | -------- |
+| externalSecretSpec     | Specification definition of ExternalSecret to create                                                                | Yes      |
+| externalSecretName     | Name of ExternalSecret to create, defaults to the name of ClusterExternalSecret                                     | No       |
+| externalSecretMetadata | Metadata of ExternalSecret to create                                                                                | No       |
+| namespaceSelectors     | List of label selectors to select target namespaces(Deprecated)                                                     | No       |
+| conditions             | A list of conditions for selecting target namespaces, supporting namespaceSelector, namespaces, and namespaceRegexe | No       |
+| rotationInterval       | Time interval for controller to check namespace labels and reconcile objects                                        | No       |
 
 **externalSecretMetadata**
 
@@ -685,6 +972,14 @@ The externalSecretMetadata field allows you to add additional metadata to the Ex
 | ----------- | ---------------------------------------- | -------- |
 | annotations | Annotations to add to the ExternalSecret | No       |
 | labels      | Labels to add to the ExternalSecret      | No       |
+
+**conditions**
+
+| Parameter         | Description                                        | Required |
+| ----------------- | -------------------------------------------------- | -------- |
+| namespaceSelector | Match allowed namespaces using label selector      | Yes      |
+| namespaces        | Explicitly list allowed namespace names            | No       |
+| namespaceRegexes  | Match allowed namespace names using regex patterns | No       |
 
 ## Security
 
@@ -707,3 +1002,5 @@ Please report vulnerabilities by email to **kubernetes-security@service.aliyun.c
 | `0.5.11` | 2025/6/17  | Provide an option to control deletion of the cluster Secret in case of KMS credential or OOS encryption parameter sync failure |
 | `0.5.12` | 2025/6/25  | Support using ExternalSecret to configure the endpoint address of the KMS instance dimension to connect multiple KMS instances |
 | `0.6.0`  | 2025/12/5	| 1.Support ClusterSecretStore resource<br />2.Support ClusterExternalSecret resource<br />3.Support prohibiting ExternalSecret cross-namespace reference to SecretStore resources<br />4.Support SecretStore reference to ServiceAccount configuration for authentication information |
+| `0.6.1`  | 2026/2/28 	| 1.Modify the namespace matching conditions for ClusterExternalSecret resources<br />2.Add secret and serviceaccount controllers to reconcile associated ClusterSecretStores and SecretStores when resources are updated<br />3.Optimize the token refresh time for serviceaccount authentication method 
+| `0.6.2`  | 2016/3/2   | Support advanced template processing capabilities to transform and customize secret data before creating Kubernetes Secret when synchronizing external secrets |

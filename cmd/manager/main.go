@@ -40,7 +40,9 @@ import (
 	_ "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/oos"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/clusterexternalsecret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/externalsecret"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secret"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/serviceaccount"
 	"github.com/AliyunContainerService/ack-secret-manager/version"
 )
 
@@ -281,6 +283,30 @@ func main() {
 	} else {
 		log.Info("ClusterExternalSecret controller disabled")
 	}
+
+	// Setup SecretRef controller to watch for secret data changes
+	secretRefReconciler := &secret.SecretReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Log:    ctrl.Log.WithName("controllers").WithName("SecretRef"),
+	}
+	if err = secretRefReconciler.SetupWithManager(mgr, reconcileCount); err != nil {
+		log.Error(err, "unable to create controller", "controller", "SecretRef")
+		os.Exit(1)
+	}
+	log.Info("SecretRef controller started")
+
+	// Setup ServiceAccountRef controller to watch for SA annotation changes
+	serviceAccountRefReconciler := &serviceaccount.ServiceAccountReconciler{
+		Client: mgr.GetClient(),
+		Scheme: mgr.GetScheme(),
+		Log:    ctrl.Log.WithName("controllers").WithName("ServiceAccountRef"),
+	}
+	if err = serviceAccountRefReconciler.SetupWithManager(mgr, reconcileCount); err != nil {
+		log.Error(err, "unable to create controller", "controller", "ServiceAccountRef")
+		os.Exit(1)
+	}
+	log.Info("ServiceAccountRef controller started")
 
 	log.Info("starting ack-secret-manager")
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {

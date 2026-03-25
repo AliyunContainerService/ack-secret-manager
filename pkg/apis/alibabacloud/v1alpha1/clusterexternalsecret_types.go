@@ -40,7 +40,12 @@ type ClusterExternalSecretSpec struct {
 
 	// A list of labels to select by to find the Namespaces to create the ExternalSecrets in. The selectors are ORed.
 	// +optional
+	// Deprecated : NamespaceSelectors field is deprecated, use Conditions field
 	NamespaceSelectors []*metav1.LabelSelector `json:"namespaceSelectors,omitempty"`
+
+	// A list of conditions to select by to find the Namespaces to create the ExternalSecrets in. The conditions are ORed.
+	// +optional
+	Conditions []ClusterExternalSecretCondition `json:"conditions,omitempty"`
 
 	// The time in which the controller should reconcile its objects and recheck namespaces for labels.
 	RotationInterval *metav1.Duration `json:"rotationInterval,omitempty"`
@@ -55,6 +60,25 @@ type ExternalSecretMetadata struct {
 	Labels map[string]string `json:"labels,omitempty"`
 }
 
+// ClusterExternalSecretCondition describes a condition by which to choose namespaces to process ExternalSecrets in
+// for a ClusterExternalSecret instance.
+type ClusterExternalSecretCondition struct {
+	// Choose namespace using a labelSelector
+	// +optional
+	NamespaceSelector *metav1.LabelSelector `json:"namespaceSelector,omitempty"`
+
+	// Choose namespaces by name
+	// +optional
+	// +kubebuilder:validation:items:MinLength:=1
+	// +kubebuilder:validation:items:MaxLength:=63
+	// +kubebuilder:validation:items:Pattern:=^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+	Namespaces []string `json:"namespaces,omitempty"`
+
+	// Choose namespaces by using regex matching
+	// +optional
+	NamespaceRegexes []string `json:"namespaceRegexes,omitempty"`
+}
+
 // ClusterExternalSecretConditionType defines a value type for ClusterExternalSecret conditions.
 type ClusterExternalSecretConditionType string
 
@@ -63,8 +87,9 @@ const ClusterExternalSecretReady ClusterExternalSecretConditionType = "Ready"
 
 // ClusterExternalSecretStatusCondition defines the observed state of a ClusterExternalSecret resource.
 type ClusterExternalSecretStatusCondition struct {
-	Type   ClusterExternalSecretConditionType `json:"type"`
-	Status corev1.ConditionStatus             `json:"status"`
+	Type               ClusterExternalSecretConditionType `json:"type"`
+	Status             corev1.ConditionStatus             `json:"status"`
+	LastTransitionTime metav1.Time                        `json:"lastTransitionTime,omitempty"`
 
 	// +optional
 	Message string `json:"message,omitempty"`

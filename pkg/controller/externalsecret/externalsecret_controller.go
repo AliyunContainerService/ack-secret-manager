@@ -17,17 +17,16 @@ package externalsecret
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"reflect"
 	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
-	"github.com/jmespath/go-jmespath"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog"
@@ -43,7 +42,6 @@ import (
 )
 
 const (
-	timestampFormat = "2006-01-02T15.04.05Z"
 	secretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
 )
 
@@ -86,64 +84,35 @@ func (r *ExternalSecretReconciler) getCurrentData(namespace string, name string)
 		Name:      name,
 	}, secret)
 	if err != nil {
-		r.Log.Error(err, "failed to get current secret")
 		return data, err
 	}
 	data = secret.Data
 	return data, err
 }
 
-// upsertSecret will create or update a secret
-func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret, secretMap, dataSecretMap, dataExtractSecretMap map[string][]byte,
-	currentData map[string][]byte, dataErrorMap, extractDataErrorMap map[string]error) error {
-	secType := corev1.SecretTypeOpaque
-	if externalSec.Spec.Type != "" {
-		secType = corev1.SecretType(externalSec.Spec.Type)
+// Optimized updateSecret method with clear separation of concerns
+func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret, secretMap map[string][]byte, currentData map[string][]byte, metadataTargets map[string]map[string]string) error {
+	// Validate input parameters
+	if externalSec == nil {
+		return fmt.Errorf("externalSec cannot be nil")
 	}
-	secret := &corev1.Secret{
-		Type: secType,
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: externalSec.Namespace,
-			Labels: map[string]string{
-				"lastUpdatedAt": time.Now().Format(timestampFormat),
-			},
-			Name: externalSec.Name,
-		},
+	if secretMap == nil {
+		secretMap = make(map[string][]byte)
 	}
-	if r.CleanUpSecretOnFailure {
-		klog.Infof("flag cleanup-secret-on-failure is enabled, replace old data with the new data")
-		// If cleanup on failure is enabled , just replace the old data with the new data.
-		secret.Data = secretMap
-	} else if len(dataErrorMap) == 0 && len(extractDataErrorMap) == 0 {
-		// If there is no error, just replace the old data with the new data.
-		secret.Data = secretMap
-	} else {
-		// If there is any sync issue, only overwrite the fields that were successfully synced, and do not delete other fields.
-		var mergedMap = currentData
-		for k, v := range dataSecretMap {
-			mergedMap[k] = v
-		}
-		for k, v := range dataExtractSecretMap {
-			mergedMap[k] = v
-		}
-		secret.Data = mergedMap
+	if currentData == nil {
+		currentData = make(map[string][]byte)
 	}
-	err := r.Create(r.Ctx, secret)
-	if errors.IsAlreadyExists(err) {
-		err = r.Update(r.Ctx, secret)
-	}
-	return err
-}
 
-// deleteSecret will delete a secret given its namespace and name
-func (r *ExternalSecretReconciler) deleteSecret(namespace string, name string) error {
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Namespace: namespace,
-			Name:      name,
-		},
+	// Create secret operation handler with all required context
+	handler := NewSimpleSecretOperationHandler(r.Client, r.CleanUpSecretOnFailure, r.Log)
+
+	// Execute the complete secret operation with all policies and template processing
+	err := handler.HandleSecretOperation(r.Ctx, externalSec, secretMap, currentData, metadataTargets)
+	if err != nil {
+		return err
 	}
-	return r.Delete(r.Ctx, secret)
+
+	return nil
 }
 
 // shouldWatch will return true if the ExternalSecret is in a watchable namespace
@@ -152,6 +121,18 @@ func (r *ExternalSecretReconciler) shouldWatch(externalSecNamespace string) bool
 		return r.WatchNamespaces[externalSecNamespace]
 	}
 	return true
+}
+
+// isNamespaceTerminating checks if a namespace is in terminating state
+func (r *ExternalSecretReconciler) isNamespaceTerminating(namespace string) (bool, error) {
+	ns := &corev1.Namespace{}
+	err := r.Get(r.Ctx, client.ObjectKey{Name: namespace}, ns)
+	if err != nil {
+		return false, err
+	}
+
+	// Check if namespace is terminating
+	return ns.Status.Phase == corev1.NamespaceTerminating, nil
 }
 
 // AddFinalizerIfNotPresent will check if finalizerName is the finalizers slice
@@ -170,6 +151,13 @@ func (r *ExternalSecretReconciler) Requeue(result ctrl.Result) ctrl.Result {
 	return result
 }
 
+func (r *ExternalSecretReconciler) RequeueAfter(duration time.Duration) ctrl.Result {
+	if r.DisablePolling {
+		return ctrl.Result{Requeue: false}
+	}
+	return ctrl.Result{RequeueAfter: duration}
+}
+
 func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	log := r.Log.WithValues("ExternalSecret", req.NamespacedName)
 
@@ -178,10 +166,16 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// only do not requeue when getting CR fails.
 	err := r.Get(r.Ctx, req.NamespacedName, externalSec)
 	if err != nil {
-		log.Error(err, fmt.Sprintf("could not get ExternalSecret '%s'", req.NamespacedName))
+		// Only return error if it's not NotFound - NotFound is normal when resource is deleted
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
+
+	// Determine the actual secret name to use
 	secretName := externalSec.Name
+	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Name != "" {
+		secretName = externalSec.Spec.Target.Name
+	}
+
 	secretNamespace := externalSec.Namespace
 	secretIndex := fmt.Sprintf("namespace/%s/%s", secretNamespace, secretName)
 	log = log.WithValues("secret", secretIndex)
@@ -192,9 +186,10 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		rotationInterval = externalSec.Spec.RotationInterval.Duration
 	}
 
-	// Handle deletion
+	// Handle deletion - resource lifecycle management
 	if externalSec.GetDeletionTimestamp() != nil {
-		return r.handleDeletion(ctx, log, externalSec, rotationInterval, secretNamespace, secretName)
+		r.updateResourceManagementStatus(externalSec, "operation", fmt.Errorf("external secret is being deleted"))
+		return r.handleDeletion(ctx, log, externalSec, rotationInterval, secretName)
 	}
 
 	klog.Infof("reconcile external secret %v", secretIndex)
@@ -202,33 +197,60 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	// add Finalizer to external secret instance
 	if !utils.Contains(externalSec.GetFinalizers(), secretFinalizer) {
 		if err := r.addFinalizer(log, externalSec); err != nil {
-			return r.Requeue(reconcile.Result{RequeueAfter: r.ReconciliationPeriod}), err
+			r.updateResourceManagementStatus(externalSec, "finalizer", err)
+			return r.RequeueAfter(r.ReconciliationPeriod), err
 		}
 	}
 
 	if !r.shouldWatch(secretNamespace) {
-		log.Info(fmt.Sprintf("ignoring unwatch ns %s", secretNamespace), "watched_namespaces", r.WatchNamespaces)
+		watchErr := fmt.Errorf("namespace %s is not in watched namespaces", secretNamespace)
+		r.updateResourceManagementStatus(externalSec, "namespace_access", watchErr)
 		return ctrl.Result{}, nil
 	}
 
+	// Check if namespace is terminating before proceeding
+	if isTerminating, err := r.isNamespaceTerminating(secretNamespace); err != nil {
+		r.updateResourceManagementStatus(externalSec, "namespace_check", err)
+		return ctrl.Result{}, err
+	} else if isTerminating {
+		// Namespace is terminating, skip secret creation
+		r.Log.Info("Skipping secret creation as namespace is terminating", "namespace", secretNamespace)
+		r.updateResourceManagementStatus(externalSec, "namespace_terminating", fmt.Errorf("namespace %s is terminating", secretNamespace))
+		return ctrl.Result{}, nil
+	}
+
+	// Delegate ALL data synchronization to syncIfNeedUpdate
+	// It will populate dataErrorsMap and extractDataErrorsMap appropriately
 	_, syncErr := r.syncIfNeedUpdate(externalSec)
+
+	// syncIfNeedUpdate handles its own status updates for data-related operations
+	// We only handle requeuing logic here
 	if syncErr != nil {
-		return r.Requeue(ctrl.Result{RequeueAfter: r.ReconciliationPeriod}), syncErr
+		// Return only error to let controller-runtime handle exponential backoff
+		// RequeueAfter result is ignored when error is non-nil
+		return ctrl.Result{}, syncErr
 	}
 
 	log.Info("update secret store", "index", secretIndex)
-	return r.Requeue(ctrl.Result{RequeueAfter: rotationInterval}), nil
+	return r.RequeueAfter(rotationInterval), nil
+}
+
+// New helper method for resource management errors (not data sync errors)
+func (r *ExternalSecretReconciler) updateResourceManagementStatus(externalSec *api.ExternalSecret, errorType string, err error) {
+	// Create a temporary error map for resource management issues
+	resourceErrors := map[string]error{errorType: err}
+	r.updateExternalSecretStatus(externalSec, resourceErrors, make(map[string]error))
 }
 
 // handleDeletion handle resource deletion logic
-func (r *ExternalSecretReconciler) handleDeletion(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, rotationInterval time.Duration, secretNamespace, secretName string) (ctrl.Result, error) {
+func (r *ExternalSecretReconciler) handleDeletion(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, rotationInterval time.Duration, secretName string) (ctrl.Result, error) {
 	if !utils.Contains(externalSec.GetFinalizers(), secretFinalizer) {
-		return r.Requeue(reconcile.Result{RequeueAfter: rotationInterval}), nil
+		return r.RequeueAfter(rotationInterval), nil
 	}
 
 	// exec the clean work in secretFinalizer
 	// do not delete Finalizer if clean failed, the clean work will exec in next reconcile
-	if err := r.finalizeExternalSecret(log, secretNamespace, secretName); err != nil {
+	if err := r.finalizeExternalSecret(ctx, log, externalSec, secretName); err != nil {
 		log.Error(err, "failed to clean secret")
 		return reconcile.Result{RequeueAfter: r.ReconciliationPeriod}, err
 	}
@@ -239,21 +261,39 @@ func (r *ExternalSecretReconciler) handleDeletion(ctx context.Context, log logr.
 	err := r.Update(ctx, externalSec)
 	if err != nil {
 		log.Error(err, "failed to update externalSec when clean finalizers")
-		return r.Requeue(reconcile.Result{RequeueAfter: r.ReconciliationPeriod}), err
+		return r.RequeueAfter(r.ReconciliationPeriod), err
 	}
 
-	return r.Requeue(reconcile.Result{RequeueAfter: rotationInterval}), nil
+	return r.RequeueAfter(rotationInterval), nil
 }
 
-func (r *ExternalSecretReconciler) finalizeExternalSecret(log logr.Logger, secretNamespace, secretName string) error {
+func (r *ExternalSecretReconciler) finalizeExternalSecret(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, secretName string) error {
+	log.Info("Cleaning up secret for ExternalSecret", "externalSecret", externalSec.Name, "secret", secretName)
 
-	log.Info("Successfully finalized external secret")
-	if err := r.deleteSecret(secretNamespace, secretName); err != nil && !errors.IsNotFound(err) {
-		log.Error(err, "unable to delete secret", "namespace", secretNamespace, "name", secretName)
-		return err
+	// Get the secret
+	secret := &corev1.Secret{}
+	err := r.Get(ctx, types.NamespacedName{
+		Namespace: externalSec.Namespace,
+		Name:      secretName,
+	}, secret)
+
+	if err != nil {
+		if errors.IsNotFound(err) {
+			log.Info("Secret already deleted", "namespace", externalSec.Namespace, "name", secretName)
+			return nil
+		}
+		return fmt.Errorf("failed to get secret: %w", err)
 	}
-	log.Info("secret deleted successfully", "namespace", secretNamespace, "name", secretName)
 
+	// Original behavior: directly delete the secret (no owner reference is set)
+	// This maintains backward compatibility with the original implementation
+	err = r.Delete(ctx, secret)
+	if err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete secret: %w", err)
+	}
+
+	log.Info("Deleted secret (original orphan mode behavior)",
+		"namespace", externalSec.Namespace, "name", secretName)
 	return nil
 }
 
@@ -261,7 +301,7 @@ func (r *ExternalSecretReconciler) addFinalizer(logger logr.Logger, es *api.Exte
 	logger.Info("Adding Finalizer for the externalsecret", "name", es.Name)
 	es.SetFinalizers(append(es.GetFinalizers(), secretFinalizer))
 	//update external secret instance
-	err := r.Client.Update(context.TODO(), es)
+	err := r.Client.Update(context.Background(), es)
 	if err != nil {
 		logger.Error(err, "Failed to update externalsecret with finalizer", "name", es.Name)
 		return err
@@ -279,56 +319,6 @@ func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 			MaxConcurrentReconciles: reconcileCount,
 		}).
 		Complete(r)
-}
-
-func setEndpoint(provider backend.Provider, data *api.DataSource, secretClient backend.SecretClient) {
-	if provider.GetName() == backend.ProviderKMSName {
-		if data.KmsEndpoint != "" {
-			secretClient.SetEndpoint(data.KmsEndpoint)
-		} else {
-			secretClient.SetEndpoint(provider.GetEndpoint())
-		}
-	}
-}
-
-// processJMESPath processes JMESPath expressions on the secret data
-func (r *ExternalSecretReconciler) processJMESPath(data []byte, jmesPaths []api.JMESPathObject) (map[string][]byte, error) {
-	resultMap := make(map[string][]byte)
-
-	// If no JMESPath expressions, return the raw data with a key based on context
-	if len(jmesPaths) == 0 {
-		resultMap["data"] = data
-		return resultMap, nil
-	}
-
-	// Parse JSON data
-	var jsonData interface{}
-	if err := json.Unmarshal(data, &jsonData); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal secret data: %v", err)
-	}
-
-	// Process each JMESPath expression
-	for _, jp := range jmesPaths {
-		result, err := jmespath.Search(jp.Path, jsonData)
-		if err != nil {
-			return nil, fmt.Errorf("failed to apply JMESPath %s: %v", jp.Path, err)
-		}
-
-		// Convert result to bytes
-		resultBytes, err := json.Marshal(result)
-		if err != nil {
-			return nil, fmt.Errorf("failed to marshal JMESPath result: %v", err)
-		}
-
-		key := jp.ObjectAlias
-		if key == "" {
-			// If an alias is not specified, use the path as the key
-			key = jp.Path
-		}
-		resultMap[key] = resultBytes
-	}
-
-	return resultMap, nil
 }
 
 func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, dataSources []api.DataSource, externalSecretNamespace string) (map[string][]byte, map[string]error) {
@@ -367,8 +357,6 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 			continue
 		}
 
-		setEndpoint(provider, &data, secretClient)
-
 		// Get the secret with version information
 		singleMap, err := secretClient.GetExternalSecret(&data, r.Client)
 		if err != nil {
@@ -376,30 +364,24 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 			continue
 		}
 
-		// Process JMESPath expressions if any
+		// Process each result from backend according to original JMESPath configuration
 		for secretKey, secretData := range singleMap {
-			processedData, err := r.processJMESPath(secretData, data.JMESPath)
-			if err != nil {
-				errorsMap[data.Key] = fmt.Errorf("failed to process JMESPath for key %s: %v", secretKey, err)
-				continue
+			// For JMESPath results, the secretKey is already the ObjectAlias
+			// So we can use it directly as the final key
+			finalKey := secretKey
+
+			// Only fallback to data.Name if no JMESPath processing occurred
+			// This would be the case for non-JMESPath data sources
+			if len(data.JMESPath) == 0 {
+				finalKey = data.Name
 			}
 
-			// Add processed data to output map
-			for processedKey, processedValue := range processedData {
-				finalKey := processedKey
-				if len(data.JMESPath) > 1 || (len(data.JMESPath) == 1 && data.JMESPath[0].ObjectAlias != "") {
-					// Use custom key name if provided
-					finalKey = processedKey
-				} else if len(data.JMESPath) == 0 {
-					// Use original key if no JMESPath
-					finalKey = secretKey
-				}
-				out[finalKey] = processedValue
-			}
+			out[finalKey] = secretData
 		}
 	}
 	return out, errorsMap
 }
+
 func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend.Provider, dataSources []api.DataProcess, externalSecretNamespace string) (map[string][]byte, map[string]error) {
 	out := make(map[string][]byte)
 	errorsMap := make(map[string]error)
@@ -439,8 +421,6 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 			continue
 		}
 
-		setEndpoint(provider, data.Extract, secretClient)
-
 		// Get the secret with version information
 		singleMap, err := secretClient.GetExternalSecretWithExtract(&data, r.Client)
 		if err != nil {
@@ -448,35 +428,31 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 			continue
 		}
 
-		// Process JMESPath expressions if any
+		// Process each result from backend according to original JMESPath configuration
 		for secretKey, secretData := range singleMap {
-			processedData, err := r.processJMESPath(secretData, data.Extract.JMESPath)
-			if err != nil {
-				errorsMap[data.Extract.Key] = fmt.Errorf("failed to process JMESPath for key %s: %v", secretKey, err)
-				continue
-			}
-
 			// Apply replace rules if any
-			for processedKey, processedValue := range processedData {
-				finalValue := processedValue
-				if len(data.ReplaceKey) > 0 {
-					finalValueStr := string(processedValue)
-					for _, rule := range data.ReplaceKey {
-						finalValueStr = strings.ReplaceAll(finalValueStr, rule.Source, rule.Target)
-					}
-					finalValue = []byte(finalValueStr)
+			finalValue := secretData
+			if len(data.ReplaceKey) > 0 {
+				finalValueStr := string(secretData)
+				for _, rule := range data.ReplaceKey {
+					finalValueStr = strings.ReplaceAll(finalValueStr, rule.Source, rule.Target)
 				}
-
-				finalKey := processedKey
-				if len(data.Extract.JMESPath) > 1 || (len(data.Extract.JMESPath) == 1 && data.Extract.JMESPath[0].ObjectAlias != "") {
-					// Use custom key name if provided
-					finalKey = processedKey
-				} else if len(data.Extract.JMESPath) == 0 {
-					// Use original key if no JMESPath
-					finalKey = secretKey
-				}
-				out[finalKey] = finalValue
+				finalValue = []byte(finalValueStr)
 			}
+
+			// Determine the final key name based on the original JMESPath configuration
+			finalKey := secretKey // default to backend key
+			for _, jp := range data.Extract.JMESPath {
+				// If the backend key matches the original JMESPath expression, use the alias
+				if secretKey == jp.Path {
+					if jp.ObjectAlias != "" {
+						finalKey = jp.ObjectAlias
+					}
+					break
+				}
+			}
+
+			out[finalKey] = finalValue
 		}
 	}
 	return out, errorsMap
@@ -564,7 +540,9 @@ func (r *ExternalSecretReconciler) getOrCreateClient(provider backend.Provider, 
 	}
 }
 
+// syncIfNeedUpdate processes the external secret and determines if an update is needed
 func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSecret) (bool, error) {
+	var templateResult *UnifiedTemplateResult
 	providerName := externalSec.Spec.Provider
 	if providerName == "" {
 		providerName = backend.ProviderKMSName
@@ -579,70 +557,192 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 	case backend.ProviderOOSName:
 		err = r.OosLimiter.SecretPullLimiter.Wait(waitTimeoutCtx)
 	default:
-		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
+		// Provider configuration is a SYSTEM-LEVEL error, not data-source specific
+		// Use resource management status update instead of polluting data error maps
+		providerErr := fmt.Errorf("unsupported provider: %v, only support kms or oos", providerName)
+		r.updateResourceManagementStatus(externalSec, "provider_configuration", providerErr)
+		return false, providerErr
 	}
+
 	if err != nil {
+		// Rate limiting is a SYSTEM-LEVEL error, not data-source specific
+		r.updateResourceManagementStatus(externalSec, "rate_limit", err)
 		return false, err
 	}
 
-	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name)
+	// Determine the actual secret name to use
+	secretName := externalSec.Name
+	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Name != "" {
+		secretName = externalSec.Spec.Target.Name
+	}
+
+	esIndex := fmt.Sprintf("%s/%s", externalSec.Namespace, secretName)
 	log := r.Log.WithValues("secret", esIndex)
 	provider := backend.GetProviderByName(providerName)
 	if provider == nil {
-		return false, fmt.Errorf("provider %v not found, only support kms or oos", providerName)
+		// Provider lookup failure is a SYSTEM-LEVEL error
+		lookupErr := fmt.Errorf("provider %v not found", providerName)
+		r.updateResourceManagementStatus(externalSec, "provider_lookup", lookupErr)
+		return false, lookupErr
 	}
 
 	secretMap := make(map[string][]byte)
-	dataSecretMap := make(map[string][]byte)
-	extractDataSecretMap := make(map[string][]byte)
 	dataErrorsMap := make(map[string]error)
 	extractDataErrorsMap := make(map[string]error)
+	var currentData map[string][]byte
 
-	// Merge the logic for Data and DataProcess processing
+	// Process ExternalSecret.Spec.Data EXCLUSIVELY - ONLY populate dataErrorsMap
 	if len(externalSec.Spec.Data) != 0 {
 		out, errorsMap := r.getExternalSecret(provider, externalSec.Spec.Data, externalSec.Namespace)
-		if len(errorsMap) > 0 {
-			log.Error(fmt.Errorf("get external secret error"), "external secret errors", "errors", errorsMap)
+		// EXCLUSIVELY populate dataErrorsMap with Data-specific errors
+		for k, v := range errorsMap {
+			dataErrorsMap[k] = v
 		}
-		dataErrorsMap = errorsMap
 		for k, v := range out {
-			dataSecretMap[k] = v
 			secretMap[k] = v
 		}
 	}
 
+	// Process ExternalSecret.Spec.DataProcess EXCLUSIVELY - ONLY populate extractDataErrorsMap
 	if len(externalSec.Spec.DataProcess) != 0 {
 		out, errorsMap := r.getExternalSecretWithExtract(provider, externalSec.Spec.DataProcess, externalSec.Namespace)
-		if len(errorsMap) > 0 {
-			log.Error(fmt.Errorf("get extract external secret error"), "extract external secret errors", "errors", errorsMap)
+		// EXCLUSIVELY populate extractDataErrorsMap with DataProcess-specific errors
+		for k, v := range errorsMap {
+			extractDataErrorsMap[k] = v
 		}
-		extractDataErrorsMap = errorsMap
 		for k, v := range out {
-			extractDataSecretMap[k] = v
 			secretMap[k] = v
 		}
 	}
 
-	// Get the actual secret from Kubernetes
-	currentData, err := r.getCurrentData(externalSec.Namespace, externalSec.Name)
-	if err != nil && !errors.IsNotFound(err) {
-		log.Error(err, "unable to get current state of secret when sync")
-		return false, utils.IgnoreNotFoundError(err)
+	// Update status with PURE data-source-specific errors
+	r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
+
+	// Get current secret state
+	var getCurrentDataErr error
+	currentData, getCurrentDataErr = r.getCurrentData(externalSec.Namespace, secretName)
+	if getCurrentDataErr != nil && !errors.IsNotFound(getCurrentDataErr) {
+		// State retrieval is a SYSTEM-LEVEL error affecting comparison logic
+		r.updateResourceManagementStatus(externalSec, "state_retrieval", getCurrentDataErr)
+		return false, getCurrentDataErr
 	}
-	eq := reflect.DeepEqual(secretMap, currentData)
-	if !eq {
-		log.Info("found secret need to update")
-		if err := r.updateSecret(externalSec, secretMap, dataSecretMap,
-			extractDataSecretMap, currentData, dataErrorsMap, extractDataErrorsMap); err != nil {
-			log.Error(err, "failed to update secret")
+
+	// If there are template processing requirements, process them now
+	// This must happen AFTER getting current data but BEFORE checking update conditions
+	templateProcessed := false                       // Track whether template processing occurred
+	var metadataTargets map[string]map[string]string // TemplateFrom metadata targets
+	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Template != nil {
+		tp := NewSimpleTemplateProcessor(r.Client)
+		var err error
+		templateResult, err = tp.ProcessAllTemplates(r.Ctx, externalSec, secretMap)
+		if err != nil {
+			// Fatal template processing error - mark ExternalSecret as Failed
+			r.updateResourceManagementStatus(externalSec, "template_processing_fatal", err)
 			return false, err
 		}
-		r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
-		log.Info("secret has sync from external backend")
+		templateProcessed = true
+
+		// Check if there were any non-fatal template processing errors and log them
+		if len(templateResult.Stats.Errors) > 0 {
+			// Log recoverable errors but don't fail the ExternalSecret
+			for _, errMsg := range templateResult.Stats.Errors {
+				r.Log.Info("template processing warning", "error", errMsg)
+			}
+
+			// Optionally update status to indicate warnings (but not failure)
+			var warningMsg strings.Builder
+			warningMsg.WriteString("template processing completed with warnings: ")
+			for i, errMsg := range templateResult.Stats.Errors {
+				if i > 0 {
+					warningMsg.WriteString("; ")
+				}
+				warningMsg.WriteString(errMsg)
+			}
+			// Use a different error type that indicates warnings rather than failures
+			r.updateResourceManagementStatus(externalSec, "template_processing_warnings", fmt.Errorf("%s", warningMsg.String()))
+		}
+
+		// Collect metadata targets from template result
+		if len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0 {
+			metadataTargets = make(map[string]map[string]string)
+			if len(templateResult.Metadata.Annotations) > 0 {
+				metadataTargets["annotations"] = templateResult.Metadata.Annotations
+			}
+			if len(templateResult.Metadata.Labels) > 0 {
+				metadataTargets["labels"] = templateResult.Metadata.Labels
+			}
+		}
+
+		// Use Data target for secret creation
+		secretMap = templateResult.Data
+	}
+
+	// Check if there are any successful data sources or template processing results before proceeding with secret creation
+	// Use templateProcessed flag and nil check to satisfy static analysis
+	hasSuccessfulData := len(secretMap) > 0
+	if templateProcessed && templateResult != nil {
+		hasSuccessfulData = hasSuccessfulData || (len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0)
+	}
+
+	// Calculate total number of data sources configured
+	totalDataSources := len(externalSec.Spec.Data) + len(externalSec.Spec.DataProcess)
+	// Calculate total number of errors
+	totalErrors := len(dataErrorsMap) + len(extractDataErrorsMap)
+	// Check if all data sources have failed
+	allDataSourcesFailed := totalDataSources > 0 && totalErrors > 0 && totalErrors >= totalDataSources
+
+	// Check if update is needed
+	// Consider template metadata targets as part of the update condition
+	// Use templateProcessed flag and nil check to satisfy static analysis
+	templateMetadataPresent := false
+	if templateProcessed && templateResult != nil {
+		templateMetadataPresent = len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0
+	}
+	eq := reflect.DeepEqual(secretMap, currentData) && !templateMetadataPresent
+
+	if !eq {
+		log.Info("found secret need to update", "hasSuccessfulData", hasSuccessfulData, "secretMapLength", len(secretMap), "allDataSourcesFailed", allDataSourcesFailed, "totalDataSources", totalDataSources, "totalErrors", totalErrors)
+
+		// If there is no successful data but we still need to update (e.g., to delete the secret), proceed
+		// Pass metadataTargets directly instead of using context
+		if err := r.updateSecret(externalSec, secretMap, currentData, metadataTargets); err != nil {
+			log.Error(err, "failed to update secret", "hasSuccessfulData", hasSuccessfulData, "secretMapLength", len(secretMap), "allDataSourcesFailed", allDataSourcesFailed)
+
+			// Check if the error is due to empty data and handle accordingly
+			if len(secretMap) == 0 {
+				// This is the case where provider secrets are deleted/unavailable
+				// CleanUpSecretOnFailure flag determines whether to clean up the secret
+				// Original behavior:
+				// - CleanUpSecretOnFailure=true: delete the secret
+				// - CleanUpSecretOnFailure=false: retain the secret
+				handler := NewSimpleSecretOperationHandler(r.Client, r.CleanUpSecretOnFailure, r.Log)
+
+				if r.CleanUpSecretOnFailure {
+					// When CleanUpSecretOnFailure is enabled, delete the secret
+					delErr := handler.handleProviderDeletion(r.Ctx, externalSec, secretName)
+					if delErr != nil {
+						log.Error(delErr, "failed to delete secret when provider data unavailable", "allDataSourcesFailed", allDataSourcesFailed)
+						return false, delErr
+					}
+					// Status already updated with errors by updateExternalSecretStatus above
+					return true, nil
+				} else {
+					// When CleanUpSecretOnFailure is disabled, retain the secret (original behavior)
+					log.Info("Retaining secret due to empty data (CleanUpSecretOnFailure disabled)",
+						"namespace", externalSec.Namespace, "name", secretName)
+					return false, nil
+				}
+			}
+
+			// Update operation failure is a SYSTEM-LEVEL error
+			r.updateResourceManagementStatus(externalSec, "update_operation", err)
+			return false, err
+		}
+		log.Info("secret has sync from external backend", "secretMapLength", len(secretMap), "hasSuccessfulData", hasSuccessfulData, "allDataSourcesFailed", allDataSourcesFailed)
 		return true, nil
 	}
 
-	r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap)
+	// No update needed
 	return false, nil
 }
 

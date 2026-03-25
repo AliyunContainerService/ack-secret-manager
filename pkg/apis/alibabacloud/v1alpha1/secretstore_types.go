@@ -119,6 +119,7 @@ const (
 	ReasonValidationFailed      = "ValidationFailed"
 	ReasonValidationUnknown     = "ValidationUnknown"
 	ReasonStoreValid            = "Valid"
+	ReasonClientCreationFailed  = "ClientCreationFailed"
 	StoreUnmaintained           = "StoreUnmaintained"
 )
 

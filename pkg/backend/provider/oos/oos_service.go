@@ -77,17 +77,3 @@ func (c *OOSClient) GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kub
 	// Process extracted data with common function
 	return common.ProcessExtractedExternalSecretData(data, externalData)
 }
-
-func (c *OOSClient) SetEndpoint(endpoint string) {
-	if c.oosClient == nil {
-		klog.Errorf("oos client is nil, cannot set endpoint %v", endpoint)
-		return
-	}
-
-	if endpoint == "" {
-		klog.Errorf("endpoint is empty, cannot set endpoint")
-		return
-	}
-
-	c.oosClient.Endpoint = tea.String(endpoint)
-}
