@@ -398,15 +398,207 @@ spec:
         kind: SecretStore
 ```
 
-### 8. 新增 **ClusterExternalSecret** 和 **ClusterSecretStore** 资源
+### 8. 模板解析功能
 
-ack-secret-manager 新增了 ClusterExternalSecret 和 ClusterSecretStore 资源，以下资源说明及示例
+ack-secret-manager 支持高级模板解析功能，允许您在同步密钥凭据到 Kubernetes Secret 之前转换和自定义密钥数据。
+
+#### 模板字段概览
+
+`ExternalSecret.spec.target.template` 字段支持以下配置：
+
+**内联模板 (`template.data`)**
+直接在 ExternalSecret 规范中定义模板转换：
+
+```yaml
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: template-example
+spec:
+  provider: kms
+  data:
+    - key: my-secret
+      name: raw-data
+  target:
+    template:
+      data:
+        # 使用 Go 模板和 Sprig 函数转换数据
+        formatted-config: |
+          {
+            "database": {
+              "host": "{{ .raw-data | quote }}",
+              "port": {{ "5432" | int }}
+            }
+          }
+        # 条件处理
+        is-active: |
+          {{ if eq .status "active" }}true{{ else }}false{{ end }}
+```
+
+**模板引用 (`templateFrom`)**
+引用现有的 ConfigMap 或 Secret 中的模板：
+
+```yaml
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: template-from-example
+spec:
+  provider: kms
+  data:
+    - key: db-password
+      name: password
+    - key: db-host
+      name: host
+  target:
+    template:
+      templateFrom:
+        # 引用 ConfigMap 模板
+        - configMap:
+            name: app-config-templates
+            items:
+              - key: database-config
+                templateAs: Values  # 仅作为值处理
+          target: Data
+        
+        # 引用 Secret 模板
+        - secret:
+            name: secure-templates
+            items:
+              - key: connection-string
+                templateAs: KeysAndValues  # 作为键值对处理
+          target: Data
+        
+        # 内联字面量模板
+        - literal: |
+            APP_ENV={{ .environment | default "production" }}
+          target: Data
+```
+
+**模板目标**
+控制模板结果的放置位置：
+
+- `Data` (默认): 将结果放在 Secret data 中
+- `Annotations`: 将结果放在 Secret 注解中
+- `Labels`: 将结果放在 Secret 标签中
+
+**模板作用域**
+定义模板键的解释方式：
+
+- `Values`: 仅将模板作为值处理
+- `KeysAndValues`: 将模板作为键值对处理（换行分隔）
+
+**支持的模板函数**
+
+模板处理器包含 [Sprig 函数](http://masterminds.github.io/sprig/) 用于高级处理：
+
+```yaml
+# 字符串操作
+uppercase: {{ .username | upper }}
+lowercase: {{ .service | lower }}
+
+# 默认值
+port: {{ .port | default "8080" }}
+
+# 类型转换
+timeout: {{ "30" | int }}
+
+# JSON 操作
+config-json: {{ .config | fromJson | toJson }}
+
+# 条件逻辑
+is-prod: {{ if eq .env "prod" }}true{{ else }}false{{ end }}
+
+# 字符串格式化
+connection-url: postgresql://{{ .user }}:{{ .password }}@{{ .host }}:{{ .port }}/{{ .db }}
+
+# Bcrypt 密码哈希
+hashed-password: {{ bcrypt .password }}
+
+# Htpasswd 格式（用于基本认证）
+htpasswd-auth: {{ htpasswd "admin" .password }}
+
+# JSON 路径查询（推荐用于嵌套访问）
+db-host: {{ jsonPath .config "database.host" }}
+
+# JSON 合并
+merged: {{ mergeJson .default .override }}
+
+# 正则替换
+cleaned: {{ regexReplace .text "\\d+" "" }}
+
+# Base64 安全解码
+decoded: {{ b64decSafe .encoded }}
+
+# Key=Value 解析
+{{ $kv := parseKeyValue .env }}
+DB_URL: {{ index $kv "DATABASE_URL" }}
+```
+
+#### 模板上下文访问
+
+在模板中使用以下方式访问密钥数据：
+- .KEY: 直接访问密钥数据（标准 Go 模板语法）
+- index . "KEY": 使用 index 函数访问
+- jsonPath .jsonKey "path.to.field": 从嵌套 JSON 中提取（推荐）
+
+示例：
+```yaml
+target:
+  template:
+    data:
+      # 标准字段访问
+      username: {{ .username }}
+      password: {{ .password }}
+      
+      # 嵌套 JSON 访问（推荐方式）
+      db-host: {{ jsonPath .dbConfig "host" }}
+      db-port: {{ jsonPath .dbConfig "port" }}
+      
+      # 或使用 fromJson + index
+      db-user: {{ index (.dbConfig | fromJson) "user" }}
+      
+      # 条件处理
+      {{ if eq .environment "production" }}
+      log-level: error
+      {{ else }}
+      log-level: debug
+      {{ end }}
+      
+      # 循环遍历
+      {{ range .ports | fromJson }}
+      - port: {{ . }}
+      {{ end }}
+      
+      # 使用 bcrypt 加密密码
+      hashed-pwd: {{ bcrypt .password }}
+      
+      # 生成 htpasswd 认证文件
+      auth: |
+        {{- $creds := list }}
+        {{- range $user, $pw := . }}
+        {{- $creds = append $creds (htpasswd $user $pw) }}
+        {{- end }}
+        {{ $creds | join "\n" }}
+```
+
+#### 模板验证
+
+处理器验证输出格式：
+
+- Secret 数据键: 必须遵循 Kubernetes 命名约定
+- 注解键: 必须遵循 DNS 子域名格式
+- 标签键: 必须遵循 DNS 标签格式
+
+无效键会被自动过滤以防止 Secret 创建失败。
+
+### 9. 新增 **ClusterExternalSecret** 和 **ClusterSecretStore** 资源
+
+ack-secret-manager 新增了 ClusterExternalSecret 和 ClusterSecretStore 资源，以下是资源说明及示例
 
 **ClusterExternalSecret**
 
-集群级别资源，用于管理和协调多个命名空间下的ExternalSecret，能够在匹配的命名空间中自动创建ExternalSecret，并支持使用 `spec.namespaceSelectors` 配置匹配的命名空间
-
-字段说明请参考 CRD 配置介绍 ClusterExternalSecret 部分
+集群级别资源，用于管理和协调多个命名空间下的ExternalSecret，支持使用 `spec.conditions` 配置匹配的命名空间，在匹配的命名空间中自动创建ExternalSecret
 
 ```yaml
 apiVersion: "alibabacloud.com/v1alpha1"
@@ -414,25 +606,37 @@ kind: ClusterExternalSecret
 metadata:
   name: cluster-kms
 spec:
-  externalSecretName: kms
-  namespaceSelectors:
-  - matchLabels:
-      kubernetes.io/metadata.name: default
-  - matchExpressions: 
-    - key: kubernetes.io/metadata.name
-      operator: In
-      values:
-      - test
-  rotationInterval: 10s
   externalSecretSpec:
     provider: kms
     data:
-      - key: test-json
-        name: test-json
+      - key: test
+        name: test
         versionId: v1
         secretStoreRef:
           name: alibaba-credentials
           kind: ClusterSecretStore
+  externalSecretName: kms
+  externalSecretMetadata:
+    labels:
+      app: "my-app"
+      team: "backend"
+    annotations:
+      annotation-key1: "annotation-value1"
+      annotation-key2: "annotation-value2"
+  conditions:
+  - namespaceSelector:
+      matchLabels:
+        kubernetes.io/metadata.name: default
+      matchExpressions: 
+      - key: environment
+        operator: In
+        values:
+        - dev
+  - namespaces:
+    - test
+  - namespaceRegexes:
+    - "dev-.*"
+  rotationInterval: 10s
 ```
 
 **ClusterSecretStore**
@@ -484,9 +688,9 @@ spec:
 1. **ExternalSecret**: 命名空间级别资源，用于定义需要同步的凭据基础信息（如凭据名称、版本等）以及指定SecretStore
 2. **ClusterExternalSecret**: 集群级别资源，用于管理和协调多个命名空间下的ExternalSecret，能够在匹配的命名空间中自动创建ExternalSecret
 
-### 跨命名空间访问控制
+### 跨命名空间控制机制
 
-为了增强安全性和灵活性，ack-secret-manager提供了多种跨命名空间访问控制机制：
+为了增强安全性和灵活性，ack-secret-manager提供了多种跨命名空间控制机制：
 
 **ExternalSecret 引用 SecretStore 控制**
 
@@ -499,6 +703,15 @@ spec:
 * 通过 `command.enableCrossNamespaceAuthRef`参数控制SecretStore是否可以跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）
 * 默认值为true，即允许跨命名空间引用
 * 设置为false时，SecretStore只能引用同命名空间的认证资源
+
+**ClusterExternalSecret 匹配命名空间控制**
+
+* ClusterExternalSecret 通过 `spec.conditions` 字段定义命名空间的选择条件，以在符合条件的命名空间中创建 ExternalSecret 资源
+* 支持三种匹配方式，条件之间是或的关系：
+
+  1. namespaceSelector: 使用标签选择器匹配允许访问的命名空间
+  2. namespaces: 明确列出允许访问的命名空间名称列表
+  3. namespaceRegexes: 使用正则表达式匹配允许访问的命名空间名称列表
 
 **ClusterSecretStore 访问控制**
 
@@ -534,7 +747,7 @@ spec:
     - 将认证配置与数据配置分离，提高安全性
 4. 非必要不使用 ClusterExternalSecret，以减少Secrets在不同命名空间中的泄露风险:
 
-    - 如果业务需要在多个命名空间中同步Secrets实例，可以利用 `spec.namespaceSelectors` 精确控制 ExternalSecret 的创建范围
+    - 如果业务需要在多个命名空间中同步Secrets实例，可以利用 `spec.conditions` 精确控制 ExternalSecret 的创建范围
 
 ## CRD 配置介绍
 
@@ -542,12 +755,83 @@ spec:
 
 **spec**
 
-| crd 字段    | 描述                                    | 是否必选 |
-| ----------- | -------------------------------------- | -------- |
-| provider    | 获取 secret 的目标云服务（如 KMS 、OOS等 | 否       |
-| data        | 数据源（目标数据的标识）                 | 否       |
-| dataProcess | 需要进行特殊加工的数据源（目标数据的标识） | 否       |
-| type        | k8s secret 类型（Opaque等）             | 否       |
+| crd 字段         | 描述                                    | 是否必选 |
+| ---------------- | -------------------------------------- | -------- |
+| provider         | 获取 secret 的目标云服务（如 KMS 、OOS等 | 否       |
+| data             | 数据源（目标数据的标识）                 | 否       |
+| dataProcess      | 需要进行特殊加工的数据源（目标数据的标识） | 否       |
+| type             | k8s secret 类型（Opaque等）             | 否       |
+| target           | 定义将要创建的 Kubernetes Secret 的配置  | 否       |
+| rotationInterval | 控制器重新协调对象的时间间隔             | 否       |
+
+**target**
+
+| crd 字段         | 描述                               | 是否必选 | 默认值 |
+| ---------------- | ---------------------------------- | -------- | ------ |
+| name             | 目标 Kubernetes Secret 的名称       | 否       |        |
+| template         | 用于转换密钥数据的模板配置           | 否       |        |
+
+**template**
+
+| crd 字段     | 描述                                | 是否必选 | 默认值 |
+| ------------ | ----------------------------------- | -------- | ------ |
+| data         | 内联模板定义                         | 否       |        |
+| templateFrom | 外部模板引用（ConfigMap/Secret）     | 否       |        |
+| metadata     | Secret 元数据模板（标签/注解）       | 否       |        |
+| type         | 目标 secret 的类型                   | 否       |        |
+| mergePolicy  | 模板结果与原始数据的合并策略          | 否       | Replace|
+
+**metadata**
+
+| crd 字段    | 描述                    | 是否必选 |
+| ----------- | ----------------------- | -------- |
+| annotations | 应用于 secret 的注解     | 否       |
+| labels      | 应用于 secret 的标签     | 否       |
+
+**templateFrom**
+
+| crd 字段   | 描述                                           | 是否必选 | 默认值 |
+| ---------- | ---------------------------------------------- | -------- | ------ |
+| configMap  | 包含模板的 ConfigMap 引用                       | 否       |        |
+| secret     | 包含模板的 Secret 引用                          | 否       |        |
+| literal    | 内联字面量模板字符串                            | 否       |        |
+| target     | 模板结果的目标位置（Data/Annotations/Labels）   | 否       | Data   |
+
+**configMap/secret**
+
+| crd 字段 | 描述                                 | 是否必选 |
+| -------- | ------------------------------------ | -------- |
+| name     | ConfigMap/Secret 资源的名称          | 是       |
+| items    | ConfigMap/Secret 中用作模板的键列表   | 是       |
+
+**items**
+
+| crd 字段    | 描述                        | 是否必选 | 默认值 |
+| ----------- | --------------------------- | -------- | ------ |
+| key         | ConfigMap/Secret 中的键      | 是       |        |
+| templateAs  | 模板键的解释方式             | 否       | Values |
+
+**templateAs**
+
+| 值              | 描述                        |
+| --------------- | --------------------------- |
+| Values          | 仅将模板作为值处理           |
+| KeysAndValues   | 将模板作为键值对处理         |
+
+**templateFrom.target**
+
+| 值              | 描述                             |
+| --------------- | -------------------------------- |
+| Data            | 将模板结果存入 Secret data        | 
+| Annotations     | 将模板结果存入 Secret annotations |
+| Labels          | 将模板结果存入 Secret labels      |
+
+**mergePolicy**
+
+| 值         | 描述                                                                                       |
+| ---------- | ------------------------------------------------------------------------------------------ |
+| Replace    | 完全使用模板字段名（清空现有secret中的字段名）                                                 |
+| Merge      | 将模板字段名与现有secret中的字段名合并, 模板中包含的字段名和现有secret中的字段名相同，以模板值为准 |
 
 **data（无需经过特殊处理的数据源）**
 
@@ -685,13 +969,14 @@ ClusterExternalSecret 是管理和协调多个命名空间下 ExternalSecret 的
 
 **spec**
 
-| crd 字段                  | 描述                                                              | 是否必选 |
-| ------------------------- | -----------------------------------------------------------------| -------- |
-| externalSecretSpec        | 要创建的 ExternalSecret 的规格定义                                 | 是       |
-| externalSecretName	      | 要创建的 ExternalSecret 的名称，默认是 ClusterExternalSecret 的名称 | 否       |
-| externalSecretMetadata    | 要创建的 ExternalSecret 的元数据                                   | 否       |
-| namespaceSelectors        | 用于选择目标命名空间的标签选择器列表                                 | 否       |
-| rotationInterval          | 控制器检查命名空间标签和协调对象的时间间隔                           | 否       |
+| crd 字段               | 描述                                                                                | 是否必选 |
+| ---------------------- | -----------------------------------------------------------------------------------| -------- |
+| externalSecretSpec     | 要创建的 ExternalSecret 的规格定义                                                   | 是       |
+| externalSecretName	   | 要创建的 ExternalSecret 的名称，默认是 ClusterExternalSecret 的名称                   | 否       |
+| externalSecretMetadata | 要创建的 ExternalSecret 的元数据                                                     | 否       |
+| namespaceSelectors     | 使用标签选择器匹配允许访问的命名空间(已废弃)                                           | 否       |
+| conditions             | 用于选择目标命名空间的条件列表，支持 namespaceSelector、namespaces 和 namespaceRegexes | 否       |
+| rotationInterval       | 控制器检查命名空间标签和协调对象的时间间隔                                             | 否       |
 
 **externalSecretMetadata**
 
@@ -701,6 +986,14 @@ externalSecretMetadata 字段允许您自动为 ClusterExternalSecret 创建的 
 | ----------- | ------------------------------| -------- |
 | annotations | 要创建的 ExternalSecret 的注解 | 否       |
 | labels      | 要创建的 ExternalSecret 的标签 | 否       |
+
+**conditions**
+
+| crd 字段          | 描述                                     | 是否必选 |
+| ----------------- | ----------------------------------------| -------- |
+| namespaceSelector | 使用标签选择器匹配允许访问的命名空间        | 是       |
+| namespaces	      | 明确列出允许访问的命名空间名称列表          | 否       |
+| namespaceRegexes	| 使用正则表达式匹配允许访问的命名空间名称列表 | 否       |
 
 ## 安全
 
@@ -723,4 +1016,5 @@ externalSecretMetadata 字段允许您自动为 ClusterExternalSecret 创建的 
 | `0.5.11` | 2025年6月17日  | 支持配置是否在KMS凭据或OOS加密参数同步失败时删除集群secret                                                                                                                 |
 | `0.5.12` | 2025年6月25日  | 支持使用ExternalSecret配置KMS实例维度的endpoint地址对接多KMS实例                                                                                                      |
 | `0.6.0`  | 2025年12月5日  | 1.支持ClusterSecretStore资源<br />2.支持ClusterExternalSecret资源<br />3.支持禁止ExternalSecret跨命名空间引用SecretStore资源<br /> 4.支持SecretStore引用ServiceAccount配置认证信息 |
-
+| `0.6.1`  | 2026年2月28日 | 1.修改ClusterExternalSecret资源命名空间匹配添加<br />2.增加secret和serviceaccount控制器以Reconcile ClusterSecretStore和SecretStore资源<br />3.优化serviceaccount认证时token刷新时间 |
+| `0.6.2`  | 2026年3月2日  | 支持同步外部secret时，使用高级模板解析功能在创建 Kubernetes Secret 之前转换和自定义密钥数据 |
