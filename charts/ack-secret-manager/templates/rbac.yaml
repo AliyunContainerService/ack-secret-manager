@@ -50,8 +50,8 @@ rules:
     resources: [ "clustersecretstores/status" ]
     verbs: [ "get", "update", "patch" ]
   - apiGroups: [ "" ]
-    resources: [ "serviceaccounts/token" ]
-    verbs: [ "create" ]
+    resources: [ serviceaccounts/token ]
+    verbs: [ create ]
 
 ---
 apiVersion: rbac.authorization.k8s.io/v1

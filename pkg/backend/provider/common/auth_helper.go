@@ -170,14 +170,16 @@ func buildServiceAccountRefAuthConfig(
 	// Use configured OIDC Provider ARN, or default value if not configured
 	oidcProviderArn := authProvider.GetOIDCProviderARN()
 	if oidcProviderArn == "" || !utils.IsValidOidcProviderArn(oidcProviderArn) {
-		klog.Warningf("Invalid oidcProviderARN %s defined in SecretStore %s, will use default", oidcProviderArn, authProvider.GetSecretStoreName())
-		// Generate default OIDC Provider ARN based on clusterId and uid
-		uidInt64, err := strconv.ParseInt(uid, 10, 64)
-		if err != nil {
-			klog.Warningf("Failed to parse uid %s as int64, using 0: %v", uid, err)
-			return auth.AuthConfig{}, err
+		if clusterId != "" && uid != "" {
+			klog.Warningf("Invalid oidcProviderARN %s defined in SecretStore %s, will use default", oidcProviderArn, authProvider.GetSecretStoreName())
+			// Generate default OIDC Provider ARN based on clusterId and uid
+			uidInt64, err := strconv.ParseInt(uid, 10, 64)
+			if err != nil {
+				klog.Warningf("Failed to parse uid %s as int64, using 0: %v", uid, err)
+				return auth.AuthConfig{}, err
+			}
+			oidcProviderArn = utils.GenerateDefaultOidcProviderArn(clusterId, uidInt64)
 		}
-		oidcProviderArn = utils.GenerateDefaultOidcProviderArn(clusterId, uidInt64)
 	}
 
 	// Determine token audiences

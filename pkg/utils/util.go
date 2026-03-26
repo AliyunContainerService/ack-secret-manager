@@ -140,6 +140,9 @@ func GetMetaData(resource string) (int, string, error) {
 	if err != nil {
 		return http.StatusInternalServerError, "", err
 	}
+	if resp == nil {
+		return http.StatusInternalServerError, "", fmt.Errorf("response is nil")
+	}
 	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), err
@@ -308,7 +311,6 @@ func GetWaitTimeExponential(retryTimes int) time.Duration {
 func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.ClusterSecretStore, namespaceName string, getClient func(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error) bool {
 	// If no conditions are specified, allow access from all namespaces
 	if len(clusterSecretStore.Spec.Conditions) == 0 {
-		klog.Infof("ClusterSecretStore %s has no conditions, allowing access from namespace %s", clusterSecretStore.Name, namespaceName)
 		return true
 	}
 
@@ -319,9 +321,6 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 		klog.Errorf("Failed to get namespace %s for ClusterSecretStore %s access check: %v", namespaceName, clusterSecretStore.Name, err)
 		return false
 	}
-
-	klog.Infof("Checking access to ClusterSecretStore %s from namespace %s with labels: %v",
-		clusterSecretStore.Name, namespaceName, namespace.Labels)
 
 	// Check each condition
 	for i, condition := range clusterSecretStore.Spec.Conditions {
@@ -336,24 +335,14 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 			}
 
 			if selector.Matches(labels.Set(namespace.Labels)) {
-				klog.Infof("Namespace %s matches namespace selector in condition %d of ClusterSecretStore %s",
-					namespaceName, i, clusterSecretStore.Name)
 				return true
-			} else {
-				klog.Infof("Namespace %s does not match namespace selector in condition %d of ClusterSecretStore %s",
-					namespaceName, i, clusterSecretStore.Name)
 			}
 		}
 
 		// Check namespace name list
 		for _, allowedNamespace := range condition.Namespaces {
 			if allowedNamespace == namespaceName {
-				klog.Infof("Namespace %s found in namespaces list in condition %d of ClusterSecretStore %s",
-					namespaceName, i, clusterSecretStore.Name)
 				return true
-			} else {
-				klog.Infof("Namespace %s does not match namespaces in condition %d of ClusterSecretStore %s",
-					namespaceName, i, clusterSecretStore.Name)
 			}
 		}
 
@@ -367,12 +356,7 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 			}
 
 			if matched {
-				klog.Infof("Namespace %s matches regex %s in condition %d of ClusterSecretStore %s",
-					namespaceName, regex, i, clusterSecretStore.Name)
 				return true
-			} else {
-				klog.Infof("Namespace %s does not match regex %s in condition %d of ClusterSecretStore %s",
-					namespaceName, regex, i, clusterSecretStore.Name)
 			}
 		}
 	}
@@ -382,25 +366,73 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 	return false
 }
 
-// NamespaceMatchesSelectors checks if a namespace matches any of the given label selectors
-func NamespaceMatchesSelectors(namespace corev1.Namespace, selectors []*metav1.LabelSelector) bool {
-	// If no selectors are specified, match all namespaces
-	if len(selectors) == 0 {
+// IsNamespaceAllowedForClusterExternalSecret checks if the given namespace is allowed by the ClusterExternalSecret conditions
+func IsNamespaceAllowedForClusterExternalSecret(ces *v1alpha1.ClusterExternalSecret, namespace corev1.Namespace, getClient func(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error) bool {
+	// Check if there are any legacy NamespaceSelectors and evaluate them first
+	if len(ces.Spec.NamespaceSelectors) > 0 {
+
+		// Check each namespace selector
+		for i, selector := range ces.Spec.NamespaceSelectors {
+			if selector != nil {
+				namespaceSelector, err := metav1.LabelSelectorAsSelector(selector)
+				if err != nil {
+					klog.Errorf("Invalid label selector in ClusterExternalSecret %s namespace selector %d: %v", ces.Name, i, err)
+					continue
+				}
+
+				if namespaceSelector.Matches(labels.Set(namespace.Labels)) {
+					return true
+				}
+			}
+		}
+	}
+
+	// If no conditions are specified, allow all namespaces
+	if len(ces.Spec.Conditions) == 0 {
 		return true
 	}
 
-	for _, selector := range selectors {
-		labelSelector, err := metav1.LabelSelectorAsSelector(selector)
-		if err != nil {
-			klog.Errorf("Invalid label selector: %v", err)
-			continue
+	// Check each condition
+	for i, condition := range ces.Spec.Conditions {
+		klog.Infof("Evaluating condition %d for ClusterExternalSecret %s", i, ces.Name)
+
+		// Check namespace selector
+		if condition.NamespaceSelector != nil {
+			selector, err := metav1.LabelSelectorAsSelector(condition.NamespaceSelector)
+			if err != nil {
+				klog.Errorf("Invalid label selector in ClusterExternalSecret %s condition %d: %v", ces.Name, i, err)
+				continue
+			}
+
+			if selector.Matches(labels.Set(namespace.Labels)) {
+				return true
+			}
 		}
 
-		// Check if namespace matches selector
-		if labelSelector.Matches(labels.Set(namespace.Labels)) {
-			return true
+		// Check namespace name list
+		for _, allowedNamespace := range condition.Namespaces {
+			if allowedNamespace == namespace.Name {
+				return true
+			}
+		}
+
+		// Check namespace regex
+		for j, regex := range condition.NamespaceRegexes {
+			matched, err := regexp.MatchString(regex, namespace.Name)
+			if err != nil {
+				klog.Errorf("Invalid regex %s in ClusterExternalSecret %s condition %d regex %d: %v",
+					regex, ces.Name, i, j, err)
+				continue
+			}
+
+			if matched {
+				return true
+			}
 		}
 	}
+
+	// No matching condition
+	klog.Infof("Namespace %s is not allowed to access ClusterExternalSecret %s", namespace.Name, ces.Name)
 	return false
 }
 

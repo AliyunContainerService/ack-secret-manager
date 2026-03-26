@@ -55,7 +55,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 
 	err := r.Get(r.Ctx, req.NamespacedName, clusterSecretStore)
 	if err != nil {
-		log.Error(err, fmt.Sprintf("could not get ClusterSecretStore '%s'", req.NamespacedName))
+		// Only return error if it's not NotFound - NotFound is normal when resource is deleted
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
 	log.Info("cluster secret store info", "name", req.NamespacedName.String())
@@ -78,12 +78,12 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if !utils.Contains(clusterSecretStore.GetFinalizers(), clusterSecretFinalizer) {
 		if err := r.addFinalizer(log, clusterSecretStore); err != nil {
 			log.Error(err, "failed to add finalizer")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
 		// Re-fetch the clusterSecretStore after updating finalizers
 		if err := r.Get(r.Ctx, req.NamespacedName, clusterSecretStore); err != nil {
 			log.Error(err, "failed to re-fetch ClusterSecretStore after adding finalizer")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
 	}
 
@@ -91,32 +91,52 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	validationErr := r.validateClusterSecretStoreSpec(storeWrapper)
 	if validationErr != nil {
 		log.Error(validationErr, "ClusterSecretStore validation failed")
-		err := r.updateStatusWithError(log, clusterSecretStore, ReasonStoreInvalid, validationErr.Error())
+		err := r.updateStatusWithError(log, clusterSecretStore, v1alpha1.ReasonValidationFailed, validationErr.Error())
 		if err != nil {
 			log.Error(err, "failed to update ClusterSecretStore status")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
-		return ctrl.Result{}, validationErr
+		return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, validationErr
 	}
 
-	// Check if we need to recreate the client
-	needRecreateClient := r.needRecreateClient(clientName, clusterSecretStore.Generation, clusterSecretStore.Status.Conditions, kmsProvider, oosProvider)
+	// Check if we need to recreate the client based on trigger annotation
+	triggerAnnotation := clusterSecretStore.Annotations[TriggerReconcileAnnotation]
+	needRecreateClient := triggerAnnotation != ""
+
+	if !needRecreateClient {
+		// Check if there are other reasons to recreate (like spec changes)
+		needRecreateClient = r.needRecreateClient(clientName, clusterSecretStore.Generation, clusterSecretStore.Status.Conditions, kmsProvider, oosProvider)
+	}
 
 	// Recreate client if needed
 	if needRecreateClient {
 		err := r.recreateClient(ctx, log, clientName, kmsProvider, oosProvider, storeWrapper)
 		if err != nil {
-			updateErr := r.updateStatusWithError(log, clusterSecretStore, "ClientCreationFailed", err.Error())
+			updateErr := r.updateStatusWithError(log, clusterSecretStore, v1alpha1.ReasonClientCreationFailed, err.Error())
 			if updateErr != nil {
 				log.Error(updateErr, "failed to update ClusterSecretStore status with error")
 			}
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
+
+		// Clear the trigger annotation after processing
+		if triggerAnnotation != "" {
+			updatedStore := clusterSecretStore.DeepCopy()
+
+			delete(updatedStore.Annotations, TriggerReconcileAnnotation)
+
+			err = r.Patch(ctx, updatedStore, client.MergeFrom(clusterSecretStore))
+			if err != nil {
+				log.Info("Warning: Failed to update ClusterSecretStore annotation", "error", err)
+				// Don't return error here as it's not critical for functionality
+			}
+		}
+
 		// Update status to indicate readiness
 		err = r.updateStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly)
 		if err != nil {
 			log.Error(err, "failed to update ClusterSecretStore status")
-			return ctrl.Result{}, err
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
 		return ctrl.Result{}, nil
 	}
@@ -126,20 +146,16 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if len(clusterSecretStore.Status.Conditions) == 0 {
 		if statusErr := r.updateStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
 			log.Error(statusErr, "failed to initialize ClusterSecretStore status")
-			return ctrl.Result{}, statusErr
+			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, statusErr
 		}
 		return ctrl.Result{}, nil
 	}
 
 	// Check if we need to update status
 	statusUpdated, err := r.updateStatus(log, clusterSecretStore)
-	if err != nil {
+	if err != nil || !statusUpdated {
 		log.Error(err, "failed to update ClusterSecretStore status")
-		return ctrl.Result{}, err
-	}
-
-	if statusUpdated {
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 	}
 
 	return ctrl.Result{}, nil

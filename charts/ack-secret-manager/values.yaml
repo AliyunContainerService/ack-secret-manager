@@ -82,13 +82,15 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.6.0
+  tag: v0.6.2
   pullPolicy: IfNotPresent
 
 cleanupImage:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager-cleanup
   tag: v0.4.1
   pullPolicy: IfNotPresent
+
+imagePullSecrets: []
 
 nameOverride: ""
 fullnameOverride: ""

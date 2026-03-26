@@ -248,14 +248,17 @@ func (r *ClusterExternalSecretReconciler) reconcileExternalSecrets(logger logr.L
 	return nil
 }
 
-// handleNoMatchingNamespaces handles the case when no namespaces match the selectors
+// handleNoMatchingNamespaces handles the case when no namespaces match the conditions
 func (r *ClusterExternalSecretReconciler) handleNoMatchingNamespaces(logger logr.Logger, ces *api.ClusterExternalSecret) ([]string, []api.ClusterExternalSecretNamespaceFailure) {
 	provisionedNamespaces := make([]string, 0)
 	failedNamespaces := make([]api.ClusterExternalSecretNamespaceFailure, 0)
 
-	if len(ces.Spec.NamespaceSelectors) > 0 {
+	// Check if we have legacy NamespaceSelectors or new Conditions
+	hasSelectors := len(ces.Spec.Conditions) > 0 || len(ces.Spec.NamespaceSelectors) > 0
+
+	if hasSelectors {
 		// Log that no namespaces matched the selectors
-		logger.Info("No namespaces match the provided namespace selectors. Checking all namespaces to provide detailed failure reasons.")
+		logger.Info("No namespaces match the provided selectors. Checking all namespaces to provide detailed failure reasons.")
 
 		// Get all namespaces to check why they don't match
 		allNamespacesList := &corev1.NamespaceList{}
@@ -271,7 +274,7 @@ func (r *ClusterExternalSecretReconciler) handleNoMatchingNamespaces(logger logr
 			hasNamespace := false
 			for _, namespace := range allNamespacesList.Items {
 				hasNamespace = true
-				if !utils.NamespaceMatchesSelectors(namespace, ces.Spec.NamespaceSelectors) {
+				if !utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace, r.Get) {
 					// Namespace doesn't match, add to failed namespaces with reason
 					failedNamespaces = append(failedNamespaces, api.ClusterExternalSecretNamespaceFailure{
 						Namespace: namespace.Name,
@@ -298,7 +301,7 @@ func (r *ClusterExternalSecretReconciler) handleNoMatchingNamespaces(logger logr
 			}
 		}
 	} else {
-		// No namespace selectors specified, should match all namespaces but somehow got empty list
+		// No selectors specified (neither old nor new), should match all namespaces but somehow got empty list
 		failedNamespaces = append(failedNamespaces, api.ClusterExternalSecretNamespaceFailure{
 			Namespace: "",
 			Reason:    "No namespaces found in the cluster when attempting to match all namespaces",
@@ -353,7 +356,7 @@ func (r *ClusterExternalSecretReconciler) handleMatchingNamespaces(logger logr.L
 	return provisionedNamespaces, failedNamespaces
 }
 
-// getMatchingNamespaces returns namespaces that match the ClusterExternalSecret's namespace selectors
+// getMatchingNamespaces returns namespaces that match the ClusterExternalSecret's conditions
 func (r *ClusterExternalSecretReconciler) getMatchingNamespaces(ces *api.ClusterExternalSecret) ([]string, error) {
 	namespaceList := &corev1.NamespaceList{}
 	err := r.List(r.Ctx, namespaceList)
@@ -363,9 +366,9 @@ func (r *ClusterExternalSecretReconciler) getMatchingNamespaces(ces *api.Cluster
 
 	matchingNamespaces := make([]string, 0)
 
-	// Check each namespace against the selectors using shared utility function
+	// Check each namespace against the conditions using new utility function
 	for _, namespace := range namespaceList.Items {
-		if utils.NamespaceMatchesSelectors(namespace, ces.Spec.NamespaceSelectors) {
+		if utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace, r.Get) {
 			matchingNamespaces = append(matchingNamespaces, namespace.Name)
 		}
 	}
@@ -569,16 +572,25 @@ func (r *ClusterExternalSecretReconciler) updateStatusWithReady(logger logr.Logg
 
 // setCondition sets a condition in the ClusterExternalSecret status
 func (r *ClusterExternalSecretReconciler) setCondition(ces *api.ClusterExternalSecret, condition api.ClusterExternalSecretStatusCondition) {
+	now := metav1.Now()
 	// Check if condition already exists
 	for i, c := range ces.Status.Conditions {
 		if c.Type == condition.Type {
-			// Update existing condition
-			ces.Status.Conditions[i] = condition
+			// If condition status is changing, update the transition time
+			if c.Status != condition.Status {
+				condition.LastTransitionTime = now
+				ces.Status.Conditions[i] = condition
+			} else {
+				// Preserve the original transition time if status hasn't changed
+				condition.LastTransitionTime = c.LastTransitionTime
+				ces.Status.Conditions[i] = condition
+			}
 			return
 		}
 	}
 
-	// Add new condition
+	// Add new condition with current time
+	condition.LastTransitionTime = now
 	ces.Status.Conditions = append(ces.Status.Conditions, condition)
 }
 
