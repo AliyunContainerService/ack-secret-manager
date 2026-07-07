@@ -1,0 +1,257 @@
+# ============================================================================
+# Basic Templates (Inline Template)
+# ============================================================================
+#
+# Use inline templates to transform and format credentials fetched from KMS.
+#
+# Common Sprig Functions:
+#   upper / lower    Case conversion        {{ .name | upper }}
+#   trim             Trim whitespace         {{ .value | trim }}
+#   default          Default value           {{ .port | default "8080" }}
+#   quote            Add quotes              {{ .value | quote }}
+#   b64enc / b64dec  Base64 encode/decode    {{ .data | b64enc }}
+#   fromJson         JSON parsing            {{ .data | fromJson }}
+#   toJson           JSON serialization      {{ .data | toJson }}
+#   replace          String replacement      {{ .value | replace "old" "new" }}
+#
+# Custom Functions:
+#   jsonPath     JSON path query         {{ jsonPath .config "database.host" }}
+#   parseKeyValue Key=Value parsing       {{ (parseKeyValue .data).KEY }}
+#   mergeJson    Deep merge JSON          {{ mergeJson .base .override }}
+#   bcrypt       Password hashing         {{ bcrypt "password" }}
+#   toLines      Multi-line split         {{ range toLines .hosts }}
+#
+# Prerequisites:
+#   1. KMS credentials have been created
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+# ============================================================================
+# Basic Data Transformation
+# ============================================================================
+
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: basic-template-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: database-credentials
+      name: credentials
+  target:
+    template:
+      data:
+        # Basic string processing
+        username_upper: "{{ .credentials.username | upper }}"
+        email_normalized: "{{ .credentials.email | lower | trim }}"
+
+        # Conditional logic
+        is_admin: |
+          {{ if eq .credentials.role "admin" }}true{{ else }}false{{ end }}
+
+        # Default value handling
+        timeout: "{{ .credentials.timeout | default \"30\" }}"
+
+        # JSON formatting
+        user_profile: |
+          {
+            "username": "{{ .credentials.username }}",
+            "email": "{{ .credentials.email }}",
+            "role": "{{ .credentials.role }}"
+          }
+
+# ============================================================================
+# Database Connection String Generation
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: connection-string-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: db-host
+      name: host
+    - key: db-port
+      name: port
+    - key: db-name
+      name: database
+    - key: db-user
+      name: username
+    - key: db-password
+      name: password
+  target:
+    template:
+      data:
+        # PostgreSQL connection string
+        postgres_url: |
+          postgresql://{{ .username }}:{{ .password }}@{{ .host }}:{{ .port }}/{{ .database }}
+
+        # MySQL connection string
+        mysql_url: |
+          mysql://{{ .username }}:{{ .password }}@tcp({{ .host }}:{{ .port }})/{{ .database }}
+
+# ============================================================================
+# Using jsonPath to Access Nested JSON
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: json-path-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: database-config
+      name: db_config
+  target:
+    template:
+      data:
+        # Use jsonPath to access nested fields
+        db_host: "{{ jsonPath .db_config \"host\" }}"
+        db_port: "{{ jsonPath .db_config \"port\" }}"
+        db_user: "{{ jsonPath .db_config \"credentials.username\" }}"
+
+# ============================================================================
+# Password Hashing and Auth File Generation (bcrypt / htpasswd)
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: auth-hash-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: app-password
+      name: password
+    - key: admin-password
+      name: admin_pwd
+  target:
+    template:
+      data:
+        # bcrypt password hash (default cost 10)
+        hashed_password: "{{ bcrypt .password }}"
+        # bcrypt with custom cost (cost 12)
+        hashed_password_strong: "{{ bcrypt .password 12 }}"
+        # htpasswd format (for HTTP basic authentication)
+        htpasswd_entry: "{{ htpasswd \"admin\" .admin_pwd }}"
+
+# ============================================================================
+# JSON Deep Merge (mergeJson)
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: merge-json-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: base-config
+      name: base
+    - key: override-config
+      name: override
+  target:
+    template:
+      data:
+        # Deep merge two JSON objects; fields in override override same-named fields in base
+        # mergeJson already returns a JSON string, no need to pipe to toJson
+        merged_config: "{{ mergeJson .base .override }}"
+
+# ============================================================================
+# Key=Value Parsing (parseKeyValue)
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: parse-keyvalue-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: env-config
+      name: env_data
+  target:
+    template:
+      data:
+        # Parse "KEY1=value1\nKEY2=value2" format into a map, access via .key
+        # Example env_data content in KMS: DATABASE_URL=postgresql://localhost\nREDIS_URL=redis://localhost
+        database_url: "{{ (parseKeyValue .env_data).DATABASE_URL }}"
+        redis_url: "{{ (parseKeyValue .env_data).REDIS_URL }}"
+
+# ============================================================================
+# Multi-Line Split (toLines)
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: tolines-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: host-list
+      name: hosts
+  target:
+    template:
+      data:
+        # toLines: Split a multi-line string into an array, pipe to toJson to generate a JSON array
+        # Example hosts content in KMS: host1.example.com\nhost2.example.com\nhost3.example.com
+        host_array: "{{ toLines .hosts | toJson }}"
+
+# ============================================================================
+# Target Location Demo (metadata.annotations / metadata.labels)
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: target-locations-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: app-version
+      name: version
+  target:
+    template:
+      # Store in Secret data (default)
+      data:
+        version: "{{ .version }}"
+      # Store in annotations and labels via metadata
+      metadata:
+        annotations:
+          app.kubernetes.io/version: "{{ .version }}"
+        labels:
+          app.kubernetes.io/managed-by: "ack-secret-manager"
+
+# ============================================================================
+# Verification:
+#
+# 1. Check the generated Secret:
+#    kubectl get secret basic-template-example -n production -o yaml
+#
+# 2. Check template-processed values:
+#    kubectl get secret basic-template-example -n production -o jsonpath='{.data}' | jq .
+#
+# 3. Check annotations and labels:
+#    kubectl get secret target-locations-template -n production -o yaml
+# ============================================================================

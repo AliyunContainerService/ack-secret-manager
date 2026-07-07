@@ -1,0 +1,135 @@
+# ============================================================================
+# JMESPath JSON/YAML Credential Parsing
+# ============================================================================
+#
+# Use the JMESPath query language to parse JSON-formatted KMS credentials and extract specific fields.
+#
+# Prerequisites:
+#   1. JSON-formatted credentials stored in KMS, e.g.:
+#      {"name":"tom","age":"14","friends":[{"name":"lily"},{"name":"edf"}]}
+#
+#      # Create KMS credentials (via console or CLI):
+#      aliyun kms CreateSecret --SecretName test1 --SecretData \
+#        '{"name":"tom","age":"14","friends":[{"name":"lily"},{"name":"edf"}]}' \
+#        --VersionId v1 --EncryptionKeyId <key-id>
+#
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: es-json-demo
+  namespace: default
+spec:
+  provider: kms
+  data:
+    - key: test1
+      name: test1
+      versionId: v1
+      kmsEndpoint: kms.cn-hangzhou.aliyuncs.com
+      secretStoreRef:
+        name: scdemo
+        namespace: default
+      jmesPath:
+        - path: "name"
+          objectAlias: "name"
+        - path: "friends[0].name"
+          objectAlias: "friendname"
+
+# ============================================================================
+# Verification:
+#
+# 1. Check the generated Secret:
+#    kubectl get secret es-json-demo -o yaml
+#
+# 2. Expected result:
+#    data:
+#      friendname: bGlsaQ==  # "lili" (base64)
+#      name: dG9t             # "tom" (base64)
+#
+# jmesPath field description:
+#   path:        Parse specific fields based on JMESPath specification (required)
+#   objectAlias: Key name to sync the extracted field into the K8s Secret (required)
+#
+# Common JMESPath expressions:
+#   name                  -> Basic field access
+#   friends[0].name       -> Array index
+#   friends[*].name       -> Array iteration
+#   friends[0] | name     -> Pipe expression
+#   a.b.c.d              -> Nested access
+#
+# Notes:
+#
+# - Both path and objectAlias must be specified
+# - path follows the JMESPath specification (https://jmespath.org/specification.html)
+# - objectAlias is the key name stored in the K8s Secret
+# - Only KMS provider supports jmesPath; OOS provider does not support it
+# ============================================================================
+
+# ============================================================================
+# dataProcess.extract — Automatic JSON/YAML Credential Parsing
+# ============================================================================
+#
+# Use case:
+#   When the JSON structure of a KMS credential is unknown and you need to parse it entirely into key-value pairs.
+#   Key names can be replaced using replaceRule regex.
+#
+# Prerequisites:
+#   1. JSON-formatted credentials stored in KMS, e.g.:
+#      {"name":"tom","age":"14","friends":[{"name":"lily"},{"name":"edf"}]}
+#
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: extract-secret
+  namespace: default
+spec:
+  provider: kms
+  dataProcess:
+    - extract:
+        key: test1
+        name: extract
+        versionId: v1
+        kmsEndpoint: kms.cn-hangzhou.aliyuncs.com
+        secretStoreRef:
+          name: scdemo
+          namespace: default
+      replaceRule:
+        - source: "^n.*e$"   # Replace keys starting with 'n' and ending with 'e' to 'alibabacloud'
+          target: "alibabacloud"
+        - source: "^f.*s$"   # Replace keys starting with 'f' and ending with 's' to 'ack'
+          target: "ack"
+
+# ============================================================================
+# Verification:
+#
+# 1. Check the generated Secret:
+#    kubectl get secret extract-secret -o yaml
+#
+# 2. Expected result (JSON credential flattened into 3 keys, with replaceRule applied):
+#    data:
+#      alibabacloud: InRvbSI=        # "tom" (original key "name" matches ^n.*e$)
+#      age: IjE0Ig==                  # "14" (no matching rule, original key preserved)
+#      ack: W3sibmFtZSI...           # friends array (original key "friends" matches ^f.*s$)
+#
+# dataProcess.extract field description:
+#   extract.key:            KMS credential name
+#   extract.name:           ExternalSecret name
+#   extract.versionId:      KMS credential version (optional)
+#   extract.kmsEndpoint:    KMS service endpoint (optional)
+#   extract.secretStoreRef: SecretStore reference (optional)
+#   replaceRule[].source:   Regular expression to match keys to replace
+#   replaceRule[].target:   Replacement key name
+#
+# Notes:
+#
+# - extract automatically flattens JSON structures into key-value pairs
+# - replaceRule uses regex matching; source uses Go regular expression syntax
+# - Keys not matching any replaceRule preserve their original names
+# - Only KMS provider supports dataProcess; OOS provider does not support it
+# ============================================================================

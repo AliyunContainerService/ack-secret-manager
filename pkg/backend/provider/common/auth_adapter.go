@@ -14,70 +14,70 @@ func (a *KMSAuthAdapter) GetServiceAccountRef() *v1alpha1.ServiceAccountRef {
 	if a.KMSAuth == nil {
 		return nil
 	}
-	return a.KMSAuth.ServiceAccountRef
+	return a.ServiceAccountRef
 }
 
 func (a *KMSAuthAdapter) GetAccessKey() *v1alpha1.SecretRef {
 	if a.KMSAuth == nil {
 		return nil
 	}
-	return a.KMSAuth.AccessKey
+	return a.AccessKey
 }
 
 func (a *KMSAuthAdapter) GetAccessKeySecret() *v1alpha1.SecretRef {
 	if a.KMSAuth == nil {
 		return nil
 	}
-	return a.KMSAuth.AccessKeySecret
+	return a.AccessKeySecret
 }
 
 func (a *KMSAuthAdapter) GetRAMRoleARN() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.RAMRoleARN
+	return a.RAMRoleARN
 }
 
 func (a *KMSAuthAdapter) GetRAMRoleSessionName() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.RAMRoleSessionName
+	return a.RAMRoleSessionName
 }
 
 func (a *KMSAuthAdapter) GetOIDCProviderARN() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.OIDCProviderARN
+	return a.OIDCProviderARN
 }
 
 func (a *KMSAuthAdapter) GetOIDCTokenFilePath() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.OIDCTokenFilePath
+	return a.OIDCTokenFilePath
 }
 
 func (a *KMSAuthAdapter) GetRoleSessionExpiration() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.RoleSessionExpiration
+	return a.RoleSessionExpiration
 }
 
 func (a *KMSAuthAdapter) GetRemoteRAMRoleARN() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.RemoteRAMRoleARN
+	return a.RemoteRAMRoleARN
 }
 
 func (a *KMSAuthAdapter) GetRemoteRAMRoleSessionName() string {
 	if a.KMSAuth == nil {
 		return ""
 	}
-	return a.KMSAuth.RemoteRAMRoleSessionName
+	return a.RemoteRAMRoleSessionName
 }
 
 func (a *KMSAuthAdapter) GetSecretStoreName() string {
@@ -94,70 +94,70 @@ func (a *OOSAuthAdapter) GetServiceAccountRef() *v1alpha1.ServiceAccountRef {
 	if a.OOSAuth == nil {
 		return nil
 	}
-	return a.OOSAuth.ServiceAccountRef
+	return a.ServiceAccountRef
 }
 
 func (a *OOSAuthAdapter) GetAccessKey() *v1alpha1.SecretRef {
 	if a.OOSAuth == nil {
 		return nil
 	}
-	return a.OOSAuth.AccessKey
+	return a.AccessKey
 }
 
 func (a *OOSAuthAdapter) GetAccessKeySecret() *v1alpha1.SecretRef {
 	if a.OOSAuth == nil {
 		return nil
 	}
-	return a.OOSAuth.AccessKeySecret
+	return a.AccessKeySecret
 }
 
 func (a *OOSAuthAdapter) GetRAMRoleARN() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.RAMRoleARN
+	return a.RAMRoleARN
 }
 
 func (a *OOSAuthAdapter) GetRAMRoleSessionName() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.RAMRoleSessionName
+	return a.RAMRoleSessionName
 }
 
 func (a *OOSAuthAdapter) GetOIDCProviderARN() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.OIDCProviderARN
+	return a.OIDCProviderARN
 }
 
 func (a *OOSAuthAdapter) GetOIDCTokenFilePath() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.OIDCTokenFilePath
+	return a.OIDCTokenFilePath
 }
 
 func (a *OOSAuthAdapter) GetRoleSessionExpiration() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.RoleSessionExpiration
+	return a.RoleSessionExpiration
 }
 
 func (a *OOSAuthAdapter) GetRemoteRAMRoleARN() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.RemoteRAMRoleARN
+	return a.RemoteRAMRoleARN
 }
 
 func (a *OOSAuthAdapter) GetRemoteRAMRoleSessionName() string {
 	if a.OOSAuth == nil {
 		return ""
 	}
-	return a.OOSAuth.RemoteRAMRoleSessionName
+	return a.RemoteRAMRoleSessionName
 }
 
 func (a *OOSAuthAdapter) GetSecretStoreName() string {

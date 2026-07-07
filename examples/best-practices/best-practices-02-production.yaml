@@ -1,0 +1,201 @@
+# ============================================================================
+# Production Environment Configuration
+# ============================================================================
+#
+# Complete configuration example for production environments, including security best practices, high-availability configuration, and monitoring recommendations.
+#
+# Security Checklist:
+#   Authentication:        ServiceAccount RRSA (recommended)
+#   RAM Role Permissions:  Least privilege, restricted Resource scope
+#   rotationInterval:      >= 30s
+#   ClusterSecretStore:    Configure conditions for access control
+#   AK Hardcoding:         Avoid
+#   enableWorkerRole:      Configure as needed
+#   enableCrossNamespace*: false (least privilege, enable as needed)
+#   Log Level:             2-4
+#   Monitoring & Alerts:   Configure ExternalSecret status monitoring
+#
+# Prerequisites:
+#   1. RRSA enabled on the cluster:
+#      ack-ram-tool rrsa enable -c <clusterId>
+#
+#   2. Create namespace:
+#      kubectl create namespace production
+#
+#   3. Create RAM Role and grant permissions:
+#
+#      aliyun ram CreateRole --RoleName prod-kms-role --AssumeRolePolicyDocument '{
+#        "Statement": [{
+#          "Action": "sts:AssumeRole",
+#          "Effect": "Allow",
+#          "Principal": {"Federated": "acs:ram::<accountId>:oidc-provider/ack-rrsa-<clusterId>"},
+#          "Condition": {"StringEquals": {
+#            "oidc:sub": ["system:serviceaccount:production:prod-kms-sa"]
+#          }}
+#        }], "Version": "1"
+#      }'
+#
+#      aliyun ram CreatePolicy --PolicyName prod-kms --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{"Effect": "Allow", "Action": ["kms:GetSecretValue", "kms:DescribeSecret"],
+#          "Resource": ["acs:kms:cn-hangzhou:<accountId>:secret/prod-*"]}]
+#      }'
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName prod-kms --RoleName prod-kms-role
+#
+#   4. KMS credentials have been created
+#   5. ack-secret-manager has been deployed (see Helm values configuration below)
+#
+# ============================================================================
+
+# ============================================================================
+# 1. ServiceAccount RRSA Authentication (Recommended)
+# ============================================================================
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prod-kms-sa
+  namespace: production
+  annotations:
+    ack.alibabacloud.com/role-arn: "acs:ram::<accountId>:role/prod-kms-role"
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: prod-kms-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      serviceAccountRef:
+        name: prod-kms-sa
+
+# ============================================================================
+# 2. ClusterSecretStore + Conditions Access Control (Global Sharing Scenario)
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ClusterSecretStore
+metadata:
+  name: prod-global-store
+spec:
+  conditions:
+    - namespaces:
+        - production
+        - staging
+    - namespaceSelector:
+        matchLabels:
+          environment: production
+
+  KMS:
+    KMSAuth:
+      serviceAccountRef:
+        name: prod-kms-sa
+        namespace: production
+
+# ============================================================================
+# 3. Reasonable rotationInterval (recommended >= 30s)
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: prod-secret
+  namespace: production
+spec:
+  provider: kms
+  rotationInterval: 60s  # Recommended sync interval >= 30s
+  # kmsEndpoint: kms-vpc.cn-hangzhou.aliyuncs.com  # Optional: specify VPC endpoint
+  data:
+    - key: prod-db-password
+      name: db-password
+      versionId: v1
+      secretStoreRef:
+        name: prod-global-store
+        kind: ClusterSecretStore
+
+# ============================================================================
+# 4. ClusterExternalSecret Automatic Synchronization
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ClusterExternalSecret
+metadata:
+  name: prod-global-secret
+spec:
+  externalSecretSpec:
+    provider: kms
+    rotationInterval: 60s
+    data:
+      - key: prod-db-password
+        name: db-password
+        versionId: v1
+        secretStoreRef:
+          name: prod-global-store
+          kind: ClusterSecretStore
+
+  externalSecretName: app-credentials
+  externalSecretMetadata:
+    labels:
+      managed-by: ack-secret-manager
+      environment: production
+
+  conditions:
+    - namespaceSelector:
+        matchLabels:
+          environment: production
+
+  rotationInterval: 5m
+
+# ============================================================================
+# 5. Helm Values Production Configuration
+# ============================================================================
+#
+# values.yaml:
+#   command:
+#     enableWorkerRole: false  # Recommended to disable WorkerRole in production
+#     enableCrossNamespaceSecretStore: false  # Disable cross-namespace SecretStore references (least privilege)
+#     enableCrossNamespaceAuthRef: false      # Disable cross-namespace auth resource references (least privilege)
+#   maxConcurrentKmsSecretPulls: 10  # Concurrent pull count
+#   v: 2  # Log level (recommended 2-4 for production)
+#
+# Notes:
+#   - When set to false, SecretStore can only reference ServiceAccounts/Secrets in the same namespace
+#   - ClusterSecretStore is not affected by enableCrossNamespaceAuthRef; its serviceAccountRef.namespace can always point to any namespace
+#   - To enable cross-namespace SecretStore references, separately enable enableCrossNamespaceSecretStore: true
+#
+# Install command:
+#   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+
+# ============================================================================
+# Verification:
+#
+# 1. Check all ExternalSecret statuses:
+#    kubectl get externalsecret -A
+#
+# 2. Check ExternalSecrets with sync failures:
+#    kubectl get externalsecret -A -o json | \
+#      jq '.items[] | select(.status.dataSyncResults[].status == "failed") | .metadata.name'
+#
+# 3. Check controller logs:
+#    kubectl logs -l app=ack-secret-manager --tail=100
+#
+# 4. Check SecretStore statuses:
+#    kubectl get secretstore -A
+#    kubectl get clustersecretstore
+#
+# Security Recommendations:
+#
+# - Use ServiceAccount RRSA authentication (ServiceAccount-level permission isolation)
+# - RAM Roles should follow the principle of least privilege, restricting Resource scope
+# - rotationInterval >= 30s to avoid frequent API calls
+# - Always configure conditions on ClusterSecretStore to restrict access scope
+# - In production, set enableCrossNamespaceSecretStore and enableCrossNamespaceAuthRef to false
+# - Avoid using plain AK authentication
+# - Regularly audit RAM Role permissions and ExternalSecret statuses
+# ============================================================================

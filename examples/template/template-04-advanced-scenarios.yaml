@@ -1,0 +1,146 @@
+# ============================================================================
+# Advanced Scenario Examples
+# ============================================================================
+#
+# Demonstrates comprehensive applications of template features in real production scenarios, including multi-credential composition, TLS certificate management, multi-environment configuration, etc.
+#
+# Features Involved:
+#   - jsonPath nested JSON access
+#   - Conditional logic and Sprig functions
+#   - templateFrom + KeysAndValues
+#   - Secret type specification (e.g., kubernetes.io/tls)
+#
+# Prerequisites:
+#   1. KMS credentials have been created
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+# ============================================================================
+# Scenario 1: Microservice Configuration Generation (Multi-Credential Composition + Conditional Logic + jsonPath)
+# ============================================================================
+
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: microservice-config-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: service-metadata
+      name: service
+    - key: environment-config
+      name: environment
+    - key: database-creds
+      name: db
+    - key: redis-config
+      name: redis
+  target:
+    template:
+      data:
+        # Extract fields from nested JSON using jsonPath
+        SERVICE_NAME: "{{ jsonPath .service \"name\" }}"
+        SERVICE_VERSION: "{{ jsonPath .service \"version\" }}"
+
+        # Conditional logic: generate different configurations based on environment
+        ENVIRONMENT: "{{ .environment | upper }}"
+        DEBUG: "{{ if eq .environment \"dev\" }}true{{ else }}false{{ end }}"
+
+        # Database connection string (concatenated from nested JSON)
+        DATABASE_URL: "postgresql://{{ jsonPath .db \"user\" }}:{{ jsonPath .db \"password\" }}@{{ jsonPath .db \"host\" }}:{{ jsonPath .db \"port\" }}/{{ jsonPath .db \"name\" }}"
+
+        # Redis connection string (with default value)
+        REDIS_URL: "redis://{{ jsonPath .redis \"host\" }}:{{ jsonPath .redis \"port\" }}/{{ jsonPath .redis \"db\" | default \"0\" }}"
+
+        # Log configuration (with default value)
+        LOG_LEVEL: "{{ jsonPath .service \"logLevel\" | default \"info\" }}"
+
+# ============================================================================
+# Scenario 2: TLS Certificate and Key Handling
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: tls-certificate-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: tls-private-key
+      name: private_key
+    - key: tls-certificate
+      name: certificate
+    - key: ca-bundle
+      name: ca_bundle
+  target:
+    template:
+      type: kubernetes.io/tls
+      data:
+        # Standard TLS Secret fields
+        tls.crt: "{{ .certificate }}"
+        tls.key: "{{ .private_key }}"
+        # CA certificate
+        ca.crt: "{{ .ca_bundle }}"
+
+# ============================================================================
+# Scenario 3: Multi-Environment Configuration Management (templateFrom + Conditional Logic + KeysAndValues)
+# ============================================================================
+
+# Step 1: Create environment template ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: env-templates
+  namespace: production
+data:
+  app-config: |
+    APP_NAME={{ .app_name }}
+    APP_ENV={{ .environment | upper }}
+    APP_DEBUG={{ if eq .environment "dev" }}true{{ else }}false{{ end }}
+    LOG_LEVEL={{ if eq .environment "prod" }}error{{ else if eq .environment "staging" }}warn{{ else }}debug{{ end }}
+    DB_HOST={{ jsonPath .db_config "host" }}
+    DB_PORT={{ jsonPath .db_config "port" | default "5432" }}
+
+---
+# Step 2: Create ExternalSecret referencing the template
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: multi-env-config-template
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: app-name
+      name: app_name
+    - key: current-env
+      name: environment
+    - key: db-config
+      name: db_config
+  target:
+    template:
+      templateFrom:
+        - configMap:
+            name: env-templates
+            items:
+              - key: app-config
+                templateAs: KeysAndValues
+          target: Data
+
+# ============================================================================
+# Verification:
+#
+# 1. Microservice configuration:
+#    kubectl get secret microservice-config-template -n production -o jsonpath='{.data}' | jq .
+#
+# 2. TLS certificate:
+#    kubectl get secret tls-certificate-template -n production -o yaml
+#    # Confirm type is kubernetes.io/tls, contains tls.crt, tls.key, ca.crt
+#
+# 3. Multi-environment configuration:
+#    kubectl get secret multi-env-config-template -n production -o jsonpath='{.data}' | jq .
+#    # Confirm APP_NAME, APP_ENV, DEBUG, LOG_LEVEL, DB_HOST, DB_PORT keys exist
+# ============================================================================

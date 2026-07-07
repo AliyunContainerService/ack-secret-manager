@@ -66,7 +66,11 @@ func (p *Provider) GetUid() string {
 	return p.uid
 }
 
-func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
+// NewClient creates a new OOS client.
+// NOTE: The endpoint parameter is accepted to satisfy the Provider interface,
+// but OOS currently does NOT support custom endpoints. The default OOS VPC endpoint
+// (oos-vpc.<region>.aliyuncs.com) is always used. Custom endpoint support may be added in the future.
+func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (backend.SecretClient, error) {
 	var authProvider commonp.AuthConfigProvider
 	if store.Spec.OOS != nil && store.Spec.OOS.OOS != nil {
 		authProvider = &commonp.OOSAuthAdapter{OOSAuth: store.Spec.OOS.OOS}
@@ -80,7 +84,9 @@ func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, k
 	return p.newClientWithAuth(authConfig.ClientName, authConfig)
 }
 
-func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
+// NewClientByENV creates a new OOS client using environment variable credentials.
+// NOTE: The endpoint parameter is accepted but not used — see NewClient for details.
+func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error) {
 	authEnvs := commonp.BuildAuthConfigFromEnv()
 
 	return p.newClientWithAuth(backend.EnvClient, authEnvs)
@@ -91,8 +97,8 @@ func (p *Provider) newClientWithAuth(clientName string, authConfig auth.AuthConf
 
 	//get ram auth credential
 	cred, err := authConfig.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock:     p.Manager.RamLock,
-		RamProvider: p.Manager.RamProvider,
+		RamLock:     p.RamLock,
+		RamProvider: p.RamProvider,
 	})
 	if err != nil {
 		return nil, err

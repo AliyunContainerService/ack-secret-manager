@@ -151,7 +151,7 @@ func (r *ClusterExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, rec
 func (r *ClusterExternalSecretReconciler) addFinalizer(logger logr.Logger, ces *api.ClusterExternalSecret) error {
 	logger.Info("Adding Finalizer for the ClusterExternalSecret", "name", ces.Name)
 	ces.SetFinalizers(append(ces.GetFinalizers(), clusterExternalSecretFinalizer))
-	err := r.Client.Update(context.TODO(), ces)
+	err := r.Update(context.TODO(), ces)
 	if err != nil {
 		logger.Error(err, "Failed to update ClusterExternalSecret with finalizer", "name", ces.Name)
 		return err

@@ -1,0 +1,120 @@
+# ============================================================================
+# mergePolicy Usage
+# ============================================================================
+#
+# Control the merge strategy between template results and original data.
+#
+# mergePolicy Comparison:
+#   Feature        Replace (default)        Merge
+#   Original data  Cleared                  Preserved
+#   Template data  Completely replaces      Overrides same-name keys, adds new keys
+#   Use Case       Only need template output Need to preserve some original data
+#
+# Processing Flow:
+#   Replace: Original data -> Execute template -> Template results completely replace -> Final Secret
+#   Merge:   Original data -> Execute template -> Merge (original + template override/add) -> Final Secret
+#
+# Prerequisites:
+#   1. KMS credentials have been created
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+# ============================================================================
+# Example 1: Replace Mode (default)
+# Template data completely replaces original data; original data is cleared
+# ============================================================================
+
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: merge-replace-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: db-password
+      name: password
+    - key: db-host
+      name: host
+  target:
+    template:
+      mergePolicy: Replace  # Default value, can be omitted
+      data:
+        # Only keys defined here will appear in the final Secret
+        DATABASE_URL: "postgresql://{{ .host }}:5432/mydb"
+
+# ============================================================================
+# Example 2: Merge Mode
+# Preserves original data; template results override same-name keys
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: merge-merge-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: db-password
+      name: password
+    - key: db-host
+      name: host
+    - key: db-port
+      name: port
+  target:
+    template:
+      mergePolicy: Merge  # Merge mode
+      data:
+        # Override host value
+        host: "{{ .host | upper }}"
+        # Add a new key
+        connection_string: "postgresql://{{ .host }}:{{ .port }}/mydb"
+  # Result: Secret contains password (original), host (overridden by template), port (original), connection_string (added by template)
+
+# ============================================================================
+# Example 3: Used with templateFrom
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: merge-template-from-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: db-credentials
+      name: credentials
+  target:
+    template:
+      mergePolicy: Merge
+      templateFrom:
+        - configMap:
+            name: db-format-template
+            items:
+              - key: format
+                templateAs: Values
+          target: Data
+
+# ============================================================================
+# Verification:
+#
+# 1. Check the Secret in Replace mode:
+#    kubectl get secret merge-replace-example -n production -o yaml
+#    # Confirm only DATABASE_URL key exists
+#
+# 2. Check the Secret in Merge mode:
+#    kubectl get secret merge-merge-example -n production -o yaml
+#    # Confirm password, host (overridden), port, connection_string keys exist
+#
+# Notes:
+#
+# - mergePolicy default value is Replace
+# - In Replace mode, all keys in original data are cleared
+# - In Merge mode, when template keys have the same name as original data, template values take precedence
+# - In Merge mode, original data keys not included in the template are preserved
+# ============================================================================

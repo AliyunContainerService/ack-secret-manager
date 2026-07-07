@@ -67,7 +67,7 @@ func NewProviderClientByENV() error {
 			errs = append(errs, err)
 			return true
 		}
-		secretClient, err := provider.NewClientByENV()
+		secretClient, err := provider.NewClientByENV("")
 		if err != nil {
 			errs = append(errs, fmt.Errorf("%v new client by env error %v", k, err))
 			return true
@@ -84,9 +84,12 @@ func NewProviderClientByENV() error {
 type Provider interface {
 	ClientManager
 	// NewClient constructs secrets client by secret store
-	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (SecretClient, error)
+	// endpoint specifies a custom service endpoint (e.g., KMS VPC endpoint).
+	// Pass empty string to use the provider's default endpoint.
+	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (SecretClient, error)
 	// NewClientByENV constructs secrets client by environment variable
-	NewClientByENV() (SecretClient, error)
+	// endpoint specifies a custom service endpoint. Pass empty string to use default.
+	NewClientByENV(endpoint string) (SecretClient, error)
 	GetName() string
 	GetRegion() string
 	GetEndpoint() string

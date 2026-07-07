@@ -143,7 +143,7 @@ func GetMetaData(resource string) (int, string, error) {
 	if resp == nil {
 		return http.StatusInternalServerError, "", fmt.Errorf("response is nil")
 	}
-	defer resp.Body.Close()
+	defer func() { _ = resp.Body.Close() }()
 	body, err := io.ReadAll(resp.Body)
 	return resp.StatusCode, string(body), err
 }

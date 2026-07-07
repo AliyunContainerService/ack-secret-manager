@@ -137,8 +137,8 @@ func (r *ExternalSecretReconciler) isNamespaceTerminating(namespace string) (boo
 
 // AddFinalizerIfNotPresent will check if finalizerName is the finalizers slice
 func (r *ExternalSecretReconciler) AddFinalizerIfNotPresent(externalSec *api.ExternalSecret, finalizerName string) error {
-	if !utils.Contains(externalSec.ObjectMeta.Finalizers, finalizerName) {
-		externalSec.ObjectMeta.Finalizers = append(externalSec.ObjectMeta.Finalizers, finalizerName)
+	if !utils.Contains(externalSec.Finalizers, finalizerName) {
+		externalSec.Finalizers = append(externalSec.Finalizers, finalizerName)
 		return r.Update(r.Ctx, externalSec)
 	}
 	return nil
@@ -301,7 +301,7 @@ func (r *ExternalSecretReconciler) addFinalizer(logger logr.Logger, es *api.Exte
 	logger.Info("Adding Finalizer for the externalsecret", "name", es.Name)
 	es.SetFinalizers(append(es.GetFinalizers(), secretFinalizer))
 	//update external secret instance
-	err := r.Client.Update(context.Background(), es)
+	err := r.Update(context.Background(), es)
 	if err != nil {
 		logger.Error(err, "Failed to update externalsecret with finalizer", "name", es.Name)
 		return err
@@ -351,7 +351,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 		klog.Infof("client name %v,data key %v", clientName, data.Key)
 
 		// get or create client
-		secretClient, err := r.getOrCreateClient(provider, clientName, secretStoreRef, externalSecretNamespace)
+		secretClient, clientKey, err := r.getOrCreateClient(provider, clientName, secretStoreRef, externalSecretNamespace, data.KmsEndpoint)
 		if err != nil {
 			errorsMap[data.Key] = err
 			continue
@@ -360,7 +360,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(provider backend.Provider, 
 		// Get the secret with version information
 		singleMap, err := secretClient.GetExternalSecret(&data, r.Client)
 		if err != nil {
-			errorsMap[data.Key] = fmt.Errorf("client %v get data error %v", clientName, err)
+			errorsMap[data.Key] = fmt.Errorf("client %v get data error %v", clientKey, err)
 			continue
 		}
 
@@ -415,7 +415,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 		klog.Infof("client name %v,data key %v", clientName, data.Extract.Key)
 
 		// get or create client
-		secretClient, err := r.getOrCreateClient(provider, clientName, secretStoreRef, externalSecretNamespace)
+		secretClient, clientKey, err := r.getOrCreateClient(provider, clientName, secretStoreRef, externalSecretNamespace, data.Extract.KmsEndpoint)
 		if err != nil {
 			errorsMap[data.Extract.Key] = err
 			continue
@@ -424,7 +424,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 		// Get the secret with version information
 		singleMap, err := secretClient.GetExternalSecretWithExtract(&data, r.Client)
 		if err != nil {
-			errorsMap[data.Extract.Key] = fmt.Errorf("client %s get data failed: %v", clientName, err)
+			errorsMap[data.Extract.Key] = fmt.Errorf("client %s get data failed: %v", clientKey, err)
 			continue
 		}
 
@@ -459,85 +459,124 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(provider backend
 }
 
 // getOrCreateClient get or create secret client
-func (r *ExternalSecretReconciler) getOrCreateClient(provider backend.Provider, clientName string, secretStoreRef *api.SecretStoreRef, externalSecretNamespace string) (backend.SecretClient, error) {
-	secretClient, err := provider.GetClient(clientName)
-	if err != nil {
-		//err, "get client error,client name", clientName
-		klog.Errorf("client %v get client error %v", clientName, err)
-		store, err := r.getSecretStore(secretStoreRef, externalSecretNamespace)
-		if err != nil {
-			return nil, fmt.Errorf("get client %s failed: %v", clientName, err)
-		}
-
-		// Create kubernetes.Interface from rest.Config for dynamic token acquisition
-		var kubeClient kubernetes.Interface
-		if r.RestConfig != nil {
-			kubeClient, err = kubernetes.NewForConfig(r.RestConfig)
-			if err != nil {
-				klog.Errorf("Failed to create kubernetes clientset from rest.Config: %v", err)
-			}
-		}
-
-		// Create a wrapper client that includes both controller-runtime client and kubernetes client
-		wrapperClient := &WrappedClient{
-			Client:     r.Client,
-			KubeClient: kubeClient,
-		}
-
-		secretClient, err = provider.NewClient(context.Background(), store, wrapperClient)
-		if err != nil {
-			return nil, fmt.Errorf("init client %s failed: %v", clientName, err)
-		}
-		provider.Register(clientName, secretClient)
-		return secretClient, nil
-	} else {
-		// Client exists, but still need to verify if the current namespace has access permission
-		if secretStoreRef != nil {
-			kind := secretStoreRef.Kind
-			if kind == "" {
-				kind = "SecretStore"
-			}
-
-			switch kind {
-			case "ClusterSecretStore":
-				clusterSecretStore := &api.ClusterSecretStore{}
-				err := r.Get(context.Background(), client.ObjectKey{
-					Name: secretStoreRef.Name,
-				}, clusterSecretStore)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get ClusterSecretStore %s: %v", secretStoreRef.Name, err)
-				}
-
-				if !utils.IsNamespaceAllowedForClusterSecretStore(clusterSecretStore, externalSecretNamespace, r.Get) {
-					return nil, fmt.Errorf("namespace %s is not allowed to access ClusterSecretStore %s", externalSecretNamespace, secretStoreRef.Name)
-				}
-			case "SecretStore":
-				// Also validate cross namespace restriction for SecretStore
-				// Check if cross namespace reference is enabled
-				namespace := externalSecretNamespace
-				if secretStoreRef.Namespace != "" {
-					namespace = secretStoreRef.Namespace
-				}
-
-				if !r.EnableCrossNamespace && secretStoreRef.Namespace != "" && secretStoreRef.Namespace != externalSecretNamespace {
-					return nil, fmt.Errorf("cross namespace SecretStore reference is disabled, cannot reference SecretStore in namespace %s from namespace %s", secretStoreRef.Namespace, externalSecretNamespace)
-				}
-
-				// Verify that the SecretStore actually exists in the target namespace
-				secretStore := &api.SecretStore{}
-				err := r.Get(context.Background(), client.ObjectKey{
-					Namespace: namespace,
-					Name:      secretStoreRef.Name,
-				}, secretStore)
-				if err != nil {
-					return nil, fmt.Errorf("failed to get SecretStore %s in namespace %s: %v", secretStoreRef.Name, namespace, err)
-				}
-			default:
-				return nil, fmt.Errorf("unsupported SecretStoreRef Kind: %s, must be SecretStore or ClusterSecretStore", kind)
-			}
-		}
-		return secretClient, nil
+//
+// Client caching strategy:
+//   - Generic clients (no custom endpoint): registered at startup (ENV) or by SecretStore
+//     controller, keyed by clientName only. Reused across all ExternalSecrets that don't
+//     specify a custom endpoint.
+//   - Endpoint-specific clients: created on-demand when ExternalSecret specifies kmsEndpoint,
+//     keyed by "clientName#endpoint". Isolated from generic clients to avoid interference.
+//
+// Returns the resolved client, the actual cache key used (for error reporting), and any error.
+func (r *ExternalSecretReconciler) getOrCreateClient(provider backend.Provider, clientName string, secretStoreRef *api.SecretStoreRef, externalSecretNamespace string, kmsEndpoint string) (backend.SecretClient, string, error) {
+	// For custom endpoint: use composite key to isolate from generic client
+	// For default endpoint: use plain clientName to match pre-registered generic client
+	clientKey := clientName
+	if kmsEndpoint != "" {
+		clientKey = fmt.Sprintf("%s#%s", clientName, kmsEndpoint)
 	}
+
+	secretClient, err := provider.GetClient(clientKey)
+	if err == nil {
+		// Client found in cache - validate namespace access for SecretStore-based clients
+		if secretStoreRef != nil {
+			if validateErr := r.validateSecretStoreAccess(secretStoreRef, externalSecretNamespace); validateErr != nil {
+				return nil, clientKey, validateErr
+			}
+		}
+		return secretClient, clientKey, nil
+	}
+
+	// Cache miss - need to create a new client
+	klog.Errorf("client %v get client error %v", clientKey, err)
+
+	// === ENV authentication path (no SecretStoreRef) ===
+	if secretStoreRef == nil {
+		if kmsEndpoint == "" {
+			// No custom endpoint: the generic ENV client should have been registered at startup.
+			// If we reach here, it means startup registration failed - don't try to recreate.
+			return nil, clientKey, fmt.Errorf("generic ENV client not found (key=%s), startup registration may have failed", clientKey)
+		}
+		// Custom endpoint: create an endpoint-specific ENV client
+		secretClient, err = provider.NewClientByENV(kmsEndpoint)
+		if err != nil {
+			return nil, clientKey, fmt.Errorf("init ENV client %s with endpoint %s failed: %v", clientKey, kmsEndpoint, err)
+		}
+		provider.Register(clientKey, secretClient)
+		return secretClient, clientKey, nil
+	}
+
+	// === SecretStore authentication path ===
+	store, err := r.getSecretStore(secretStoreRef, externalSecretNamespace)
+	if err != nil {
+		return nil, clientKey, fmt.Errorf("get client %s failed: %v", clientKey, err)
+	}
+
+	// Create kubernetes.Interface from rest.Config for dynamic token acquisition
+	var kubeClient kubernetes.Interface
+	if r.RestConfig != nil {
+		kubeClient, err = kubernetes.NewForConfig(r.RestConfig)
+		if err != nil {
+			klog.Errorf("Failed to create kubernetes clientset from rest.Config: %v", err)
+		}
+	}
+
+	wrapperClient := &WrappedClient{
+		Client:     r.Client,
+		KubeClient: kubeClient,
+	}
+
+	// Create client with endpoint (empty string means use default)
+	secretClient, err = provider.NewClient(context.Background(), store, wrapperClient, kmsEndpoint)
+	if err != nil {
+		return nil, clientKey, fmt.Errorf("init client %s failed: %v", clientKey, err)
+	}
+	provider.Register(clientKey, secretClient)
+	return secretClient, clientKey, nil
+}
+
+// validateSecretStoreAccess checks if the namespace is allowed to access the referenced SecretStore
+func (r *ExternalSecretReconciler) validateSecretStoreAccess(secretStoreRef *api.SecretStoreRef, externalSecretNamespace string) error {
+	kind := secretStoreRef.Kind
+	if kind == "" {
+		kind = "SecretStore"
+	}
+
+	switch kind {
+	case "ClusterSecretStore":
+		clusterSecretStore := &api.ClusterSecretStore{}
+		err := r.Get(context.Background(), client.ObjectKey{
+			Name: secretStoreRef.Name,
+		}, clusterSecretStore)
+		if err != nil {
+			return fmt.Errorf("failed to get ClusterSecretStore %s: %v", secretStoreRef.Name, err)
+		}
+
+		if !utils.IsNamespaceAllowedForClusterSecretStore(clusterSecretStore, externalSecretNamespace, r.Get) {
+			return fmt.Errorf("namespace %s is not allowed to access ClusterSecretStore %s", externalSecretNamespace, secretStoreRef.Name)
+		}
+	case "SecretStore":
+		namespace := externalSecretNamespace
+		if secretStoreRef.Namespace != "" {
+			namespace = secretStoreRef.Namespace
+		}
+
+		if !r.EnableCrossNamespace && secretStoreRef.Namespace != "" && secretStoreRef.Namespace != externalSecretNamespace {
+			return fmt.Errorf("cross namespace SecretStore reference is disabled, cannot reference SecretStore in namespace %s from namespace %s", secretStoreRef.Namespace, externalSecretNamespace)
+		}
+
+		secretStore := &api.SecretStore{}
+		err := r.Get(context.Background(), client.ObjectKey{
+			Namespace: namespace,
+			Name:      secretStoreRef.Name,
+		}, secretStore)
+		if err != nil {
+			return fmt.Errorf("failed to get SecretStore %s in namespace %s: %v", secretStoreRef.Name, namespace, err)
+		}
+	default:
+		return fmt.Errorf("unsupported SecretStoreRef Kind: %s, must be SecretStore or ClusterSecretStore", kind)
+	}
+	return nil
 }
 
 // syncIfNeedUpdate processes the external secret and determines if an update is needed
@@ -566,6 +605,9 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(externalSec *api.ExternalSec
 
 	if err != nil {
 		// Rate limiting is a SYSTEM-LEVEL error, not data-source specific
+		r.Log.Error(err, "secret pull rate limit exceeded, consider increasing --max-concurrent-secret-pulls or the provider-specific flag",
+			"provider", providerName,
+			"externalSecret", fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name))
 		r.updateResourceManagementStatus(externalSec, "rate_limit", err)
 		return false, err
 	}

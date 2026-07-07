@@ -1,0 +1,230 @@
+# ============================================================================
+# Cross-Account Synchronization
+# ============================================================================
+#
+# Cross-account is not an independent authentication method; it layers an AssumeRole on top of any base authentication:
+#
+#   Base Authentication (ServiceAccount RRSA / RRSA / AK AssumeRole / AK / WorkerRole)
+#     -> Obtain temporary credentials -> AssumeRole(remoteRamRoleARN) -> Target account credentials
+#
+# Cross-account synchronization methods supported by SecretStore:
+#   1. ServiceAccount RRSA + remoteRamRoleARN
+#   2. RRSA (OIDC) + remoteRamRoleARN
+#   3. AK AssumeRole + remoteRamRoleARN
+#   4. AK Basic + remoteRamRoleARN
+#
+# Cross-account synchronization methods supported by environment variables:
+#   1. RRSA (OIDC) + remoteRamRoleARN
+#   2. AK AssumeRole + remoteRamRoleARN
+#   3. AK Basic + remoteRamRoleARN
+#   4. WorkerRole + remoteRamRoleARN
+#
+# Prerequisites:
+#   1. Target account creates a RAM Role that trusts the current account:
+#
+#      aliyun ram CreateRole --RoleName cross-account-role --AssumeRolePolicyDocument '{
+#        "Statement": [{
+#          "Action": "sts:AssumeRole",
+#          "Effect": "Allow",
+#          "Principal": {
+#            "RAM": ["acs:ram::<currentAccountId>:root"]
+#          }
+#        }],
+#        "Version": "1"
+#      }'
+#
+#   2. Create a KMS read-only permission policy:
+#
+#      aliyun ram CreatePolicy --PolicyName kms-read --PolicyDocument '{
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": [
+#            "kms:GetSecretValue",
+#            "kms:DescribeSecret"
+#          ],
+#          "Resource": "*"
+#        }],
+#        "Version": "1"
+#      }'
+#
+#   3. Attach the KMS permission policy to the target RAM Role:
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName kms-read --RoleName cross-account-role
+#
+#   4. The authentication identity in the current account must have permission to assume the target RAM Role (sts:AssumeRole).
+#      This permission should be attached to the identity corresponding to each authentication method (see descriptions below for each method).
+#      Policy example:
+#      {
+#        "Version": "1",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": "sts:AssumeRole",
+#          "Resource": "acs:ram::<TARGET_ACCOUNT_ID>:role/cross-account-role"
+#        }]
+#      }
+#
+# ============================================================================
+
+# ============================================================================
+# Method 1: ServiceAccount RRSA + remoteRamRoleARN
+# ============================================================================
+# AssumeRole permission attached to: RAM Role associated with the ServiceAccount
+#   This RAM Role is bound to the SA via OIDC and needs additional sts:AssumeRole permission
+
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: cross-account-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      serviceAccountRef:
+        name: kms-sa
+      # Cross-account AssumeRole
+      remoteRamRoleARN: acs:ram::<targetAccountId>:role/cross-account-role
+      remoteRamRoleSessionName: ack-secret-manager-session
+
+# ============================================================================
+# Method 2: RRSA (OIDC) + remoteRamRoleARN
+# ============================================================================
+# AssumeRole permission attached to: RAM Role specified by ramRoleARN
+#   i.e., the current-role needs additional sts:AssumeRole permission
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: rrsa-cross-account-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      ramRoleARN: acs:ram::<currentAccountId>:role/current-role
+      oidcProviderARN: acs:ram::<currentAccountId>:oidc-provider/ack-rrsa-<clusterId>
+      # Cross-account AssumeRole
+      remoteRamRoleARN: acs:ram::<targetAccountId>:role/cross-account-role
+      remoteRamRoleSessionName: ack-secret-manager-session
+
+# ============================================================================
+# Method 3: AK AssumeRole + remoteRamRoleARN
+# ============================================================================
+# AssumeRole permission attached to: RAM Role specified by ramRoleARN
+#   i.e., AK first assumes current-role, which needs additional sts:AssumeRole permission
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: ak-role-cross-account-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      accessKey:
+        name: alibaba-credentials
+        key: id
+      accessKeySecret:
+        name: alibaba-credentials
+        key: secret
+      ramRoleARN: acs:ram::<currentAccountId>:role/current-role
+      ramRoleSessionName: ack-secret-manager
+      # Cross-account AssumeRole
+      remoteRamRoleARN: acs:ram::<targetAccountId>:role/cross-account-role
+      remoteRamRoleSessionName: ack-secret-manager-session
+
+# ============================================================================
+# Method 4: AK Basic + remoteRamRoleARN
+# ============================================================================
+# AssumeRole permission attached to: RAM User (the user owning the AK)
+#   Directly attach sts:AssumeRole permission policy to this RAM User
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: ak-cross-account-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      accessKey:
+        name: alibaba-credentials
+        key: id
+      accessKeySecret:
+        name: alibaba-credentials
+        key: secret
+      # Cross-account AssumeRole
+      remoteRamRoleARN: acs:ram::<targetAccountId>:role/cross-account-role
+      remoteRamRoleSessionName: ack-secret-manager-session
+
+# ============================================================================
+# Method 5: WorkerRole + remoteRamRoleARN
+# ============================================================================
+
+# AssumeRole permission attached to: RAM Role associated with the WorkerRole
+#   This RAM Role is bound to nodes via WorkerRole and needs additional sts:AssumeRole permission
+#
+# Create Kubernetes secret
+# kubectl create secret generic alibaba-credentials \
+#   --from-literal=remoterolearn=acs:ram::<targetAccountId>:role/cross-account-role \
+#   --from-literal=remoterolesessionname=ack-secret-manager-session -n production
+#
+# Configure chart values
+# values.yaml:
+#   command:
+#     enableWorkerRole: true
+#   envVarsFromSecret:
+#     ALICLOUD_REMOTE_ROLE_ARN:
+#       secretKeyRef: alibaba-credentials
+#       key: remoterolearn
+#     ALICLOUD_REMOTE_ROLE_SESSION_NAME:
+#       secretKeyRef: alibaba-credentials
+#       key: remoterolesessionname
+#
+#
+# Install command:
+#   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+
+
+# ============================================================================
+# ExternalSecret Using Cross-Account Store
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: cross-account-secret
+  namespace: production
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: target-account-secret
+      name: synced-secret
+      versionId: v1
+      secretStoreRef:
+        name: cross-account-store
+        kind: SecretStore
+
+# ============================================================================
+# Verification:
+#
+# 1. Check SecretStore status:
+#    kubectl get secretstore cross-account-store -n production
+#
+# 2. Check ExternalSecret status:
+#    kubectl get externalsecret cross-account-secret -n production
+#
+# 3. Check the generated Secret:
+#    kubectl get secret cross-account-secret -n production -o yaml
+#
+# Notes:
+#
+# - RRSA, AK AssumeRole and AK Basic also support environment variable configuration for cross-account. Add ALICLOUD_REMOTE_ROLE_ARN and ALICLOUD_REMOTE_ROLE_SESSION_NAME fields to their base environment variable configuration (see WorkerRole configuration)
+# - remoteRamRoleSessionName is optional and used to identify the session
+# - Cross-account layers an AssumeRole on top of the base authentication
+# - The authentication identity in the current account must have permission to assume the target RAM Role
+# - The target RAM Role must have KMS access permissions and trust the current account
+# ============================================================================
