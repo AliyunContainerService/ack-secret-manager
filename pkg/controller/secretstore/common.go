@@ -76,11 +76,11 @@ type SecretStoreWrapper struct {
 }
 
 func (w *SecretStoreWrapper) GetSpec() StoreSpecInterface {
-	return &SecretStoreSpecWrapper{&w.SecretStore.Spec}
+	return &SecretStoreSpecWrapper{&w.Spec}
 }
 
 func (w *SecretStoreWrapper) GetStatus() StoreStatusInterface {
-	return &SecretStoreStatusWrapper{&w.SecretStore.Status}
+	return &SecretStoreStatusWrapper{&w.Status}
 }
 
 // ClusterSecretStoreWrapper wraps ClusterSecretStore to implement StoreInterface
@@ -89,11 +89,11 @@ type ClusterSecretStoreWrapper struct {
 }
 
 func (w *ClusterSecretStoreWrapper) GetSpec() StoreSpecInterface {
-	return &ClusterSecretStoreSpecWrapper{&w.ClusterSecretStore.Spec}
+	return &ClusterSecretStoreSpecWrapper{&w.Spec}
 }
 
 func (w *ClusterSecretStoreWrapper) GetStatus() StoreStatusInterface {
-	return &ClusterSecretStoreStatusWrapper{&w.ClusterSecretStore.Status}
+	return &ClusterSecretStoreStatusWrapper{&w.Status}
 }
 
 // SecretStoreSpecWrapper wraps SecretStoreSpec to implement StoreSpecInterface
@@ -102,36 +102,36 @@ type SecretStoreSpecWrapper struct {
 }
 
 func (w *SecretStoreSpecWrapper) GetKMS() *v1alpha1.KMSProvider {
-	return w.SecretStoreSpec.KMS
+	return w.KMS
 }
 
 func (w *SecretStoreSpecWrapper) GetOOS() *v1alpha1.OOSProvider {
-	return w.SecretStoreSpec.OOS
+	return w.OOS
 }
 
 func (w *SecretStoreSpecWrapper) GetServiceAccountRef() *v1alpha1.ServiceAccountRef {
-	if w.SecretStoreSpec.KMS != nil && w.SecretStoreSpec.KMS.KMS != nil {
-		return w.SecretStoreSpec.KMS.KMS.ServiceAccountRef
-	} else if w.SecretStoreSpec.OOS != nil && w.SecretStoreSpec.OOS.OOS != nil {
-		return w.SecretStoreSpec.OOS.OOS.ServiceAccountRef
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.ServiceAccountRef
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.ServiceAccountRef
 	}
 	return nil
 }
 
 func (w *SecretStoreSpecWrapper) GetAccessKey() *v1alpha1.SecretRef {
-	if w.SecretStoreSpec.KMS != nil && w.SecretStoreSpec.KMS.KMS != nil {
-		return w.SecretStoreSpec.KMS.KMS.AccessKey
-	} else if w.SecretStoreSpec.OOS != nil && w.SecretStoreSpec.OOS.OOS != nil {
-		return w.SecretStoreSpec.OOS.OOS.AccessKey
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.AccessKey
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.AccessKey
 	}
 	return nil
 }
 
 func (w *SecretStoreSpecWrapper) GetAccessKeySecret() *v1alpha1.SecretRef {
-	if w.SecretStoreSpec.KMS != nil && w.SecretStoreSpec.KMS.KMS != nil {
-		return w.SecretStoreSpec.KMS.KMS.AccessKeySecret
-	} else if w.SecretStoreSpec.OOS != nil && w.SecretStoreSpec.OOS.OOS != nil {
-		return w.SecretStoreSpec.OOS.OOS.AccessKeySecret
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.AccessKeySecret
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.AccessKeySecret
 	}
 	return nil
 }
@@ -146,42 +146,42 @@ type ClusterSecretStoreSpecWrapper struct {
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetKMS() *v1alpha1.KMSProvider {
-	return w.ClusterSecretStoreSpec.KMS
+	return w.KMS
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetOOS() *v1alpha1.OOSProvider {
-	return w.ClusterSecretStoreSpec.OOS
+	return w.OOS
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetServiceAccountRef() *v1alpha1.ServiceAccountRef {
-	if w.ClusterSecretStoreSpec.KMS != nil && w.ClusterSecretStoreSpec.KMS.KMS != nil {
-		return w.ClusterSecretStoreSpec.KMS.KMS.ServiceAccountRef
-	} else if w.ClusterSecretStoreSpec.OOS != nil && w.ClusterSecretStoreSpec.OOS.OOS != nil {
-		return w.ClusterSecretStoreSpec.OOS.OOS.ServiceAccountRef
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.ServiceAccountRef
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.ServiceAccountRef
 	}
 	return nil
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetAccessKey() *v1alpha1.SecretRef {
-	if w.ClusterSecretStoreSpec.KMS != nil && w.ClusterSecretStoreSpec.KMS.KMS != nil {
-		return w.ClusterSecretStoreSpec.KMS.KMS.AccessKey
-	} else if w.ClusterSecretStoreSpec.OOS != nil && w.ClusterSecretStoreSpec.OOS.OOS != nil {
-		return w.ClusterSecretStoreSpec.OOS.OOS.AccessKey
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.AccessKey
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.AccessKey
 	}
 	return nil
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetAccessKeySecret() *v1alpha1.SecretRef {
-	if w.ClusterSecretStoreSpec.KMS != nil && w.ClusterSecretStoreSpec.KMS.KMS != nil {
-		return w.ClusterSecretStoreSpec.KMS.KMS.AccessKeySecret
-	} else if w.ClusterSecretStoreSpec.OOS != nil && w.ClusterSecretStoreSpec.OOS.OOS != nil {
-		return w.ClusterSecretStoreSpec.OOS.OOS.AccessKeySecret
+	if w.KMS != nil && w.KMS.KMS != nil {
+		return w.KMS.KMS.AccessKeySecret
+	} else if w.OOS != nil && w.OOS.OOS != nil {
+		return w.OOS.OOS.AccessKeySecret
 	}
 	return nil
 }
 
 func (w *ClusterSecretStoreSpecWrapper) GetConditions() []v1alpha1.ClusterSecretStoreCondition {
-	return w.ClusterSecretStoreSpec.Conditions
+	return w.Conditions
 }
 
 // SecretStoreStatusWrapper wraps SecretStoreStatus to implement StoreStatusInterface
@@ -190,19 +190,19 @@ type SecretStoreStatusWrapper struct {
 }
 
 func (w *SecretStoreStatusWrapper) GetConditions() []v1alpha1.SecretStoreStatusCondition {
-	return w.SecretStoreStatus.Conditions
+	return w.Conditions
 }
 
 func (w *SecretStoreStatusWrapper) GetCapabilities() v1alpha1.SecretStoreCapabilities {
-	return w.SecretStoreStatus.Capabilities
+	return w.Capabilities
 }
 
 func (w *SecretStoreStatusWrapper) SetCapabilities(capabilities v1alpha1.SecretStoreCapabilities) {
-	w.SecretStoreStatus.Capabilities = capabilities
+	w.Capabilities = capabilities
 }
 
 func (w *SecretStoreStatusWrapper) SetConditions(conditions []v1alpha1.SecretStoreStatusCondition) {
-	w.SecretStoreStatus.Conditions = conditions
+	w.Conditions = conditions
 }
 
 // ClusterSecretStoreStatusWrapper wraps ClusterSecretStoreStatus to implement StoreStatusInterface
@@ -211,19 +211,19 @@ type ClusterSecretStoreStatusWrapper struct {
 }
 
 func (w *ClusterSecretStoreStatusWrapper) GetConditions() []v1alpha1.SecretStoreStatusCondition {
-	return w.ClusterSecretStoreStatus.Conditions
+	return w.Conditions
 }
 
 func (w *ClusterSecretStoreStatusWrapper) GetCapabilities() v1alpha1.SecretStoreCapabilities {
-	return w.ClusterSecretStoreStatus.Capabilities
+	return w.Capabilities
 }
 
 func (w *ClusterSecretStoreStatusWrapper) SetCapabilities(capabilities v1alpha1.SecretStoreCapabilities) {
-	w.ClusterSecretStoreStatus.Capabilities = capabilities
+	w.Capabilities = capabilities
 }
 
 func (w *ClusterSecretStoreStatusWrapper) SetConditions(conditions []v1alpha1.SecretStoreStatusCondition) {
-	w.ClusterSecretStoreStatus.Conditions = conditions
+	w.Conditions = conditions
 }
 
 // CommonReconciler contains common logic for both SecretStore and ClusterSecretStore controllers
@@ -404,18 +404,18 @@ func (r *CommonReconciler) createKMSClient(ctx context.Context, log logr.Logger,
 	// Handle different store types
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
-		secretClient, err = kmsProvider.NewClient(ctx, s.SecretStore, wrapperClient)
+		secretClient, err = kmsProvider.NewClient(ctx, s.SecretStore, wrapperClient, "")
 	case *ClusterSecretStoreWrapper:
 		// Create a temporary SecretStore for compatibility with existing provider code
 		tempStore := &v1alpha1.SecretStore{
-			TypeMeta:   s.ClusterSecretStore.TypeMeta,
-			ObjectMeta: s.ClusterSecretStore.ObjectMeta,
+			TypeMeta:   s.TypeMeta,
+			ObjectMeta: s.ObjectMeta,
 			Spec: v1alpha1.SecretStoreSpec{
-				KMS: s.ClusterSecretStore.Spec.KMS,
-				OOS: s.ClusterSecretStore.Spec.OOS,
+				KMS: s.Spec.KMS,
+				OOS: s.Spec.OOS,
 			},
 		}
-		secretClient, err = kmsProvider.NewClient(ctx, tempStore, wrapperClient)
+		secretClient, err = kmsProvider.NewClient(ctx, tempStore, wrapperClient, "")
 	default:
 		return fmt.Errorf("unsupported store type for KMS client creation")
 	}
@@ -444,18 +444,18 @@ func (r *CommonReconciler) createOOSClient(ctx context.Context, log logr.Logger,
 	// Handle different store types
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
-		secretClient, err = oosProvider.NewClient(ctx, s.SecretStore, wrapperClient)
+		secretClient, err = oosProvider.NewClient(ctx, s.SecretStore, wrapperClient, "")
 	case *ClusterSecretStoreWrapper:
 		// Create a temporary SecretStore for compatibility with existing provider code
 		tempStore := &v1alpha1.SecretStore{
-			TypeMeta:   s.ClusterSecretStore.TypeMeta,
-			ObjectMeta: s.ClusterSecretStore.ObjectMeta,
+			TypeMeta:   s.TypeMeta,
+			ObjectMeta: s.ObjectMeta,
 			Spec: v1alpha1.SecretStoreSpec{
-				KMS: s.ClusterSecretStore.Spec.KMS,
-				OOS: s.ClusterSecretStore.Spec.OOS,
+				KMS: s.Spec.KMS,
+				OOS: s.Spec.OOS,
 			},
 		}
-		secretClient, err = oosProvider.NewClient(ctx, tempStore, wrapperClient)
+		secretClient, err = oosProvider.NewClient(ctx, tempStore, wrapperClient, "")
 	default:
 		return fmt.Errorf("unsupported store type for OOS client creation")
 	}
@@ -557,10 +557,10 @@ func (r *CommonReconciler) updateStatus(logger logr.Logger, store StoreInterface
 	var oldStatus StoreStatusInterface
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
-		old := s.SecretStore.Status.DeepCopy()
+		old := s.Status.DeepCopy()
 		oldStatus = &SecretStoreStatusWrapper{SecretStoreStatus: old}
 	case *ClusterSecretStoreWrapper:
-		old := s.ClusterSecretStore.Status.DeepCopy()
+		old := s.Status.DeepCopy()
 		oldStatus = &ClusterSecretStoreStatusWrapper{ClusterSecretStoreStatus: old}
 	}
 
@@ -578,12 +578,12 @@ func (r *CommonReconciler) updateStatus(logger logr.Logger, store StoreInterface
 		switch s := store.(type) {
 		case *SecretStoreWrapper:
 			objKey = client.ObjectKey{
-				Namespace: s.SecretStore.Namespace,
-				Name:      s.SecretStore.Name,
+				Namespace: s.Namespace,
+				Name:      s.Name,
 			}
 		case *ClusterSecretStoreWrapper:
 			objKey = client.ObjectKey{
-				Name: s.ClusterSecretStore.Name,
+				Name: s.Name,
 			}
 		default:
 			return false, fmt.Errorf("unknown store type: %T", store)

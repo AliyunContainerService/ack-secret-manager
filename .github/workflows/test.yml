@@ -9,18 +9,17 @@ jobs:
     name: lint
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: 1.23.0
+        go-version: 1.25.0
         check-latest: true
         cache: true
     - name: golangci-lint
-      uses: golangci/golangci-lint-action@v3.7.0
+      uses: golangci/golangci-lint-action@v9
       with:
-        version: v1.61.0
-        skip-pkg-cache: true
+        version: v2.11.4
         args: --verbose --timeout=10m
   go-security-scan:
     runs-on: ubuntu-latest
@@ -28,22 +27,22 @@ jobs:
       GO111MODULE: on
     steps:
       - name: Checkout
-        uses: actions/checkout@v3
+        uses: actions/checkout@v5
 
       - name: Run Gosec Security Scanner
         uses: securego/gosec@master
         with:
-          args: '-no-fail -exclude-dir=pkg/apis -exclude-dir=ack-secret-manager-cli ./...'
+          args: '-no-fail -exclude-dir=pkg/apis ./...'
 
   build:
     runs-on: ubuntu-latest
     steps:
-    - uses: actions/checkout@v3
+    - uses: actions/checkout@v5
 
     - name: Set up Go
-      uses: actions/setup-go@v4
+      uses: actions/setup-go@v5
       with:
-        go-version: 1.23.0
+        go-version: 1.25.0
       env:
         GOPATH: ${{ env.HOME }}
 

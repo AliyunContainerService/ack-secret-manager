@@ -3,7 +3,6 @@ package kms
 import (
 	"encoding/base64"
 	"fmt"
-	"strings"
 	"time"
 
 	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
@@ -14,7 +13,6 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
-	util "github.com/alibabacloud-go/tea-utils/v2/service"
 )
 
 // Client interface represent a backend client interface that should be implemented
@@ -40,16 +38,14 @@ func (c *KMSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 	if data.VersionId != "" {
 		req.VersionId = tea.String(data.VersionId)
 	}
-	runTimeOption := &util.RuntimeOptions{}
-	if strings.Contains(data.KmsEndpoint, suffix) {
-		runTimeOption.SetCa(RegionIdAndCaMap[tea.StringValue(c.kmsClient.RegionId)])
-	}
-	resp, err := c.kmsClient.GetSecretValueWithOptions(req, runTimeOption)
+
+	resp, err := c.kmsClient.GetSecretValue(req)
 	if err != nil {
 		if !utils.JudgeNeedRetry(err) {
 			klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
 			return nil, err
 		} else {
+			klog.Warningf("kms API throttled (Rejected.Throttling), will retry after backoff, key %v", data.Key)
 			time.Sleep(utils.GetWaitTimeExponential(1))
 			resp, err = c.kmsClient.GetSecretValue(req)
 			if err != nil {

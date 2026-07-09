@@ -1,0 +1,170 @@
+# ============================================================================
+# Multi-Tenant Scenario
+# ============================================================================
+#
+# Each tenant is independently configured with its own ServiceAccount, SecretStore, and RAM Role to achieve ServiceAccount-level permission isolation.
+#
+# Architecture Design:
+#   Tenant A (namespace: tenant-a)
+#     ├── ServiceAccount: tenant-a-sa -> RAM Role: tenant-a-role
+#     ├── SecretStore: tenant-a-store
+#     └── ExternalSecret: tenant-a-secret
+#
+#   Tenant B (namespace: tenant-b)
+#     ├── ServiceAccount: tenant-b-sa -> RAM Role: tenant-b-role
+#     ├── SecretStore: tenant-b-store
+#     └── ExternalSecret: tenant-b-secret
+#
+# Prerequisites:
+#   1. RRSA enabled on the cluster:
+#      ack-ram-tool rrsa enable -c <clusterId>
+#
+#   2. Create a RAM Role for each tenant and grant permissions:
+#
+#      # Tenant A
+#      aliyun ram CreateRole --RoleName tenant-a-kms-role --AssumeRolePolicyDocument '{
+#        "Statement": [{
+#          "Action": "sts:AssumeRole",
+#          "Effect": "Allow",
+#          "Principal": {"Federated": "acs:ram::<accountId>:oidc-provider/ack-rrsa-<clusterId>"},
+#          "Condition": {"StringEquals": {
+#            "oidc:sub": ["system:serviceaccount:tenant-a:tenant-a-sa"]
+#          }}
+#        }], "Version": "1"
+#      }'
+#
+#      aliyun ram CreatePolicy --PolicyName tenant-a-kms --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{"Effect": "Allow", "Action": ["kms:GetSecretValue", "kms:Decrypt"],
+#          "Resource": ["acs:kms:cn-hangzhou:<accountId>:secret/tenant-a-*"]}]
+#      }'
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName tenant-a-kms --RoleName tenant-a-kms-role
+#
+#      # Tenant B
+#      aliyun ram CreateRole --RoleName tenant-b-kms-role --AssumeRolePolicyDocument '{
+#        "Statement": [{
+#          "Action": "sts:AssumeRole",
+#          "Effect": "Allow",
+#          "Principal": {"Federated": "acs:ram::<accountId>:oidc-provider/ack-rrsa-<clusterId>"},
+#          "Condition": {"StringEquals": {
+#            "oidc:sub": ["system:serviceaccount:tenant-b:tenant-b-sa"]
+#          }}
+#        }], "Version": "1"
+#      }'
+#
+#      aliyun ram CreatePolicy --PolicyName tenant-b-kms --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{"Effect": "Allow", "Action": ["kms:GetSecretValue", "kms:Decrypt"],
+#          "Resource": ["acs:kms:cn-hangzhou:<accountId>:secret/tenant-b-*"]}]
+#      }'
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName tenant-b-kms --RoleName tenant-b-kms-role
+#
+#   3. Create tenant namespaces:
+#      kubectl create namespace tenant-a
+#      kubectl create namespace tenant-b
+#
+# ============================================================================
+
+# ============================================================================
+# Tenant A Configuration
+# ============================================================================
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-a-sa
+  namespace: tenant-a
+  annotations:
+    ack.alibabacloud.com/role-arn: "acs:ram::<accountId>:role/tenant-a-kms-role"
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: tenant-a-store
+  namespace: tenant-a
+spec:
+  KMS:
+    KMSAuth:
+      serviceAccountRef:
+        name: tenant-a-sa
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: tenant-a-secret
+  namespace: tenant-a
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: tenant-a-db-password
+      name: db-password
+      versionId: v1
+      secretStoreRef:
+        name: tenant-a-store
+        kind: SecretStore
+
+# ============================================================================
+# Tenant B Configuration
+# ============================================================================
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: tenant-b-sa
+  namespace: tenant-b
+  annotations:
+    ack.alibabacloud.com/role-arn: "acs:ram::<accountId>:role/tenant-b-kms-role"
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: tenant-b-store
+  namespace: tenant-b
+spec:
+  KMS:
+    KMSAuth:
+      serviceAccountRef:
+        name: tenant-b-sa
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: tenant-b-secret
+  namespace: tenant-b
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: tenant-b-db-password
+      name: db-password
+      versionId: v1
+      secretStoreRef:
+        name: tenant-b-store
+        kind: SecretStore
+
+# ============================================================================
+# Verification:
+#
+# 1. Verify Tenant A can only access its own credentials:
+#    kubectl get secret tenant-a-secret -n tenant-a -o yaml  # Success
+#
+# 2. Verify Tenant B can only access its own credentials:
+#    kubectl get secret tenant-b-secret -n tenant-b -o yaml  # Success
+#
+# 3. Verify isolation: Tenant A cannot access Tenant B's credentials
+#    (RAM Role permission restrictions; KMS returns a permission error)
+#
+# Notes:
+#
+# - Each tenant's RAM Role is only authorized to access its own KMS credentials (Resource restriction)
+# - Adding a new tenant only requires creating the corresponding namespace, ServiceAccount, SecretStore, and ExternalSecret
+# - ClusterSecretStore + ClusterExternalSecret can be used to simplify global sharing scenarios
+# ============================================================================

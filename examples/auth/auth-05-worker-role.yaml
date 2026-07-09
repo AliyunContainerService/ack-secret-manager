@@ -1,0 +1,69 @@
+# ============================================================================
+# WorkerRole Authentication (Node ECS RAM Role)
+# ============================================================================
+#
+# Prerequisites:
+#   1. Cluster node ECS instances have a RAM Role attached
+#   2. Attach KMS access permissions to the Worker RAM Role:
+#      In the ACK console -> Cluster Details -> Cluster Info -> Basic Info -> Worker RAM Role, add permissions:
+#
+#      aliyun ram CreatePolicy --PolicyName kms-read --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": ["kms:GetSecretValue", "kms:Decrypt"],
+#          "Resource": ["acs:kms:<region>:<accountId>:secret/*"]
+#        }]
+#      }'
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName kms-read --RoleName <worker-role-name>
+#
+#   3. Confirm enableWorkerRole configuration (enabled by default for ACK clusters):
+#
+#      # values.yaml (no explicit configuration needed for ACK clusters, defaults to true)
+#      command:
+#        enableWorkerRole: true
+#
+#      # Install command:
+#      helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+#
+# enableWorkerRole Default Values:
+#   ACK Managed Cluster:  true
+#   ACK Dedicated Cluster: true
+#   ACK Edge Cluster:     true
+#   Other Clusters:       false
+#
+# ============================================================================
+
+---
+# Step 1: Create ExternalSecret (no SecretStore needed)
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: default
+spec:
+  provider: kms
+  data:
+    - key: my-kms-secret
+      name: my-secret
+      versionId: v1
+      # No secretStoreRef needed, uses WorkerRole authentication
+
+# ============================================================================
+# Verification:
+#
+# 1. Check ExternalSecret status:
+#    kubectl get externalsecret app-secret -n default
+#
+# 2. Check the generated Secret:
+#    kubectl get secret app-secret -n default -o yaml
+#
+# Notes:
+#
+# - WorkerRole authentication has the lowest priority (priority 5); other authentication methods take precedence
+# - WorkerRole uses node-level RAM Role; all Pods share the same permissions
+# - Not suitable for multi-tenant isolation scenarios
+# - Set to false to disable WorkerRole authentication
+# - Once disabled, ExternalSecrets will not be able to sync if no other authentication method is available
+# ============================================================================

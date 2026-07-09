@@ -38,6 +38,7 @@ func (c *OOSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 			klog.Errorf("failed to get secret value from oos,key %v,error %v", data.Key, err)
 			return nil, err
 		} else {
+			klog.Warningf("oos API throttled (Rejected.Throttling), will retry after backoff, key %v", data.Key)
 			time.Sleep(utils.GetWaitTimeExponential(1))
 			resp, err = c.oosClient.GetSecretParameter(req)
 			if err != nil {

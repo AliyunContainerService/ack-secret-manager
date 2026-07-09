@@ -1,0 +1,154 @@
+# ============================================================================
+# AK AssumeRole Authentication (AccessKey + AssumeRole)
+# ============================================================================
+#
+# Two configuration methods:
+#   Method A (Environment Variables): Component-level unified authentication
+#   Method B (SecretStore): Namespace-level isolation
+#
+# Prerequisites:
+#   1. Create a RAM User and obtain an AccessKey:
+#      aliyun ram CreateUser --UserName kms-user
+#      aliyun ram CreateAccessKey --UserName kms-user
+#      # Record the AccessKeyId and AccessKeySecret
+#
+#   2. Create a RAM Role with a trust policy allowing the RAM User to assume it:
+#
+#      aliyun ram CreateRole --RoleName kms-access-role --AssumeRolePolicyDocument '{
+#        "Statement": [{
+#          "Action": "sts:AssumeRole",
+#          "Effect": "Allow",
+#          "Principal": {
+#            "RAM": ["acs:ram::<accountId>:user/kms-user"]
+#          }
+#        }],
+#        "Version": "1"
+#      }'
+#
+#   3. Attach KMS permissions to the RAM Role:
+#
+#      aliyun ram CreatePolicy --PolicyName kms-read --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": ["kms:GetSecretValue", "kms:Decrypt"],
+#          "Resource": ["acs:kms:<region>:<accountId>:secret/*"]
+#        }]
+#      }'
+#
+#      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName kms-read --RoleName kms-access-role
+#
+#   4. Attach AssumeRole permission to the RAM User:
+#
+#      aliyun ram CreatePolicy --PolicyName assume-kms-role --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": "sts:AssumeRole",
+#          "Resource": "acs:ram::<accountId>:role/kms-access-role"
+#        }]
+#      }'
+#
+#      aliyun ram AttachPolicyToUser --PolicyType Custom --PolicyName assume-kms-role --UserName kms-user
+#
+#   5. Create a Kubernetes Secret containing the AK credentials:
+#      kubectl create secret generic alibaba-credentials -n <namespace> \
+#        --from-literal=id=<your-access-key-id> 
+#        --from-literal=secret=<your-access-key-secret> \
+#        --from-literal=rolearn=acs:ram::<accountId>:role/kms-access-role
+#
+# ============================================================================
+
+# ============================================================================
+# Method A: Environment Variable Configuration
+# ============================================================================
+
+# Step 1: Helm values configuration
+#
+# values.yaml:
+#   envVarsFromSecret:
+#     ACCESS_KEY_ID:
+#       secretKeyRef: alibaba-credentials
+#       key: id
+#     SECRET_ACCESS_KEY:
+#       secretKeyRef: alibaba-credentials
+#       key: secret
+#     ALICLOUD_ROLE_ARN:
+#       secretKeyRef: alibaba-credentials
+#       key: rolearn
+#
+# Install command:
+#   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+
+---
+# Step 2: Create ExternalSecret (no secretStoreRef needed)
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: default
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: my-database-password
+      name: db-password
+      versionId: v1
+      # No secretStoreRef needed, uses environment variable AK AssumeRole authentication
+
+# ============================================================================
+# Method B: SecretStore Configuration
+# ============================================================================
+
+---
+# Step 1: Create SecretStore
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: ak-role-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      accessKey:
+        name: alibaba-credentials
+        key: id
+      accessKeySecret:
+        name: alibaba-credentials
+        key: secret
+      ramRoleARN: acs:ram::<accountId>:role/kms-access-role
+      ramRoleSessionName: ack-secret-manager
+
+---
+# Step 2: Create ExternalSecret (reference via secretStoreRef)
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: production
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: my-database-password
+      name: db-password
+      versionId: v1
+      secretStoreRef:
+        name: ak-role-store
+        kind: SecretStore
+
+# ============================================================================
+# Verification:
+#
+# 1. Check ExternalSecret status:
+#    kubectl get externalsecret app-secret -n <namespace>
+#
+# 2. Check the generated Secret:
+#    kubectl get secret app-secret -n <namespace> -o yaml
+#
+# Notes:
+#
+# - AK AssumeRole is more secure than plain AK; temporary credentials are automatically refreshed
+# - It is recommended to rotate AccessKeys periodically
+# - RAM Roles should follow the principle of least privilege
+# ============================================================================

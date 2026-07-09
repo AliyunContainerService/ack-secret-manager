@@ -93,3 +93,11 @@ CONTROLLER_GEN=$(shell go env GOPATH)/bin/controller-gen
 else
 CONTROLLER_GEN=$(shell which controller-gen)
 endif
+
+.PHONY: test-e2e
+test-e2e:
+	@echo "Running E2E tests..."
+	go test ./test/e2e/... -v -ginkgo.v -timeout 3h
+test-e2e-template:
+	@echo "Running Template Processing E2E tests..."
+	go test ./test/e2e -v -ginkgo.v -timeout 3h -ginkgo.focus="Template Processing E2E"

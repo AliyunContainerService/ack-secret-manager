@@ -1,0 +1,84 @@
+# ============================================================================
+# OOS Encrypted Parameter Synchronization
+# ============================================================================
+#
+# Use OOS (Operation Orchestration Service) encrypted parameters and sync them to Kubernetes Secret via ExternalSecret.
+#
+# KMS vs OOS Comparison:
+#   Feature       KMS Credentials           OOS Encrypted Parameters
+#   Provider      kms                       oos
+#   Versioning    Requires versionId        Not required
+#   Endpoint      Supports kmsEndpoint      Not supported
+#   Use Case      Application credentials   Operations configuration
+#   Created in    KMS Console               OOS Console
+#
+# Prerequisites:
+#   1. Encrypted parameters have been created in OOS:
+#      aliyun oos CreateSecretParameter --Name /production/database/password \
+#        --Type Secure --Value "my-password" --Description "DB password"
+#
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+# ============================================================================
+# Basic OOS Parameter Synchronization
+# ============================================================================
+
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: oos-param-secret
+  namespace: production
+spec:
+  provider: oos  # Use OOS provider
+  rotationInterval: 30s
+  data:
+    - key: /production/database/password  # OOS parameter name
+      name: db-password  # Key name in K8s Secret
+      # OOS provider does not require versionId
+      secretStoreRef:
+        name: oos-store
+        kind: SecretStore
+
+# ============================================================================
+# Multiple OOS Parameter Synchronization
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: multi-oos-secret
+  namespace: production
+spec:
+  provider: oos
+  rotationInterval: 60s
+  data:
+    - key: /production/db/host
+      name: db-host
+      secretStoreRef:
+        name: oos-store
+        kind: SecretStore
+
+    - key: /production/db/port
+      name: db-port
+      secretStoreRef:
+        name: oos-store
+        kind: SecretStore
+
+    - key: /production/db/password
+      name: db-password
+      secretStoreRef:
+        name: oos-store
+        kind: SecretStore
+
+# ============================================================================
+# Verification:
+#
+# 1. Check ExternalSecret status:
+#    kubectl get externalsecret oos-param-secret -n production
+#
+# 2. Check the generated Secret:
+#    kubectl get secret oos-param-secret -n production -o yaml
+# ============================================================================

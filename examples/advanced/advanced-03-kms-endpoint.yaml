@@ -1,0 +1,133 @@
+# ============================================================================
+# KMS Endpoint Configuration
+# ============================================================================
+#
+# kmsEndpoint Priority (from highest to lowest):
+#   1. Credential-level: ExternalSecret.spec.data[].kmsEndpoint    -> Highest priority
+#   2. Global config:    command.kmsEndpoint (Helm values)          -> Medium priority
+#   3. Default:          kms-vpc.{region}.aliyuncs.com              -> Lowest (used when no Endpoint is configured)
+#
+# Endpoint Address Description:
+#   Dedicated Gateway:    {kms-instance-id}.cryptoservice.kms.aliyuncs.com
+#     -> KMS credential belongs to the same instance and cluster Region/VPC; instance version 3.0+
+#   Shared Gateway (VPC): kms-vpc.{region}.aliyuncs.com
+#     -> KMS credential and cluster are in the same Region (default behavior)
+#   Shared Gateway (Public): kms.{region}.aliyuncs.com
+#     -> Cluster has public internet access capability
+#
+# Prerequisites:
+#   1. KMS credentials have been created
+#   2. SecretStore or environment variable authentication has been configured
+#   3. If using a dedicated gateway, a KMS dedicated instance (version 3.0+) must be created in the same Region/VPC as the cluster
+#
+# ============================================================================
+
+# ============================================================================
+# Method 1: Global Configuration (Helm values.yaml)
+# ============================================================================
+
+# values.yaml:
+#   command:
+#     kmsEndpoint: kms-vpc.cn-hangzhou.aliyuncs.com
+#
+# Install command:
+#   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+#
+# Effect: All KMS requests will use the specified Endpoint
+
+# ============================================================================
+# Method 2: ExternalSecret Level (overrides global configuration)
+# ============================================================================
+
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: my-secret
+      name: my-secret
+      versionId: v1
+      kmsEndpoint: kms-vpc.cn-beijing.aliyuncs.com  # Only this credential uses this Endpoint
+      secretStoreRef:
+        name: kms-store
+        kind: SecretStore
+
+# ============================================================================
+# Method 3: Different Endpoints for Different Credentials (including dedicated instance)
+# ============================================================================
+
+---
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: multi-endpoint-secret
+  namespace: production
+spec:
+  provider: kms
+  data:
+    # Use KMS in Hangzhou Region
+    - key: hangzhou-secret
+      name: hz-credential
+      versionId: v1
+      kmsEndpoint: kms-vpc.cn-hangzhou.aliyuncs.com
+      secretStoreRef:
+        name: kms-store
+        kind: SecretStore
+
+    # Use KMS in Beijing Region
+    - key: beijing-secret
+      name: bj-credential
+      versionId: v1
+      kmsEndpoint: kms-vpc.cn-beijing.aliyuncs.com
+      secretStoreRef:
+        name: kms-store
+        kind: SecretStore
+
+    # Use dedicated KMS instance (high-security credentials)
+    - key: dedicated-secret
+      name: dedicated-credential
+      versionId: v1
+      kmsEndpoint: kmsi-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
+      secretStoreRef:
+        name: kms-store
+        kind: SecretStore
+
+    # No kmsEndpoint specified; uses global configuration or default kms-vpc.{region}.aliyuncs.com
+    - key: normal-secret
+      name: normal-credential
+      versionId: v1
+      secretStoreRef:
+        name: kms-store
+        kind: SecretStore
+
+# ============================================================================
+# Method 4: Global Configuration with Dedicated KMS Instance
+# ============================================================================
+#
+# values.yaml (all credentials use the dedicated instance):
+#   command:
+#     kmsEndpoint: kmsi-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
+
+# ============================================================================
+# Verification:
+#
+# 1. Check ExternalSecret status:
+#    kubectl get externalsecret app-secret -n production
+#
+# 2. Check the generated Secret:
+#    kubectl get secret app-secret -n production -o yaml
+#
+# 3. Check controller logs to confirm Endpoint usage:
+#    kubectl logs -l app=ack-secret-manager --tail=100 | grep endpoint
+#
+# Notes:
+#
+# - When no Endpoint is configured, the default kms-vpc.{region}.aliyuncs.com is used
+# - Dedicated gateway requirements: KMS instance and cluster must be in the same Region/VPC; instance version 3.0+
+# - Dedicated instance Endpoint format: {kms-instance-id}.cryptoservice.kms.aliyuncs.com
+# - Shared gateway VPC Endpoint format: kms-vpc.{region}.aliyuncs.com
+# - Shared gateway public Endpoint format: kms.{region}.aliyuncs.com
+# ============================================================================

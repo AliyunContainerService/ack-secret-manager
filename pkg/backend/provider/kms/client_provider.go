@@ -74,7 +74,7 @@ func (p *Provider) GetUid() string {
 	return p.uid
 }
 
-func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client) (backend.SecretClient, error) {
+func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (backend.SecretClient, error) {
 	var authProvider commonp.AuthConfigProvider
 	if store.Spec.KMS != nil && store.Spec.KMS.KMS != nil {
 		authProvider = &commonp.KMSAuthAdapter{KMSAuth: store.Spec.KMS.KMS, StoreName: store.Name}
@@ -85,21 +85,21 @@ func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, k
 		return nil, err
 	}
 
-	return p.newClientWithAuth(authConfig.ClientName, authConfig)
+	return p.newClientWithAuth(authConfig.ClientName, authConfig, endpoint)
 }
 
-func (p *Provider) NewClientByENV() (backend.SecretClient, error) {
+func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error) {
 	authEnvs := commonp.BuildAuthConfigFromEnv()
 
-	return p.newClientWithAuth(backend.EnvClient, authEnvs)
+	return p.newClientWithAuth(backend.EnvClient, authEnvs, endpoint)
 }
 
-func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig) (*KMSClient, error) {
+func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig, customEndpoint string) (*KMSClient, error) {
 	region := p.GetRegion()
 
 	cred, err := auth.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
-		RamLock:     p.Manager.RamLock,
-		RamProvider: p.Manager.RamProvider,
+		RamLock:     p.RamLock,
+		RamProvider: p.RamProvider,
 	})
 	if err != nil {
 		return nil, err
@@ -108,12 +108,18 @@ func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig) (*
 		return nil, fmt.Errorf("cred is empty")
 	}
 
-	endpoint := p.GetEndpoint()
+	// Use custom endpoint if provided, otherwise use provider's default
+	endpoint := customEndpoint
+	if endpoint == "" {
+		endpoint = p.GetEndpoint()
+	}
+
 	config := &openapi.Config{
 		RegionId:   tea.String(p.Region),
 		Endpoint:   tea.String(endpoint),
 		Credential: cred,
 	}
+	// Set CA certificate based on endpoint type
 	if strings.Contains(endpoint, suffix) {
 		config.Ca = tea.String(RegionIdAndCaMap[region])
 	}

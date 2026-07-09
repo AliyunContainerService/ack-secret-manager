@@ -225,6 +225,27 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	providers := make([]provider.CredentialsProvider, 0)
 	var semaphoreProvider *provider.SemaphoreProvider
 
+	// Authentication chain order: ServiceAccount RRSA -> OIDC/RRSA -> RAM Role (AK+AssumeRole) -> AccessKey -> ECS Role (WorkerRole)
+
+	// Priority 1: OIDC/RRSA authentication (ServiceAccount dynamic token or file-based token)
+	// createOIDCProvider automatically chooses:
+	//   - Dynamic token from K8s API when ServiceAccountRef is configured (highest priority)
+	//   - File-based token from environment variables otherwise
+	if a.OidcArn != "" && a.RoleArn != "" {
+		oidcProvider, err := a.createOIDCProvider(region)
+		if err != nil {
+			klog.Errorf("Failed to create OIDC provider: %v", err)
+		} else if oidcProvider != nil {
+			providers = append(providers, oidcProvider)
+			if a.ServiceAccountName != "" && a.ServiceAccountNamespace != "" {
+				klog.Infof("Added ServiceAccount RRSA provider for %s/%s (dynamic token)", a.ServiceAccountNamespace, a.ServiceAccountName)
+			} else {
+				klog.Infof("Added file-based OIDC/RRSA provider")
+			}
+		}
+	}
+
+	// Priority 2: AccessKey + AssumeRole (cross-account scenario)
 	if a.AccessKey != "" && a.AccessSecretKey != "" && a.RoleSessionName != "" && a.RoleArn != "" {
 		ramRoleProvider := provider.NewRoleArnProvider(provider.NewAccessKeyProvider(a.AccessKey, a.AccessSecretKey), a.RoleArn, provider.RoleArnProviderOptions{
 			STSEndpoint:   provider.GetSTSEndpoint(region, true),
@@ -234,21 +255,13 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 		providers = append(providers, ramRoleProvider)
 	}
 
+	// Priority 3: Pure AccessKey (not recommended for production)
 	if a.AccessKey != "" && a.AccessSecretKey != "" {
 		akProvider := provider.NewAccessKeyProvider(a.AccessKey, a.AccessSecretKey)
 		providers = append(providers, akProvider)
 	}
 
-	// Handle OIDC authentication
-	if a.OidcArn != "" && a.RoleArn != "" {
-		oidcProvider, err := a.createOIDCProvider(region)
-		if err != nil {
-			klog.Errorf("Failed to create OIDC provider: %v", err)
-		} else if oidcProvider != nil {
-			providers = append(providers, oidcProvider)
-		}
-	}
-
+	// Priority 4: WorkerRole/ECS RAM Role (fallback, simplest deployment)
 	if backend.EnableWorkerRole {
 		providers = append(providers, provider.NewECSMetadataProvider(provider.ECSMetadataProviderOptions{
 			RefreshPeriod: a.RefreshPeriod,

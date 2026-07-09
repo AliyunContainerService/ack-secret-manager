@@ -1,5 +1,3 @@
-
-
 # serviceAccountRef Authentication: Fine-Grained RRSA Authorization at the ServiceAccount Level
 
 
@@ -163,5 +161,3 @@ spec:
   ```
 
   
-
-

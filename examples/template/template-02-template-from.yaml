@@ -1,0 +1,146 @@
+# ============================================================================
+# templateFrom Usage
+# ============================================================================
+#
+# Reference templates from external resources (ConfigMap, Secret, Literal) to enable template reuse.
+#
+# templateAs Description:
+#   Values (default):   Only process template values; the entire output becomes the value of a single Secret key
+#   KeysAndValues:      Execute the template first, then parse as key=value into multiple independent Secret keys
+#
+# target Description:
+#   Data:        Store template results in Secret data (default)
+#   Annotations: Store template results in Secret annotations
+#   Labels:      Store template results in Secret labels
+#
+# Prerequisites:
+#   1. KMS credentials have been created
+#   2. SecretStore or environment variable authentication has been configured
+#
+# ============================================================================
+
+# ============================================================================
+# Example 1: ConfigMap Reference
+# ============================================================================
+
+# Step 1: Create template ConfigMap
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: db-template-config
+  namespace: production
+data:
+  db-connection: |
+    host={{ .db_host }}
+    port={{ .db_port }}
+    database={{ .db_name }}
+    username={{ .db_user }}
+    password={{ .db_password }}
+
+---
+# Step 2: Create ExternalSecret referencing the template
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: configmap-template-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: db-host
+      name: db_host
+    - key: db-port
+      name: db_port
+    - key: db-name
+      name: db_name
+    - key: db-user
+      name: db_user
+    - key: db-password
+      name: db_password
+  target:
+    template:
+      templateFrom:
+        - configMap:
+            name: db-template-config
+            items:
+              - key: db-connection
+                templateAs: KeysAndValues
+          target: Data
+
+# ============================================================================
+# Example 2: Secret Reference
+# ============================================================================
+
+---
+# Step 1: Create template Secret (data field requires base64 encoding)
+apiVersion: v1
+kind: Secret
+metadata:
+  name: api-template-secret
+  namespace: production
+type: Opaque
+data:
+  # base64 content: api_key={{ .api_key }}\nclient_secret={{ .client_secret }}
+  api-config: YXBpX2tleT17eyAuYXBpX2tleSB9fQpjbGllbnRfc2VjcmV0PXt7IC5jbGllbnRfc2VjcmV0IH19
+
+---
+# Step 2: Create ExternalSecret
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: secret-template-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: api-credentials
+      name: api_creds
+  target:
+    template:
+      templateFrom:
+        - secret:
+            name: api-template-secret
+            items:
+              - key: api-config
+                templateAs: KeysAndValues
+          target: Data
+
+# ============================================================================
+# Example 3: Literal Template
+# ============================================================================
+
+---
+apiVersion: alibabacloud.com/v1alpha1
+kind: ExternalSecret
+metadata:
+  name: literal-template-example
+  namespace: production
+spec:
+  provider: kms
+  data:
+    - key: app-status
+      name: status
+  target:
+    template:
+      templateFrom:
+        - literal: |
+            APP_ENV={{ .status | upper }}
+            APP_READY={{ if eq .status "ready" }}true{{ else }}false{{ end }}
+          target: Data
+
+# ============================================================================
+# Verification:
+#
+# 1. Check the generated Secret:
+#    kubectl get secret configmap-template-example -n production -o yaml
+#
+# 2. Check the template source:
+#    kubectl describe externalsecret configmap-template-example -n production
+#
+# Notes:
+#
+# - KeysAndValues mode requires the template output to be strict key=value format
+# - No extra spaces at the beginning or end of lines; each line separated by newlines
+# - Do not use {{ parseKeyValue .data }} directly in templates (it outputs a map string)
+# - Correct usage: {{ (parseKeyValue .data).host }}
+# ============================================================================

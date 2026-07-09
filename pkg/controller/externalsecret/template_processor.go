@@ -729,7 +729,7 @@ func (stp *SimpleTemplateProcessor) isDNSSubdomain(name string) bool {
 	}
 
 	for _, char := range name {
-		if !(unicode.IsLetter(char) || unicode.IsDigit(char) || char == '-' || char == '.') {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '.' {
 			return false
 		}
 	}
@@ -752,7 +752,7 @@ func (stp *SimpleTemplateProcessor) isDNSLabel(name string) bool {
 	}
 
 	for _, char := range name {
-		if !(unicode.IsLower(char) || unicode.IsDigit(char) || char == '-') {
+		if !unicode.IsLower(char) && !unicode.IsDigit(char) && char != '-' {
 			return false
 		}
 	}
@@ -768,7 +768,7 @@ func (stp *SimpleTemplateProcessor) isValidSecretKey(key string) bool {
 	}
 
 	for _, char := range key {
-		if !(unicode.IsLetter(char) || unicode.IsDigit(char) || char == '-' || char == '_' || char == '.') {
+		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '_' && char != '.' {
 			return false
 		}
 	}

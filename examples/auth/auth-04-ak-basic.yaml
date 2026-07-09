@@ -1,0 +1,123 @@
+# ============================================================================
+# AK Basic Authentication (Direct AccessKey Authentication)
+# ============================================================================
+#
+# Two configuration methods:
+#   Method A (Environment Variables): Component-level unified authentication
+#   Method B (SecretStore): Namespace-level isolation
+#
+# WARNING: Not recommended for production environments!
+#   Plain AK authentication uses long-term credentials. AK leakage leads to
+#   serious security risks. Use ServiceAccount RRSA or AK AssumeRole in production.
+#
+# Prerequisites:
+#   1. Create a RAM User and grant KMS access:
+#      aliyun ram CreateUser --UserName kms-user
+#      aliyun ram CreateAccessKey --UserName kms-user
+#
+#      aliyun ram CreatePolicy --PolicyName kms-read --PolicyDocument '{
+#        "Version": "1",
+#        "Statement": [{
+#          "Effect": "Allow",
+#          "Action": ["kms:GetSecretValue", "kms:Decrypt"],
+#          "Resource": ["acs:kms:<region>:<accountId>:secret/*"]
+#        }]
+#      }'
+#
+#      aliyun ram AttachPolicyToUser --PolicyType Custom --PolicyName kms-read --UserName kms-user
+#
+#   2. Create a Kubernetes Secret containing the AK credentials:
+#      kubectl create secret generic alibaba-credentials -n <namespace> \
+#        --from-literal=id=<your-access-key-id> 
+#        --from-literal=secret=<your-access-key-secret>
+#
+# ============================================================================
+
+# ============================================================================
+# Method A: Environment Variable Configuration
+# ============================================================================
+
+# Step 1: Helm values configuration
+#
+# values.yaml:
+#   envVarsFromSecret:
+#     ACCESS_KEY_ID:
+#       secretKeyRef: alibaba-credentials
+#       key: id
+#     SECRET_ACCESS_KEY:
+#       secretKeyRef: alibaba-credentials
+#       key: secret
+#
+# Install command:
+#   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
+
+---
+# Step 2: Create ExternalSecret (no secretStoreRef needed)
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: default
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: my-database-password
+      name: db-password
+      versionId: v1
+      # No secretStoreRef needed, uses environment variable AK authentication
+
+# ============================================================================
+# Method B: SecretStore Configuration
+# ============================================================================
+
+---
+# Step 1: Create SecretStore
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: SecretStore
+metadata:
+  name: ak-store
+  namespace: production
+spec:
+  KMS:
+    KMSAuth:
+      accessKey:
+        name: alibaba-credentials
+        key: id
+      accessKeySecret:
+        name: alibaba-credentials
+        key: secret
+
+---
+# Step 2: Create ExternalSecret (reference via secretStoreRef)
+apiVersion: 'alibabacloud.com/v1alpha1'
+kind: ExternalSecret
+metadata:
+  name: app-secret
+  namespace: production
+spec:
+  provider: kms
+  rotationInterval: 30s
+  data:
+    - key: my-database-password
+      name: db-password
+      versionId: v1
+      secretStoreRef:
+        name: ak-store
+        kind: SecretStore
+
+# ============================================================================
+# Verification:
+#
+# 1. Check ExternalSecret status:
+#    kubectl get externalsecret app-secret -n <namespace>
+#
+# 2. Check the generated Secret:
+#    kubectl get secret app-secret -n <namespace> -o yaml
+#
+# Notes:
+#
+# - Plain AK authentication has the lowest security level; use ServiceAccount RRSA in production
+# - If AK must be used, rotate AccessKeys periodically and restrict RAM User permissions
+# - In SecretStore, use accessKey / accessKeySecret fields (not authSecretRef)
+# ============================================================================

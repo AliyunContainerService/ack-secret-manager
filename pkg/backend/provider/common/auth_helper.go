@@ -94,6 +94,8 @@ func BuildAuthConfig(
 		authConfig.ServiceAccountName = saConfig.ServiceAccountName
 		authConfig.ServiceAccountNamespace = saConfig.ServiceAccountNamespace
 		authConfig.TokenAudiences = saConfig.TokenAudiences
+		authConfig.RemoteRoleArn = saConfig.RemoteRoleArn
+		authConfig.RemoteRoleSessionName = saConfig.RemoteRoleSessionName
 	} else {
 		// Use traditional authentication method
 		traditionalConfig, err := buildAuthConfigWithCrossNamespace(ctx, store, kube, authProvider, clusterId, uid)
@@ -188,12 +190,18 @@ func buildServiceAccountRefAuthConfig(
 		tokenAudiences = []string{TokenAudience}
 	}
 
+	// Read cross-account (remote) role configuration from provider
+	remoteRoleArn := authProvider.GetRemoteRAMRoleARN()
+	remoteRoleSessionName := authProvider.GetRemoteRAMRoleSessionName()
+
 	return auth.AuthConfig{
 		RoleArn:                 roleArn,
 		OidcArn:                 oidcProviderArn,
 		ServiceAccountName:      saRef.Name,
 		ServiceAccountNamespace: saNamespace,
 		TokenAudiences:          tokenAudiences,
+		RemoteRoleArn:           remoteRoleArn,
+		RemoteRoleSessionName:   remoteRoleSessionName,
 	}, nil
 }
 

@@ -58,7 +58,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 		// Only return error if it's not NotFound - NotFound is normal when resource is deleted
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
-	log.Info("cluster secret store info", "name", req.NamespacedName.String())
+	log.Info("cluster secret store info", "name", req.String())
 
 	clientName := fmt.Sprintf("cluster/%s", clusterSecretStore.Name)
 	kmsProvider := backend.GetProviderByName(backend.ProviderKMSName)
@@ -91,7 +91,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	validationErr := r.validateClusterSecretStoreSpec(storeWrapper)
 	if validationErr != nil {
 		log.Error(validationErr, "ClusterSecretStore validation failed")
-		err := r.updateStatusWithError(log, clusterSecretStore, v1alpha1.ReasonValidationFailed, validationErr.Error())
+		err := r.updateStoreStatusWithError(log, clusterSecretStore, v1alpha1.ReasonValidationFailed, validationErr.Error())
 		if err != nil {
 			log.Error(err, "failed to update ClusterSecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
@@ -112,7 +112,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	if needRecreateClient {
 		err := r.recreateClient(ctx, log, clientName, kmsProvider, oosProvider, storeWrapper)
 		if err != nil {
-			updateErr := r.updateStatusWithError(log, clusterSecretStore, v1alpha1.ReasonClientCreationFailed, err.Error())
+			updateErr := r.updateStoreStatusWithError(log, clusterSecretStore, v1alpha1.ReasonClientCreationFailed, err.Error())
 			if updateErr != nil {
 				log.Error(updateErr, "failed to update ClusterSecretStore status with error")
 			}
@@ -133,7 +133,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 		}
 
 		// Update status to indicate readiness
-		err = r.updateStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly)
+		err = r.updateStoreStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly)
 		if err != nil {
 			log.Error(err, "failed to update ClusterSecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
@@ -144,7 +144,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	// Ensure status is initialized even if no changes are detected
 	// If no conditions exist, initialize the status
 	if len(clusterSecretStore.Status.Conditions) == 0 {
-		if statusErr := r.updateStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
+		if statusErr := r.updateStoreStatusWithReadyAndGeneration(log, clusterSecretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
 			log.Error(statusErr, "failed to initialize ClusterSecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, statusErr
 		}
@@ -152,7 +152,7 @@ func (r *ClusterSecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.R
 	}
 
 	// Check if we need to update status
-	statusUpdated, err := r.updateStatus(log, clusterSecretStore)
+	statusUpdated, err := r.updateStoreStatus(log, clusterSecretStore)
 	if err != nil || !statusUpdated {
 		log.Error(err, "failed to update ClusterSecretStore status")
 		return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
@@ -178,7 +178,7 @@ func (r *ClusterSecretStoreReconciler) addFinalizer(logger logr.Logger, css *v1a
 	logger.Info("Adding Finalizer for the clustersecretstore", "name", css.Name)
 	css.SetFinalizers(append(css.GetFinalizers(), clusterSecretFinalizer))
 	//update cluster secret store instance
-	err := r.Client.Update(context.TODO(), css)
+	err := r.Update(context.TODO(), css)
 	if err != nil {
 		logger.Error(err, "Failed to update clustersecretstore with finalizer", "name", css.Name)
 		return err
@@ -187,19 +187,19 @@ func (r *ClusterSecretStoreReconciler) addFinalizer(logger logr.Logger, css *v1a
 }
 
 // updateStatus updates the status of the ClusterSecretStore based on validation results
-func (r *ClusterSecretStoreReconciler) updateStatus(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore) (bool, error) {
+func (r *ClusterSecretStoreReconciler) updateStoreStatus(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore) (bool, error) {
 	storeWrapper := &ClusterSecretStoreWrapper{clusterSecretStore}
-	return r.CommonReconciler.updateStatusWithReady(logger, storeWrapper)
+	return r.updateStatusWithReady(logger, storeWrapper)
 }
 
 // updateStatusWithError updates the status with an error condition
-func (r *ClusterSecretStoreReconciler) updateStatusWithError(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore, reason, message string) error {
+func (r *ClusterSecretStoreReconciler) updateStoreStatusWithError(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore, reason, message string) error {
 	storeWrapper := &ClusterSecretStoreWrapper{clusterSecretStore}
-	return r.CommonReconciler.updateStatusWithError(logger, storeWrapper, reason, message)
+	return r.updateStatusWithError(logger, storeWrapper, reason, message)
 }
 
 // updateStatusWithReadyAndGeneration updates the status to indicate the store is ready with specified capabilities and records the observed generation
-func (r *ClusterSecretStoreReconciler) updateStatusWithReadyAndGeneration(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore, capabilities v1alpha1.SecretStoreCapabilities) error {
+func (r *ClusterSecretStoreReconciler) updateStoreStatusWithReadyAndGeneration(logger logr.Logger, clusterSecretStore *v1alpha1.ClusterSecretStore, capabilities v1alpha1.SecretStoreCapabilities) error {
 	storeWrapper := &ClusterSecretStoreWrapper{clusterSecretStore}
-	return r.CommonReconciler.updateStatusWithReadyAndGeneration(logger, storeWrapper, capabilities)
+	return r.updateStatusWithReadyAndGeneration(logger, storeWrapper, capabilities)
 }

@@ -1,5 +1,3 @@
-
-
 # serviceAccountRef认证:  ServiceAccount维度的细粒度RRSA授权
 
 ## 背景
@@ -163,13 +161,3 @@ spec:
            Code: Forbidden.NoPermission
            Message: code: 403, This operation for acs:kms:cn-hangzhou:xxxxx:secret/team-a is forbidden by permission system. request id: ...
   ```
-
-  
-
-
-
-
-
-
-
-
