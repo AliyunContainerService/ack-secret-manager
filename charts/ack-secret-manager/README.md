@@ -109,8 +109,8 @@
 | command.cleanupSecretOnFailure                      | kms 凭据同步失败时是否删除集群 Secret                                                                                                       | false                  |
 | command.processClusterSecretStore                   | 是否处理 ClusterSecretStore 资源                                                                                                           | true                   |
 | command.processClusterExternalSecret                | 是否处理 ClusterExternalSecret 资源                                                                                                        | true                   |
-| command.enableCrossNamespaceSecretStore             | 是否启用跨命名空间的 SecretStore 引用                                                                                                      | true                   |
-| command.enableCrossNamespaceAuthRef                 | 是否允许 SecretStore 跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）                                                            | true                   |
+| command.enableCrossNamespaceSecretStore             | 是否启用跨命名空间的 SecretStore 引用                                                                                                      | false                   |
+| command.enableCrossNamespaceAuthRef                 | 是否允许 SecretStore 跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）                                                            | false                   |
 | command.aliuiid                                     | 用于拼接OIDC身份提供商ARN的阿里云账号                                                                                                       |                        |
 | command.clusterId                                   | 用于拼接OIDC身份提供商ARN的阿里云容器服务集群ID                                                                                              |                        |
 | image.repository                                    | 指定的ack-secret-manager 镜像仓库名称                                                                                                      | acs/ack-secret-manager |
@@ -281,3 +281,4 @@ ack-secret-manager 涉及四种 CRD 资源，各 CRD 概述、跨命名空间控
 | `0.6.1`  | 2026年2月28日 | 1.修改ClusterExternalSecret资源命名空间匹配添加<br />2.增加secret和serviceaccount控制器以Reconcile ClusterSecretStore和SecretStore资源<br />3.优化serviceaccount认证时token刷新时间 |
 | `0.6.2`  | 2026年3月2日  | 支持同步外部secret时，使用高级模板解析功能在创建 Kubernetes Secret 之前转换和自定义密钥数据 |
 | `0.6.3`  | 2026年6月30日  | 功能修复与文档优化 |
+| `0.6.4`  | 2026年7月30日  | **不兼容变更**（安全加固）：<br />1.跨命名空间引用默认禁止（`enableCrossNamespaceSecretStore` 和 `enableCrossNamespaceAuthRef` 默认值从 `true` 改为 `false`），如需跨命名空间引用请显式设置为 `true`<br />2.新增 KMS Endpoint SSRF 验证 |

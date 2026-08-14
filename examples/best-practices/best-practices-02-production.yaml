@@ -195,7 +195,7 @@ spec:
 # - RAM Roles should follow the principle of least privilege, restricting Resource scope
 # - rotationInterval >= 30s to avoid frequent API calls
 # - Always configure conditions on ClusterSecretStore to restrict access scope
-# - In production, set enableCrossNamespaceSecretStore and enableCrossNamespaceAuthRef to false
+# - In production, keep enableCrossNamespaceSecretStore and enableCrossNamespaceAuthRef at their default of false
 # - Avoid using plain AK authentication
 # - Regularly audit RAM Role permissions and ExternalSecret statuses
 # ============================================================================

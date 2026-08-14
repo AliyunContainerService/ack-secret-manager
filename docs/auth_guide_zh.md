@@ -77,6 +77,8 @@ ExternalSecret 的每个 `DataSource` 根据是否配置 `secretStoreRef` 决定
 
 ## Namespace 规则
 
+默认情况下，`command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 均为 `false`，**默认禁止跨 namespace 引用**。如需开启跨 namespace 引用，请将对应参数设置为 `true`。
+
 默认情况下，`command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 均为 `true`，**允许跨 namespace 引用**。
 
 **使用 SecretStore 时**：

@@ -28,7 +28,7 @@ const (
 )
 
 // EnableCrossNamespaceAuthRef controls whether cross namespace references are allowed for auth
-var EnableCrossNamespaceAuthRef = true
+var EnableCrossNamespaceAuthRef = false
 
 // AuthConfigProvider defines an interface for extracting authentication configuration
 // from provider-specific auth structs (KMSAuth, OOSAuth, etc.)
@@ -251,10 +251,9 @@ func buildAuthConfigWithCrossNamespace(
 
 		accessKey, err := utils.GetConfigFromSecret(ctx, kube, accessKeyRef)
 		if err != nil {
-			klog.Errorf("get ak config from secret error %v", err)
-		} else {
-			authConfig.AccessKey = string(accessKey)
+			return auth.AuthConfig{}, fmt.Errorf("failed to get access key from secret %s/%s: %w", accessKeyRef.Namespace, accessKeyRef.Name, err)
 		}
+		authConfig.AccessKey = string(accessKey)
 	}
 
 	if authProvider.GetAccessKeySecret() != nil {
@@ -290,10 +289,9 @@ func buildAuthConfigWithCrossNamespace(
 
 		accessKeySecret, err := utils.GetConfigFromSecret(ctx, kube, accessKeySecretRef)
 		if err != nil {
-			klog.Errorf("get sk config from secret error %v", err)
-		} else {
-			authConfig.AccessSecretKey = string(accessKeySecret)
+			return auth.AuthConfig{}, fmt.Errorf("failed to get access key secret from secret %s/%s: %w", accessKeySecretRef.Namespace, accessKeySecretRef.Name, err)
 		}
+		authConfig.AccessSecretKey = string(accessKeySecret)
 	}
 
 	authConfig.RoleArn = authProvider.GetRAMRoleARN()

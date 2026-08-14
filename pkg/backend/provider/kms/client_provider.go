@@ -3,7 +3,6 @@ package kms
 import (
 	"context"
 	"fmt"
-	"strings"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
@@ -108,10 +107,17 @@ func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig, cu
 		return nil, fmt.Errorf("cred is empty")
 	}
 
-	// Use custom endpoint if provided, otherwise use provider's default
+	// Use custom endpoint if provided, otherwise use provider's default.
+	// All endpoints are validated to prevent SSRF attacks (CWE-918).
+	// Custom endpoints come from user-controlled ExternalSecret CR fields;
+	// the default endpoint comes from the --kms-endpoint CLI flag which
+	// could be misconfigured by a cluster admin.
 	endpoint := customEndpoint
 	if endpoint == "" {
 		endpoint = p.GetEndpoint()
+	}
+	if err := validateKmsEndpoint(endpoint); err != nil {
+		return nil, err
 	}
 
 	config := &openapi.Config{
@@ -119,8 +125,9 @@ func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig, cu
 		Endpoint:   tea.String(endpoint),
 		Credential: cred,
 	}
-	// Set CA certificate based on endpoint type
-	if strings.Contains(endpoint, suffix) {
+	// Set CA certificate based on endpoint type using anchored suffix match
+	// instead of unanchored strings.Contains to prevent false positives
+	if isCryptoserviceEndpoint(endpoint) {
 		config.Ca = tea.String(RegionIdAndCaMap[region])
 	}
 

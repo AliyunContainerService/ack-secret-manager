@@ -346,16 +346,21 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 			}
 		}
 
-		// Check namespace regex
+		// Check namespace regex (anchored full-string match to prevent substring bypass)
 		for j, regex := range condition.NamespaceRegexes {
-			matched, err := regexp.MatchString(regex, namespaceName)
+			// Anchor the pattern to match the entire namespace name, not a substring.
+			// This prevents e.g. regex "team-a" from matching "evil-team-a".
+			anchoredRegex := "^(?:" + regex + ")$"
+			re, err := regexp.Compile(anchoredRegex)
 			if err != nil {
+				// Fail-closed: invalid regex means the restriction cannot be evaluated,
+				// so we deny access rather than silently skipping the check.
 				klog.Errorf("Invalid regex %s in ClusterSecretStore %s condition %d regex %d: %v",
 					regex, clusterSecretStore.Name, i, j, err)
-				continue
+				return false
 			}
 
-			if matched {
+			if re.MatchString(namespaceName) {
 				return true
 			}
 		}
@@ -416,16 +421,20 @@ func IsNamespaceAllowedForClusterExternalSecret(ces *v1alpha1.ClusterExternalSec
 			}
 		}
 
-		// Check namespace regex
+		// Check namespace regex (anchored full-string match to prevent substring bypass)
 		for j, regex := range condition.NamespaceRegexes {
-			matched, err := regexp.MatchString(regex, namespace.Name)
+			// Anchor the pattern to match the entire namespace name, not a substring.
+			anchoredRegex := "^(?:" + regex + ")$"
+			re, err := regexp.Compile(anchoredRegex)
 			if err != nil {
+				// Fail-closed: invalid regex means the restriction cannot be evaluated,
+				// so we deny access rather than silently skipping the check.
 				klog.Errorf("Invalid regex %s in ClusterExternalSecret %s condition %d regex %d: %v",
 					regex, ces.Name, i, j, err)
-				continue
+				return false
 			}
 
-			if matched {
+			if re.MatchString(namespace.Name) {
 				return true
 			}
 		}

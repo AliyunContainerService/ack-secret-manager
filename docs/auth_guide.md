@@ -77,6 +77,8 @@ Each `DataSource` in an ExternalSecret determines its authentication path based 
 
 ## Namespace Rules
 
+By default, both `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` are set to `false`, **disabling cross-namespace references by default** for security. To enable cross-namespace references, set the corresponding parameter to `true`.
+
 By default, both `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` are set to `true`, **allowing cross-namespace references**.
 
 **When Using SecretStore**:

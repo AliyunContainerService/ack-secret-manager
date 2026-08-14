@@ -21,7 +21,7 @@ ack-secret-manager involves 4 types of CRDs, divided into two categories:
 
 | CRD | Scope | Description |
 | --- | ----- | ----------- |
-| **SecretStore** | Namespace | Stores authentication info, referenced by ExternalSecrets in the same namespace by default, also supports cross-namespace references (enabled by default) |
+| **SecretStore** | Namespace | Stores authentication info, referenced by ExternalSecrets in the same namespace by default, also supports cross-namespace references (disabled by default) |
 | **ClusterSecretStore** | Cluster | Stores authentication info, can be referenced by ExternalSecrets in any namespace |
 
 ### Data CRDs (Define Sync Rules)
@@ -38,7 +38,7 @@ ack-secret-manager involves 4 types of CRDs, divided into two categories:
 | Feature | SecretStore | ClusterSecretStore |
 | ------- | ----------- | ------------------ |
 | **Resource Level** | Namespace | Cluster |
-| **Scope** | Same namespace by default, also supports cross-namespace references (enabled by default) | Entire cluster |
+| **Scope** | Same namespace by default, also supports cross-namespace references (disabled by default) | Entire cluster |
 | **Access Control** | None | Restricts accessible namespaces via `spec.conditions` |
 | **Use Cases** | Multi-tenant isolation, environment separation | Global sharing, centralized management |
 
@@ -58,11 +58,13 @@ Both require users to manually create the resources themselves. The key differen
 
 To enhance security and flexibility, ack-secret-manager provides multiple cross-namespace control mechanisms:
 
+> **Breaking Change (v0.6.4)**: For security hardening, both `enableCrossNamespaceSecretStore` and `enableCrossNamespaceAuthRef` default values changed from `true` to `false`. If your deployment uses cross-namespace references, you must explicitly set these parameters to `true` in `values.yaml` when upgrading, otherwise cross-namespace references will be rejected.
+
 ### ExternalSecret Referencing SecretStore Control
 
 - Controlled by `command.enableCrossNamespaceSecretStore` parameter to determine if ExternalSecret can reference SecretStore across namespaces
-- Default value is `true`, allowing cross-namespace references
-- When set to `false`, ExternalSecret can only reference SecretStore in the same namespace
+- Default value is `false`, disallowing cross-namespace references by default
+- When set to `true`, ExternalSecret can reference SecretStore across namespaces
 
 **Reference Rules When Using SecretStore**:
 
@@ -81,8 +83,8 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
 ### SecretStore Referencing Authentication Resources Control
 
 - Controlled by `command.enableCrossNamespaceAuthRef` parameter to determine if SecretStore can reference authentication resources (ServiceAccount, AccessKey Secret) across namespaces
-- Default value is `true`, allowing cross-namespace references
-- When set to `false`, SecretStore can only reference authentication resources in the same namespace
+- Default value is `false`, disallowing cross-namespace references by default
+- When set to `true`, SecretStore can reference authentication resources across namespaces
 
 **When Using SecretStore**:
 
@@ -126,7 +128,7 @@ For scenarios requiring cross-namespace access, the following combinations are r
 ### Security Best Practices
 
 1. **Principle of Least Privilege**:
-   - In scenarios where cross-namespace access is not needed, set `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` to false
+   - Keep `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` at their default value of `false` unless cross-namespace access is explicitly required
    - Prefer namespace-level resources (SecretStore and ExternalSecret)
 2. **Access Control Configuration**:
    - When using ClusterSecretStore, explicitly configure `spec.conditions` to restrict accessible namespaces
@@ -141,7 +143,7 @@ For scenarios requiring cross-namespace access, the following combinations are r
 
 ### Features and Use Cases
 
-SecretStore is a namespace-level resource used to define access credentials (such as RRSA, AK configurations, etc.). It is referenced by ExternalSecrets in the same namespace by default, but also supports cross-namespace references (enabled by default, see [Cross-Namespace Control Mechanisms](#cross-namespace-control-mechanisms)). Suitable for multi-tenant isolation, environment separation, and similar scenarios.
+SecretStore is a namespace-level resource used to define access credentials (such as RRSA, AK configurations, etc.). It is referenced by ExternalSecrets in the same namespace by default, but also supports cross-namespace references (disabled by default, see [Cross-Namespace Control Mechanisms](#cross-namespace-control-mechanisms)). Suitable for multi-tenant isolation, environment separation, and similar scenarios.
 
 ### Configuration Notes
 

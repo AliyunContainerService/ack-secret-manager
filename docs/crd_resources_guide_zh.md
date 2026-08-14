@@ -21,7 +21,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 
 | CRD | 作用范围 | 说明 |
 | --- | -------- | ---- |
-| **SecretStore** | 命名空间级 | 存储认证信息，默认被同 namespace 的 ExternalSecret 引用，也支持跨 namespace 引用（默认允许） |
+| **SecretStore** | 命名空间级 | 存储认证信息，默认被同 namespace 的 ExternalSecret 引用，也支持跨 namespace 引用（默认禁止） |
 | **ClusterSecretStore** | 集群级 | 存储认证信息，可被任意 namespace 的 ExternalSecret 引用 |
 
 ### 数据类 CRD（定义同步规则）
@@ -38,7 +38,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 | 特性 | SecretStore | ClusterSecretStore |
 | ---- | ----------- | ------------------ |
 | **资源级别** | Namespace 级别 | 集群级别 |
-| **作用范围** | 默认同 namespace，也可被跨 namespace 引用（默认允许） | 整个集群 |
+| **作用范围** | 默认同 namespace，也可被跨 namespace 引用（默认禁止） | 整个集群 |
 | **访问控制** | 无 | 通过 `spec.conditions` 限制可访问的命名空间 |
 | **适用场景** | 多租户隔离、环境分离 | 全局共享、集中管理 |
 
@@ -58,11 +58,13 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 
 为了增强安全性和灵活性，ack-secret-manager 提供了多种跨命名空间控制机制：
 
+> **不兼容变更（v0.6.4）**：为安全加固，`enableCrossNamespaceSecretStore` 和 `enableCrossNamespaceAuthRef` 默认值从 `true` 改为 `false`。如果您的部署使用了跨命名空间引用，升级时必须在 `values.yaml` 中显式将这两个参数设置为 `true`，否则跨命名空间引用将被拒绝。
+
 ### ExternalSecret 引用 SecretStore 控制
 
 - 通过 `command.enableCrossNamespaceSecretStore` 参数控制 ExternalSecret 是否可以跨命名空间引用 SecretStore
-- 默认值为 `true`，即允许跨命名空间引用
-- 设置为 `false` 时，ExternalSecret 只能引用同命名空间的 SecretStore
+- 默认值为 `false`，即默认禁止跨命名空间引用
+- 设置为 `true` 时，ExternalSecret 可以跨命名空间引用 SecretStore
 
 **使用 SecretStore 时的引用规则**：
 
@@ -81,8 +83,8 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 ### SecretStore 引用认证资源控制
 
 - 通过 `command.enableCrossNamespaceAuthRef` 参数控制 SecretStore 是否可以跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）
-- 默认值为 `true`，即允许跨命名空间引用
-- 设置为 `false` 时，SecretStore 只能引用同命名空间的认证资源
+- 默认值为 `false`，即默认禁止跨命名空间引用
+- 设置为 `true` 时，SecretStore 可以跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）
 
 **使用 SecretStore 时**：
 
@@ -126,7 +128,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 ### 安全最佳实践
 
 1. **最小权限原则**：
-   - 在不需要跨命名空间访问的场景中，将 `command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 设置为 false
+   - 保持 `command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 为默认值 `false`，除非确实需要跨命名空间访问
    - 优先使用命名空间级别的资源（SecretStore 和 ExternalSecret）
 2. **访问控制配置**：
    - 使用 ClusterSecretStore 时，明确配置 `spec.conditions` 来限制可访问的命名空间
@@ -141,7 +143,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 
 ### 功能与适用场景
 
-SecretStore 是命名空间级别资源，用于定义访问凭据（如 RRSA、AK 配置等）。默认被同命名空间的 ExternalSecret 引用，也支持跨命名空间引用（默认允许，详见[跨命名空间控制机制](#跨命名空间控制机制)）。适用于多租户隔离、环境分离等场景。
+SecretStore 是命名空间级别资源，用于定义访问凭据（如 RRSA、AK 配置等）。默认被同命名空间的 ExternalSecret 引用，也支持跨命名空间引用（默认禁止，详见[跨命名空间控制机制](#跨命名空间控制机制)）。适用于多租户隔离、环境分离等场景。
 
 ### 配置说明
 

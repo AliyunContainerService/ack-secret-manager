@@ -105,8 +105,8 @@ func main() {
 	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "clean up the corresponding secret in the Kubernetes cluster when the secret sync operation fails.")
 	flag.BoolVar(&processClusterSecretStore, "process-cluster-secret-store", true, "Enable processing of ClusterSecretStore resources")
 	flag.BoolVar(&processClusterExternalSecret, "process-cluster-external-secret", true, "Enable processing of ClusterExternalSecret resources")
-	flag.BoolVar(&enableCrossNamespaceSecretStore, "enable-cross-namespace-secret-store", true, "Enable cross namespace SecretStore reference in ExternalSecret. Set to false to disable.")
-	flag.BoolVar(&enableCrossNamespaceAuthRef, "enable-cross-namespace-auth-ref", true, "Enable cross namespace AuthRef reference in SecretStore. Set to false to disable.")
+	flag.BoolVar(&enableCrossNamespaceSecretStore, "enable-cross-namespace-secret-store", false, "Enable cross namespace SecretStore reference in ExternalSecret. Set to false to disable.")
+	flag.BoolVar(&enableCrossNamespaceAuthRef, "enable-cross-namespace-auth-ref", false, "Enable cross namespace AuthRef reference in SecretStore. Set to false to disable.")
 
 	flag.Parse()
 
