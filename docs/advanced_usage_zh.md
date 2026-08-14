@@ -1,6 +1,6 @@
 # ACK Secret Manager 高级用法指南
 
-> 本文档说明 ack-secret-manager 的高级功能，包括 JSON/YAML 凭据解析、跨账号同步、kmsEndpoint 配置、凭据轮转、多数据源支持。
+> 本文档说明 ack-secret-manager 的高级功能，包括 JSON/YAML 凭据解析、跨账号同步、kmsEndpoint 配置、凭据轮转、多数据源支持、同步失败处理语义。
 
 ## 目录
 
@@ -9,6 +9,7 @@
 - [kmsEndpoint 配置](#kmsendpoint-配置)
 - [凭据轮转](#凭据轮转)
 - [多数据源支持](#多数据源支持)
+- [同步失败处理语义](#同步失败处理语义)
 
 ## JSON/YAML 凭据解析
 
@@ -50,7 +51,7 @@
 | 字段                     | 必填 | 默认行为     | 说明                           |
 | ------------------------ | ---- | ------------ | ------------------------------ |
 | `extract.key`            | 是   | —            | KMS 凭据名称                   |
-| `extract.name`           | 是   | —            | ExternalSecret 名称，也是生成的 K8s Secret 名称 |
+| `extract.name`           | 否   | 控制器不使用 | 可选字段；仅在 `spec.data[].name` 非 jmesPath 场景生效，extract 路径下控制器不使用该字段；Secret data 的 key 默认为解析后 JSON/YAML 的顶层 key，配置 `extract.jmesPath` 时由各条目的 `objectAlias` 决定，可通过 `replaceRule` 重命名 |
 | `extract.versionId`      | 否   | 拉取最新版本 | KMS 凭据版本                   |
 | `extract.kmsEndpoint`    | 否   | 使用全局配置 | KMS 服务地址                   |
 | `extract.secretStoreRef` | 否   | 使用默认值   | SecretStore 引用               |
@@ -60,6 +61,7 @@
 > **说明**：
 > - `extract` 会将 JSON 凭据中的所有字段展平为 key-value 对，直接存入 K8s Secret，无需用户预先知道 JSON 结构
 > - `replaceRule` 用于解决 KMS 凭据中的 key 包含非法字符（如 `.`、`/`）导致无法写入 K8s Secret 的问题，可通过正则匹配批量重命名 key
+> - 在 extract 路径下，`replaceRule` 除重命名 key（正则匹配）外，还会对 Secret data 的值执行字面量替换
 >
 > **replaceRule 示例**：KMS 凭据中包含 key `db.password`，K8s Secret 不允许 `.` 作为 key：
 > ```yaml
@@ -97,6 +99,8 @@
 **环境变量方式**（适用于 RRSA / AK 扮演 / AK / WorkerRole）：
 
 通过 `ALICLOUD_REMOTE_ROLE_ARN` 和 `ALICLOUD_REMOTE_ROLE_SESSION_NAME` 环境变量配置。
+
+> **说明**：`remoteRamRoleSessionName` 与 `ramRoleSessionName` 均可省略，省略时使用组件默认会话名 `ack-secret-manager`。
 
 ### 前提条件
 
@@ -227,3 +231,52 @@ spec:
 ```
 
 完整示例请参考 [examples/advanced/advanced-05-oos-parameter.yaml](../examples/advanced/advanced-05-oos-parameter.yaml)
+
+## 同步失败处理语义
+
+### 功能说明
+
+从后端数据源（KMS/OOS）拉取凭据时，部分或全部数据源可能因瞬态错误（限流、5xx 响应、网络抖动等）或持久性错误（凭据不存在、权限不足等）而失败。自 v0.6.5 起，控制器会根据失败范围与是否配置了模板解析来保护集群 Secret，既避免写入不完整或错误的数据，也避免误删或误清空仍然有效的 Secret。
+
+瞬态错误在被报告为失败前会统一重试：重试次数有界、采用带抖动的指数退避，且在控制器优雅停机期间可随时取消。每个数据源条目在瞬态失败时最多发起 3 次云端 API 调用（重试间隔约 2s/4s，带 ±20% 抖动），重试次数当前不可通过参数配置。`status.dataSyncResults` 中可见的失败均为重试耗尽后的最终错误。
+
+### 失败处理真值表
+
+| 失败范围 | 模板解析 | cleanupSecretOnFailure | 处理行为 |
+| -------- | -------- | ---------------------- | -------- |
+| 全部成功 | 任意 | 任意 | 正常写入，行为不变 |
+| 部分失败 | 未配置 | 任意 | **合并写入——仅更新获取成功的部分**：成功键写入新值，失败键保留 Secret 中的旧值 |
+| 部分失败 | 已配置 | 任意 | **fail-closed**：整体跳过 Secret 写入，保留旧 Secret |
+| 全量失败 | 任意 | `false`（默认） | 跳过 Secret 写入，保留旧 Secret |
+| 全量失败 | 任意 | `true` | 删除集群 Secret |
+
+**要点说明**：
+
+- **部分失败**指部分数据源成功、部分失败；**全量失败**指所有已配置的数据源（`spec.data[]` + `spec.dataProcess[]`）均失败。
+- 通俗地说，凭据获取部分失败时，控制器**仅更新获取成功的部分**：每个成功的键写入新值，每个失败的键保留 Secret 中的旧值，失败键的旧值不会丢失或被覆盖。
+- 合并写入的保留键集合与成功路径采用完全一致的键命名规则推导（`name`，或 `key` 回退，或 `jmesPath` 别名）。
+- **失败的 `dataProcess[].extract` 条目的保守保留**：当失败条目是 `dataProcess[].extract` 时，控制器无法静态推断它“本应产出哪些键”，只能保守保留 Secret 中所有未被成功条目覆盖的旧键。该保守超集中可能包含用户已从 spec 删除的条目的旧键——这些键在 `status.dataSyncResults` 中没有对应的失败记录，因为条目已不存在。该现象需要“删条目”与“extract 失败”恰好时间重叠才会出现，且残留键会在下一个全量成功的轮次中自动清除。若失败条目持续存在，则保留键持续保留，属预期行为。
+- 当 Secret 尚不存在时没有旧值可保留：部分失败轮次仅写入成功键。
+- **重复后端键豁免**：同一后端键被多个 spec 条目引用，且同一轮次中一个成功、另一个失败时，控制器按“本轮数据可用”豁免该失败：不计入失败统计，也不在 `status.dataSyncResults` 中重复上报 `Failed`。上述写入/删除契约不受该豁免影响。
+- 全量失败且 `cleanupSecretOnFailure=true` 时的删除同样适用于配置了模板的 ExternalSecret，且此时模板渲染出的静态内容永远不会被写入；部分失败时无论该开关如何取值都不会删除 Secret。
+- `cleanupSecretOnFailure` 默认为 `false`（启动参数 `--cleanup-secret-on-failure`，Helm 配置项 `command.cleanupSecretOnFailure`）。
+- **零产出守卫（fail-closed）**：无失败但产出 0 个 key 的轮次——如 `dataProcess[].extract` 引用的后端文档被清空（`{}` 或空字符串），或未声明任何数据源且未配置模板的 ExternalSecret——不会写入空数据集：否则会删除已有 Secret（`cleanupSecretOnFailure=true`）或清空其 Data。此时跳过写入、不触发删除，并在 `status.dataSyncResults` 中上报 `zero_output_guard` 条目。因此故意清空后端文档不再导致集群 Secret 被清空/删除，Secret 会保留到下一个产出 key 的轮次。该守卫仅在无失败轮次触发，不会抢占上述任何失败契约。**模板后零产出守卫**覆盖渲染之后的同类缺口：所有数据源成功且源数据非空，但模板渲染产出 0 个数据键时（Replace 模式下内联数据模板全部执行失败，或 Data 目标的 `templateFrom` 渲染出零个有效键），同样跳过写入、扣住删除，并上报 `template_zero_output_guard` 条目。
+- **零产出保护的已知限制**：（a）多个 `dataProcess[].extract` 中仅部分条目产出零键时，这些条目的键会按全成功语义正常移除，不受守卫保护；（b）Replace 模式下模板渲染部分失败（部分数据模板执行失败、部分成功）时，写入仅含成功渲染键的残缺数据集——这保留了模板执行错误非致命的既有语义，仅在控制器日志中以 warning 提示。
+
+### 与旧版本的行为差异
+
+| 场景 | v0.6.5 之前的行为 | v0.6.5 起的行为 |
+| ---- | ---------------- | --------------- |
+| 部分失败（未配置模板） | Secret 被已获取到的成功值整体覆盖更新（失败键的旧值丢失） | 合并写入——**仅更新获取成功的部分**：成功键写入新值，失败键保留旧值 |
+| 部分失败（已配置模板） | 部分数据可能被渲染为错误的 Secret | fail-closed：跳过写入，保留旧 Secret |
+| 全量失败且 `cleanupSecretOnFailure=false` | Secret 被清空（写入空数据） | 保留旧 Secret |
+| 全量失败且 `cleanupSecretOnFailure=true` | 删除 Secret | 删除 Secret（现同样适用于配置了模板的 ExternalSecret） |
+| 全部成功但产出 0 个 key（如后端文档被清空） | Secret 被静默清空（`cleanupSecretOnFailure=true` 时被删除） | fail-closed：跳过写入，保留已有 Secret，上报 `zero_output_guard` |
+
+### 失败可见性与状态语义
+
+- 同步失败记录在 `status.dataSyncResults` 中（键、状态、原因）。失败不会改变轮询频率，也不会加快或减慢后续的同步轮询。
+- 当某轮同步未产出任何数据而跳过写入时，`status.dataSyncResults` 中会出现一条 Status 为 `Failed` 的条目，其 key 为合成标识（非后端密钥名），Reason 说明跳过写入的原因。
+- 对于可重试的瞬态错误（5xx/429/请求超时/连接重置），失败结果可能延迟数秒（约 3~10 秒）才反映到 `status`，这是重试机制的预期行为。
+- 关闭自动轮询（`--disable-polling` / `command.disablePolling`）后，单次同步失败不会自动重试；只有当该 ExternalSecret 的 spec 发生变更时才会再次尝试同步。单次同步过程中的瞬态重试不受此影响。
+- `status.dataSyncResults` 在同步结果语义（各键的状态/原因，或整体成功状态）变化时更新，并在控制器实际写入（或删除）目标 Secret 后强制刷新同步时间戳；`synchronizationTime` 表示当前上报结果的记录时间，**不会**每次同步轮询刷新：稳态轮询轮次（拉取到的数据无变化、未写入 Secret）中，时间戳保持为上次成功同步的时间，请勿将其用作活性心跳。

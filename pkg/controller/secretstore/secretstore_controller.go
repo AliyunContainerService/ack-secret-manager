@@ -53,7 +53,7 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	log := r.Log.WithValues("SecretStore", req.NamespacedName)
 	secretStore := &v1alpha1.SecretStore{}
 
-	err := r.Get(r.Ctx, req.NamespacedName, secretStore)
+	err := r.Get(ctx, req.NamespacedName, secretStore)
 	if err != nil {
 		// Only return error if it's not NotFound - NotFound is normal when resource is deleted
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
@@ -70,18 +70,18 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Handle deletion
 	if secretStore.GetDeletionTimestamp() != nil {
 		return r.handleDeletion(log, secretStore.GetFinalizers(), secretStore, clientName, kmsProvider, oosProvider, func(obj client.Object) error {
-			return r.Update(context.TODO(), obj)
+			return r.Update(ctx, obj)
 		})
 	}
 
 	// Add finalizer if not present
 	if !utils.Contains(secretStore.GetFinalizers(), secretFinalizer) {
-		if err := r.addFinalizer(log, secretStore); err != nil {
+		if err := r.addFinalizer(ctx, log, secretStore); err != nil {
 			log.Error(err, "failed to add finalizer")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
 		// Re-fetch the secretStore after updating finalizers
-		if err := r.Get(r.Ctx, req.NamespacedName, secretStore); err != nil {
+		if err := r.Get(ctx, req.NamespacedName, secretStore); err != nil {
 			log.Error(err, "failed to re-fetch SecretStore after adding finalizer")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 		}
@@ -91,7 +91,7 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	validationErr := r.validateSecretStoreSpec(storeWrapper)
 	if validationErr != nil {
 		log.Error(validationErr, "SecretStore validation failed")
-		err := r.updateStoreStatusWithError(log, secretStore, v1alpha1.ReasonValidationFailed, validationErr.Error())
+		err := r.updateStoreStatusWithError(ctx, log, secretStore, v1alpha1.ReasonValidationFailed, validationErr.Error())
 		if err != nil {
 			log.Error(err, "failed to update SecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
@@ -112,7 +112,7 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	if needRecreateClient {
 		err := r.recreateClient(ctx, log, clientName, kmsProvider, oosProvider, storeWrapper)
 		if err != nil {
-			updateErr := r.updateStoreStatusWithError(log, secretStore, v1alpha1.ReasonClientCreationFailed, err.Error())
+			updateErr := r.updateStoreStatusWithError(ctx, log, secretStore, v1alpha1.ReasonClientCreationFailed, err.Error())
 			if updateErr != nil {
 				log.Error(updateErr, "failed to update secretStore status with error")
 			}
@@ -132,7 +132,7 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 		}
 
 		// Update status to indicate readiness
-		if statusErr := r.updateStoreStatusWithReadyAndGeneration(log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
+		if statusErr := r.updateStoreStatusWithReadyAndGeneration(ctx, log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
 			log.Error(statusErr, "failed to update SecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, statusErr
 		}
@@ -142,21 +142,28 @@ func (r *SecretStoreReconciler) Reconcile(ctx context.Context, req ctrl.Request)
 	// Ensure status is initialized even if no changes are detected
 	// If no conditions exist, initialize the status
 	if len(secretStore.Status.Conditions) == 0 {
-		if statusErr := r.updateStoreStatusWithReadyAndGeneration(log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
+		if statusErr := r.updateStoreStatusWithReadyAndGeneration(ctx, log, secretStore, v1alpha1.SecretStoreReadOnly); statusErr != nil {
 			log.Error(statusErr, "failed to initialize SecretStore status")
 			return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, statusErr
 		}
 		return ctrl.Result{}, nil
 	}
 
-	// Check if we need to update status
-	statusUpdated, err := r.updateStoreStatus(log, secretStore)
-	if err != nil || !statusUpdated {
+	// Check if we need to update status. A return of (false, nil) means the
+	// status was already up-to-date, which is not an error and must not
+	// trigger a requeue (it would otherwise form a self-reinforcing loop).
+	statusUpdated, err := r.updateStoreStatus(ctx, log, secretStore)
+	if err != nil {
 		log.Error(err, "failed to update SecretStore status")
 		return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, err
 	}
+	if !statusUpdated {
+		log.V(2).Info("SecretStore status unchanged, skipping status write")
+	}
 
-	return ctrl.Result{}, nil
+	// Schedule the periodic requeue so reconciliation keeps running even
+	// though the predicates ignore status-only updates.
+	return ctrl.Result{RequeueAfter: r.ReconciliationPeriod}, nil
 }
 
 // SetupWithManager sets up the controller with the Manager.
@@ -172,11 +179,11 @@ func (r *SecretStoreReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCoun
 		Complete(r)
 }
 
-func (r *SecretStoreReconciler) addFinalizer(logger logr.Logger, ss *v1alpha1.SecretStore) error {
+func (r *SecretStoreReconciler) addFinalizer(ctx context.Context, logger logr.Logger, ss *v1alpha1.SecretStore) error {
 	logger.Info("Adding Finalizer for the secretstore", "name", ss.Name, "namespace", ss.Namespace)
 	ss.SetFinalizers(append(ss.GetFinalizers(), secretFinalizer))
 	//update external secret instance
-	err := r.Update(context.TODO(), ss)
+	err := r.Update(ctx, ss)
 	if err != nil {
 		logger.Error(err, "Failed to update secretstore with finalizer", "name", ss.Name, "namespace", ss.Namespace)
 		return err
@@ -185,18 +192,18 @@ func (r *SecretStoreReconciler) addFinalizer(logger logr.Logger, ss *v1alpha1.Se
 }
 
 // updateStatus updates the status of the SecretStore based on validation results
-func (r *SecretStoreReconciler) updateStoreStatus(logger logr.Logger, secretStore *v1alpha1.SecretStore) (bool, error) {
+func (r *SecretStoreReconciler) updateStoreStatus(ctx context.Context, logger logr.Logger, secretStore *v1alpha1.SecretStore) (bool, error) {
 	storeWrapper := &SecretStoreWrapper{secretStore}
-	return r.updateStatusWithReady(logger, storeWrapper)
+	return r.updateStatusWithReady(ctx, logger, storeWrapper)
 }
 
-func (r *SecretStoreReconciler) updateStoreStatusWithError(logger logr.Logger, secretStore *v1alpha1.SecretStore, reason, message string) error {
+func (r *SecretStoreReconciler) updateStoreStatusWithError(ctx context.Context, logger logr.Logger, secretStore *v1alpha1.SecretStore, reason, message string) error {
 	storeWrapper := &SecretStoreWrapper{secretStore}
-	return r.updateStatusWithError(logger, storeWrapper, reason, message)
+	return r.updateStatusWithError(ctx, logger, storeWrapper, reason, message)
 }
 
 // updateStatusWithReadyAndGeneration updates the status to indicate the store is ready with specified capabilities and records the observed generation
-func (r *SecretStoreReconciler) updateStoreStatusWithReadyAndGeneration(logger logr.Logger, secretStore *v1alpha1.SecretStore, capabilities v1alpha1.SecretStoreCapabilities) error {
+func (r *SecretStoreReconciler) updateStoreStatusWithReadyAndGeneration(ctx context.Context, logger logr.Logger, secretStore *v1alpha1.SecretStore, capabilities v1alpha1.SecretStoreCapabilities) error {
 	storeWrapper := &SecretStoreWrapper{secretStore}
-	return r.updateStatusWithReadyAndGeneration(logger, storeWrapper, capabilities)
+	return r.updateStatusWithReadyAndGeneration(ctx, logger, storeWrapper, capabilities)
 }

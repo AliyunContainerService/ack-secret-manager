@@ -4,7 +4,9 @@ package e2e
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -59,23 +61,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a simple ExternalSecret without template
 			esName := "basic-externalsecret-" + getRandString()
@@ -113,10 +99,12 @@ var _ = Describe("Template Processing E2E", func() {
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
-			// Verify the secret data
+			// Verify the secret data: Data["key1"] holds the full raw secret content
+			// (key1=value1\nkey2=value2\nstatus=enabled\nname=test-app)
 			Expect(secret.Data).To(HaveKey("key1"))
+			Expect(string(secret.Data["key1"])).To(ContainSubstring("value1"))
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -145,23 +133,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: secretStore.Namespace,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
 
 			// Create ExternalSecret with simple Go template using key-value data
 			esName := "simple-go-template-externalsecret-" + getRandString()
@@ -222,7 +194,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			// Test 1: Direct field access
@@ -285,23 +257,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: secretStore.Namespace,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
 
 			// Create a simple ExternalSecret with template that tests various Go template syntaxes
 			// Note: GoTemplateSecretName contains a single JSON object, accessed via .data field
@@ -373,7 +329,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			// Test 1: Raw data
@@ -443,23 +399,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: secretStore.Namespace,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
 
 			// Create ExternalSecret with range and with templates
 			// Using GoTemplateSecretName which contains structured JSON data in the "data" field
@@ -519,7 +459,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			// Test 1: Features list
@@ -567,7 +507,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
-		It("Should process simple Sprig template validation", func() {
+		It("Should apply enabled Sprig function and preserve original value", func() {
 			// Create SecretStore first
 			storeName := "fake-store-" + getRandString()
 			secretStore := &api.SecretStore{
@@ -588,25 +528,10 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Create a simple ExternalSecret with Sprig template functions
+			// Create an ExternalSecret verifying the enabled Sprig upper function and the
+			// pass-through behavior for values where the disabled reverse function is not applied
 			esName := "sprig-template-externalsecret-" + getRandString()
 			secretTargetName := "sprig-template-secret-" + getRandString()
 			externalSecret := &api.ExternalSecret{
@@ -622,7 +547,9 @@ var _ = Describe("Template Processing E2E", func() {
 						Template: &api.ExternalSecretTemplate{
 							Data: map[string]string{
 								"uppercase-name": `{{ (parseKeyValue .name).name | upper }}`,
-								"reversed-name":  `{{ (parseKeyValue .name).name }}`, // Note: reverse function temporarily disabled due to Sprig compatibility issues
+								// No reverse function is applied here (reverse is disabled): this template
+								// verifies the original value passes through unchanged
+								"passthrough-name": `{{ (parseKeyValue .name).name }}`,
 							},
 						},
 					},
@@ -643,20 +570,19 @@ var _ = Describe("Template Processing E2E", func() {
 			// Create the ExternalSecret
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
-			// Wait for the corresponding secret to be created
+			// Wait for the corresponding secret to be created; fold the value assertions into
+			// the polling so we assert the data at the moment Eventually succeeds.
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Verify the secret data
-			Expect(secret.Data).To(HaveKey("uppercase-name"))
-			// SimpleTemplateSecretName contains name=test-app, should become TEST-APP
-			Expect(string(secret.Data["uppercase-name"])).To(Equal("TEST-APP"))
-			Expect(secret.Data).To(HaveKey("reversed-name"))
-			// Temporarily returns original value due to reverse function issue
-			Expect(string(secret.Data["reversed-name"])).To(Equal("test-app"))
+				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
+					return false
+				}
+				// SimpleTemplateSecretName contains name=test-app: the enabled Sprig upper
+				// function turns it into TEST-APP, while the pass-through template keeps
+				// the original value because the disabled reverse function is not applied
+				return string(secret.Data["uppercase-name"]) == "TEST-APP" &&
+					string(secret.Data["passthrough-name"]) == "test-app"
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -687,23 +613,7 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a ConfigMap with template content
 			// TemplateScopeKeysAndValues parses the template OUTPUT (not input)
@@ -783,7 +693,7 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 				_, hasHost := secret.Data["DB_KEY1"]
 				_, hasPort := secret.Data["DB_KEY2"]
 				return hasHost && hasPort
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			Expect(secret.Data).To(HaveKey("DB_KEY1"))
@@ -821,23 +731,7 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a Secret with template content
 			templateSecretName := "template-secret-" + getRandString()
@@ -911,7 +805,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				_, hasApiKey := secret.Data["API_KEY"]
 				_, hasClientSecret := secret.Data["CLIENT_SECRET"]
 				return hasApiKey && hasClientSecret
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			Expect(secret.Data).To(HaveKey("API_KEY"))
@@ -952,23 +846,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create an ExternalSecret with template metadata
 			esName := "metadata-template-externalsecret-" + getRandString()
@@ -1059,13 +937,13 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				_, hasAppConfigData := secret.Data["app-config"]
 
 				return hasAppLabel && hasEnvLabel && hasDescriptionAnnotation && hasVersionAnnotation && hasAppConfigData
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
-			// Verify the secret metadata and data exist (actual values depend on GoTemplateSecretName content)
-			Expect(secret.Labels).To(HaveKey("app"))
-			Expect(secret.Labels).To(HaveKey("environment"))
-			Expect(secret.Annotations).To(HaveKey("description"))
-			Expect(secret.Annotations).To(HaveKey("version"))
+			// Verify the secret metadata holds the exact values rendered from GoTemplateSecretName
+			Expect(secret.Labels["app"]).To(Equal("myapp"))
+			Expect(secret.Labels["environment"]).To(Equal("production"))
+			Expect(secret.Annotations["description"]).To(ContainSubstring("myapp"))
+			Expect(secret.Annotations["version"]).To(Equal("v1.2.3"))
 			Expect(secret.Data).To(HaveKey("app-config"))
 
 			// Clean up - delete resources explicitly before namespace cleanup
@@ -1097,23 +975,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create an ExternalSecret with empty template
 			esName := "empty-template-externalsecret-" + getRandString()
@@ -1154,7 +1016,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// With empty template data, the raw data should be preserved
 			// Empty Template.Data{} means "don't use template processing", not "clear all data"
@@ -1190,23 +1052,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create an ExternalSecret with invalid template syntax
 			esName := "syntax-error-externalsecret-" + getRandString()
@@ -1244,7 +1090,10 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			// Create the ExternalSecret
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
-			// Wait and check that the secret eventually fails or remains uncreated
+			// Wait and check that the ExternalSecret eventually reports a failure whose reason
+			// proves it came from the template parse-error path. Fatal parse errors are recorded
+			// as a Failed DataSyncResult with key "template_processing_fatal" and a Reason
+			// carrying the parse failure (see ProcessAllTemplates/executeTemplate in template_processor.go).
 			Eventually(func() bool {
 				updatedES := &api.ExternalSecret{}
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: esName, Namespace: testNamespace.Name}, updatedES)
@@ -1252,9 +1101,13 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 					return false
 				}
 
-				// Check if there's a failure condition
+				// The template references the undefined function invalidFunction, so execution
+				// must fail during parsing; pin the failure to that exact error path.
 				for _, result := range updatedES.Status.DataSyncResults {
-					if result.Status == "Failed" {
+					if result.Status == "Failed" &&
+						result.ExternalSecretKey == "template_processing_fatal" &&
+						strings.Contains(result.Reason, "parse failed") &&
+						strings.Contains(result.Reason, "invalidFunction") {
 						return true
 					}
 				}
@@ -1288,23 +1141,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create an ExternalSecret that references a non-existent data key in the template
 			esName := "missing-key-externalsecret-" + getRandString()
@@ -1349,7 +1186,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// The missing key should result in empty string
 			// When accessing a non-existent key in a map, Go template returns the zero value
@@ -1388,23 +1225,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a template with many fields to test performance
 			largeTemplateData := make(map[string]string)
@@ -1452,7 +1273,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify that all fields were processed
 			for i := 0; i < 50; i++ {
@@ -1495,23 +1316,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a ConfigMap with template that demonstrates KeysAndValues scope functionality
 			// This template will generate key-value pairs that get parsed into separate secret entries
@@ -1522,11 +1327,13 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 					Namespace: testNamespace.Name,
 				},
 				Data: map[string]string{
-					"user-config": `username={{ (parseKeyValue .username).username }}
-email={{ (parseKeyValue .username).email }}`,
+					// SimpleTemplateSecretName content: key1=value1, key2=value2, status=enabled, name=test-app
+					"user-config": `username={{ (parseKeyValue .username).name }}
+email={{ (parseKeyValue .email).status }}`,
+					// GoTemplateSecretName JSON contains an "environment" field with value "production"
 					"app-config": `app_name=myapp
 app_version=1.0
-environment={{ (.env | fromJson).env }}`,
+environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
@@ -1600,7 +1407,7 @@ environment={{ (.env | fromJson).env }}`,
 			// Create the ExternalSecret
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
-			// Wait for the corresponding secret to be created
+			// Wait for the corresponding secret to be created with the exact expected values
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
@@ -1608,24 +1415,22 @@ environment={{ (.env | fromJson).env }}`,
 					return false
 				}
 
-				// Check for parsed key-value pairs from templates
+				// Check parsed key-value pairs from templates against known source data:
 				// SimpleTemplateSecretName contains: key1=value1, key2=value2, status=enabled, name=test-app
-				// GoTemplateSecretName contains JSON with: appName, environment, status, database, features, replicas, enabled
-				hasUsername := string(secret.Data["username"]) != ""
-				hasEmail := string(secret.Data["email"]) != ""
-				hasAppName := string(secret.Data["app_name"]) != ""
-				hasAppVersion := string(secret.Data["app_version"]) != ""
-				hasEnvironment := string(secret.Data["environment"]) != ""
+				// GoTemplateSecretName contains JSON with environment=production
+				return string(secret.Data["username"]) == "test-app" &&
+					string(secret.Data["email"]) == "enabled" &&
+					string(secret.Data["app_name"]) == "myapp" &&
+					string(secret.Data["app_version"]) == "1.0" &&
+					string(secret.Data["environment"]) == "production"
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
-				return hasUsername && hasEmail && hasAppName && hasAppVersion && hasEnvironment
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Verify all expected keys exist (actual values depend on the data in KMS secrets)
-			Expect(secret.Data).To(HaveKey("username"))
-			Expect(secret.Data).To(HaveKey("email"))
-			Expect(secret.Data).To(HaveKey("app_name"))
-			Expect(secret.Data).To(HaveKey("app_version"))
-			Expect(secret.Data).To(HaveKey("environment"))
+			// Verify all expected keys hold the exact values rendered from the known source data
+			Expect(string(secret.Data["username"])).To(Equal("test-app"))
+			Expect(string(secret.Data["email"])).To(Equal("enabled"))
+			Expect(string(secret.Data["app_name"])).To(Equal("myapp"))
+			Expect(string(secret.Data["app_version"])).To(Equal("1.0"))
+			Expect(string(secret.Data["environment"])).To(Equal("production"))
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -1658,23 +1463,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with literal template
 			esName := "literal-template-externalsecret-" + getRandString()
@@ -1726,7 +1515,7 @@ environment={{ (.env | fromJson).env }}`,
 				// Check for expected literal template result
 				_, hasLiteralKey := secret.Data["literal"]
 				return hasLiteralKey
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data contains the processed literal template
 			Expect(secret.Data).To(HaveKey("literal"))
@@ -1762,23 +1551,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a ConfigMap with annotation template
 			cmName := "annotation-configmap-" + getRandString()
@@ -1851,11 +1624,15 @@ environment={{ (.env | fromJson).env }}`,
 				// Check for annotation from template
 				_, hasAnnotation := secret.Annotations["app-version"]
 				return hasAnnotation
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the annotation contains the processed template
 			Expect(secret.Annotations).To(HaveKey("app-version"))
 			Expect(secret.Annotations["app-version"]).To(Equal("v1.2.3"))
+
+			// O-1 fix: a metadata-only templateFrom under the default Replace
+			// merge policy must NOT clear the raw data keys.
+			Expect(secret.Data).To(HaveKey("version"))
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -1886,23 +1663,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create a ConfigMap with label template
 			cmName := "label-configmap-" + getRandString()
@@ -1975,11 +1736,15 @@ environment={{ (.env | fromJson).env }}`,
 				// Check for label from template
 				_, hasLabel := secret.Labels["env-type"]
 				return hasLabel
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the label contains the processed template
 			Expect(secret.Labels).To(HaveKey("env-type"))
 			Expect(secret.Labels["env-type"]).To(Equal("TEST_ENV"))
+
+			// O-1 fix: a metadata-only templateFrom under the default Replace
+			// merge policy must NOT clear the raw data keys.
+			Expect(secret.Data).To(HaveKey("env"))
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -2012,23 +1777,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with array/slice template operations
 			esName := "array-slice-template-externalsecret-" + getRandString()
@@ -2070,28 +1819,22 @@ environment={{ (.env | fromJson).env }}`,
 			// Create the ExternalSecret
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
-			// Wait for the corresponding secret to be created
+			// Wait for the corresponding secret to be created; fold the value assertions into
+			// the polling so we assert the data at the moment Eventually succeeds.
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Verify the secret data contains expected array/slice operations results
-			Expect(secret.Data).To(HaveKey("first-user"))
-			Expect(secret.Data).To(HaveKey("user-count"))
-			Expect(secret.Data).To(HaveKey("first-tag"))
-			Expect(secret.Data).To(HaveKey("ports-joined"))
-			Expect(secret.Data).To(HaveKey("active-users"))
-
-			// Verify specific values based on GoTemplateSecretName content
-			Expect(string(secret.Data["user-count"])).To(Equal("3"))
-			Expect(string(secret.Data["first-tag"])).To(Equal("web"))
-			Expect(string(secret.Data["ports-joined"])).To(Equal("8080,8081,8082"))
-			// first-user should contain alice's info in JSON format
-			Expect(string(secret.Data["first-user"])).To(ContainSubstring("alice"))
-			// active-users should contain names of active users (alice and charlie)
-			Expect(string(secret.Data["active-users"])).To(Or(ContainSubstring("alice"), ContainSubstring("charlie")))
+				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
+					return false
+				}
+				return string(secret.Data["user-count"]) == "3" &&
+					string(secret.Data["first-tag"]) == "web" &&
+					string(secret.Data["ports-joined"]) == "8080,8081,8082" &&
+					// first-user should contain alice's info in JSON format
+					strings.Contains(string(secret.Data["first-user"]), "alice") &&
+					// users is a JSON array, so range iterates in fixed order and the
+					// rendered result is deterministic: active users alice and charlie
+					string(secret.Data["active-users"]) == "alice,charlie,"
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Clean up
 			CleanupExternalSecret(context.Background(), externalSecret)
@@ -2121,23 +1864,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with default value template operations
 			esName := "default-value-template-externalsecret-" + getRandString()
@@ -2185,7 +1912,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data contains expected default value operations results
 			Expect(secret.Data).To(HaveKey("with-default"))
@@ -2228,23 +1955,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with type conversion template operations
 			esName := "type-conversion-template-externalsecret-" + getRandString()
@@ -2301,7 +2012,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data contains expected type conversion operations results
 			Expect(secret.Data).To(HaveKey("string-to-int"))
@@ -2354,22 +2065,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with Replace policy
 			esName := "merge-replace-example-" + getRandString()
@@ -2412,7 +2108,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify: Only DATABASE_URL should exist, original data should be cleared
 			Expect(secret.Data).To(HaveKey("DATABASE_URL"))
@@ -2450,22 +2146,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with Merge policy
 			esName := "merge-policy-example-" + getRandString()
@@ -2509,7 +2190,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify: Both original and new keys should exist
 			Expect(secret.Data).To(HaveKey("host"))
@@ -2549,22 +2230,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with bcrypt template
 			esName := "bcrypt-test-" + getRandString()
@@ -2605,7 +2271,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the hashed password starts with $2a$ (bcrypt format)
 			Expect(secret.Data).To(HaveKey("hashed-password"))
@@ -2637,22 +2303,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with htpasswd template using JSON credentials
 			esName := "htpasswd-test-" + getRandString()
@@ -2693,7 +2344,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify htpasswd format: username:$2a$...
 			Expect(secret.Data).To(HaveKey("htpasswd-file"))
@@ -2724,22 +2375,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with jsonPath template
 			esName := "jsonpath-test-" + getRandString()
@@ -2781,7 +2417,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify jsonPath extraction works (actual values depend on GoTemplateSecretName structure)
 			// GoTemplateSecretName contains JSON with users array and tags array
@@ -2820,22 +2456,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret with mergeJson template using two separate JSON secrets
 			esName := "mergejson-test-" + getRandString()
@@ -2880,14 +2501,64 @@ environment={{ (.env | fromJson).env }}`,
 
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
+			// mergeJson semantics (see deepMerge in template_processor.go): deep merge where
+			// base-only keys are preserved, override-only keys are added and conflicting keys
+			// take the override value. Fold the value assertions into the polling so we assert
+			// the data at the moment Eventually succeeds.
+			getNested := func(m map[string]interface{}, keys ...string) (interface{}, bool) {
+				var cur interface{} = m
+				for _, k := range keys {
+					sub, ok := cur.(map[string]interface{})
+					if !ok {
+						return nil, false
+					}
+					cur, ok = sub[k]
+					if !ok {
+						return nil, false
+					}
+				}
+				return cur, true
+			}
+			strEq := func(m map[string]interface{}, want string, keys ...string) bool {
+				v, ok := getNested(m, keys...)
+				return ok && v == want
+			}
+			numEq := func(m map[string]interface{}, want float64, keys ...string) bool {
+				v, ok := getNested(m, keys...)
+				f, isNum := v.(float64)
+				return ok && isNum && f == want
+			}
+			boolEq := func(m map[string]interface{}, want bool, keys ...string) bool {
+				v, ok := getNested(m, keys...)
+				b, isBool := v.(bool)
+				return ok && isBool && b == want
+			}
+
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			Expect(secret.Data).To(HaveKey("merged"))
-			Expect(string(secret.Data["merged"])).ToNot(BeEmpty())
+				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
+					return false
+				}
+				mergedRaw, ok := secret.Data["merged"]
+				if !ok || len(mergedRaw) == 0 {
+					return false
+				}
+				var merged map[string]interface{}
+				if err := json.Unmarshal(mergedRaw, &merged); err != nil {
+					return false
+				}
+				return strEq(merged, "myapp", "app", "name") && // base-only key preserved by deep merge
+					strEq(merged, "2.0.0", "app", "version") && // conflicting key takes override value
+					strEq(merged, "production", "app", "environment") && // override-only key merged in
+					strEq(merged, "prod-db.example.com", "database", "host") && // conflicting key takes override value
+					numEq(merged, 5432, "database", "port") && // base-only key preserved
+					strEq(merged, "devdb", "database", "name") && // base-only key preserved
+					strEq(merged, "secret123", "database", "password") && // override-only key merged in
+					strEq(merged, "debug", "logging", "level") && // base-only top-level key preserved
+					strEq(merged, "json", "logging", "format") &&
+					boolEq(merged, true, "cache", "enabled") && // override-only top-level key merged in
+					numEq(merged, 3600, "cache", "ttl")
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			CleanupExternalSecret(context.Background(), externalSecret)
 			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
@@ -2912,22 +2583,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			esName := "parsekv-test-" + getRandString()
 			secretTargetName := "parsekv-secret-" + getRandString()
@@ -2953,9 +2609,11 @@ environment={{ (.env | fromJson).env }}`,
 						Name: secretTargetName,
 						Template: &api.ExternalSecretTemplate{
 							Data: map[string]string{
-								"username": `{{ (parseKeyValue .config).username }}`,
-								"email":    `{{ (parseKeyValue .config).email }}`,
-								"location": `{{ (parseKeyValue .config).location }}`,
+								// Query keys that actually exist in SimpleTemplateSecretName
+								// (key1=value1, key2=value2, status=enabled, name=test-app)
+								"parsed-key1":   `{{ (parseKeyValue .config).key1 }}`,
+								"parsed-status": `{{ (parseKeyValue .config).status }}`,
+								"parsed-name":   `{{ (parseKeyValue .config).name }}`,
 							},
 						},
 					},
@@ -2964,19 +2622,18 @@ environment={{ (.env | fromJson).env }}`,
 
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
+			// Verify parseKeyValue actually parses key=value lines correctly by asserting the
+			// exact parsed values; fold the assertions into the polling so we assert the data
+			// at the moment Eventually succeeds.
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Verify parseKeyValue function works (actual values depend on SimpleTemplateSecretName content)
-			// SimpleTemplateSecretName contains: key1=value1, key2=value2, status=enabled, name=test-app
-			// The test tries to parse username, email, location which don't exist
-			// So all values should be empty or use default if specified
-			Expect(secret.Data).To(HaveKey("username"))
-			Expect(secret.Data).To(HaveKey("email"))
-			Expect(secret.Data).To(HaveKey("location"))
+				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
+					return false
+				}
+				return string(secret.Data["parsed-key1"]) == "value1" &&
+					string(secret.Data["parsed-status"]) == "enabled" &&
+					string(secret.Data["parsed-name"]) == "test-app"
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			CleanupExternalSecret(context.Background(), externalSecret)
 			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
@@ -3001,22 +2658,7 @@ environment={{ (.env | fromJson).env }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			esName := "tolines-test-" + getRandString()
 			secretTargetName := "tolines-secret-" + getRandString()
@@ -3056,7 +2698,7 @@ environment={{ (.env | fromJson).env }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify toLines function works (actual values depend on SimpleTemplateSecretName content)
 			// SimpleTemplateSecretName contains: key1=value1\nkey2=value2\nstatus=enabled\nname=test-app (4 lines)

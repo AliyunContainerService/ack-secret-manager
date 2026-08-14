@@ -12,7 +12,6 @@
 #   AK Hardcoding:         Avoid
 #   enableWorkerRole:      Configure as needed
 #   enableCrossNamespace*: false (least privilege, enable as needed)
-#   Log Level:             2-4
 #   Monitoring & Alerts:   Configure ExternalSecret status monitoring
 #
 # Prerequisites:
@@ -161,8 +160,7 @@ spec:
 #     enableWorkerRole: false  # Recommended to disable WorkerRole in production
 #     enableCrossNamespaceSecretStore: false  # Disable cross-namespace SecretStore references (least privilege)
 #     enableCrossNamespaceAuthRef: false      # Disable cross-namespace auth resource references (least privilege)
-#   maxConcurrentKmsSecretPulls: 10  # Concurrent pull count
-#   v: 2  # Log level (recommended 2-4 for production)
+#     maxConcurrentKmsSecretPulls: 10  # Concurrent pull count
 #
 # Notes:
 #   - When set to false, SecretStore can only reference ServiceAccounts/Secrets in the same namespace
@@ -180,7 +178,7 @@ spec:
 #
 # 2. Check ExternalSecrets with sync failures:
 #    kubectl get externalsecret -A -o json | \
-#      jq '.items[] | select(.status.dataSyncResults[].status == "failed") | .metadata.name'
+#      jq '.items[] | select(.status.dataSyncResults[].status == "Failed") | .metadata.name'
 #
 # 3. Check controller logs:
 #    kubectl logs -l app=ack-secret-manager --tail=100

@@ -3,6 +3,7 @@ package kms
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
@@ -74,6 +75,10 @@ func (p *Provider) GetUid() string {
 }
 
 func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (backend.SecretClient, error) {
+	// Trim to align with the controller-side normalizeEndpoint contract:
+	// the composite key "clientName#endpoint" must match on both sides.
+	endpoint = strings.TrimSpace(endpoint)
+
 	var authProvider commonp.AuthConfigProvider
 	if store.Spec.KMS != nil && store.Spec.KMS.KMS != nil {
 		authProvider = &commonp.KMSAuthAdapter{KMSAuth: store.Spec.KMS.KMS, StoreName: store.Name}
@@ -84,13 +89,31 @@ func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, k
 		return nil, err
 	}
 
+	// Key alignment: a custom endpoint yields a composite cache key
+	// ("clientName#endpoint") in the ExternalSecret controller, so the RAM
+	// provider registry must use the same composite key. Otherwise the
+	// composite client's RegisterRamProvider would replace (and stop) the
+	// plain client's refresh provider under the bare clientName, and
+	// Delete(compositeKey) would never stop the composite refresh routine.
+	if endpoint != "" {
+		authConfig.ClientName = fmt.Sprintf("%s#%s", authConfig.ClientName, endpoint)
+	}
+
 	return p.newClientWithAuth(authConfig.ClientName, authConfig, endpoint)
 }
 
 func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error) {
+	// Normalize first; see NewClient for the key-alignment rationale.
+	endpoint = strings.TrimSpace(endpoint)
+
 	authEnvs := commonp.BuildAuthConfigFromEnv()
 
-	return p.newClientWithAuth(backend.EnvClient, authEnvs, endpoint)
+	// Key alignment with the composite cache key; see NewClient.
+	if endpoint != "" {
+		authEnvs.ClientName = fmt.Sprintf("%s#%s", authEnvs.ClientName, endpoint)
+	}
+
+	return p.newClientWithAuth(authEnvs.ClientName, authEnvs, endpoint)
 }
 
 func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig, customEndpoint string) (*KMSClient, error) {

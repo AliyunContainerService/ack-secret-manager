@@ -2,6 +2,7 @@ package kms
 
 import (
 	"fmt"
+	"strings"
 	"sync"
 
 	"k8s.io/klog"
@@ -22,13 +23,15 @@ func NewManager(region string) *Manager {
 }
 
 func (m *Manager) Register(clientName string, client backendin.SecretClient) {
+	// Check the type assertion before the nil check: a non-*KMSClient value
+	// must never be reported as "client is nil".
 	kmsClient, ok := client.(*KMSClient)
-	if kmsClient == nil {
-		klog.Errorf("client is nil")
+	if !ok {
+		klog.Errorf("client type error, client is not a *KMSClient, clientName %v", clientName)
 		return
 	}
-	if !ok {
-		klog.Errorf("client type error")
+	if kmsClient == nil {
+		klog.Errorf("kms client is nil, clientName %v", clientName)
 		return
 	}
 	if kmsClient.kmsClient != nil {
@@ -46,6 +49,28 @@ func (m *Manager) Delete(clientName string) {
 		RamProvider: m.RamProvider,
 	})
 	klog.Infof("delete client, clientName %v", clientName)
+}
+
+// DeletePrefixed implements the backend.ClientManager contract (see the
+// interface doc for the non-atomicity caveat): removes the plain clientName
+// client plus all composite "clientName#endpoint" variants, stopping the RAM
+// provider refresh routine registered under each removed key.
+func (m *Manager) DeletePrefixed(clientName string) {
+	compositePrefix := clientName + "#"
+	var staleKeys []string
+	m.KmsClientMap.Range(func(key, _ any) bool {
+		k, ok := key.(string)
+		if !ok {
+			return true
+		}
+		if k == clientName || strings.HasPrefix(k, compositePrefix) {
+			staleKeys = append(staleKeys, k)
+		}
+		return true
+	})
+	for _, k := range staleKeys {
+		m.Delete(k)
+	}
 }
 
 func (m *Manager) GetClient(clientName string) (backendin.SecretClient, error) {

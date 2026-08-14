@@ -177,9 +177,11 @@ type SecretStoreRef struct {
 	// +optional
 	// +kubebuilder:validation:Enum=SecretStore;ClusterSecretStore
 	Kind string `json:"kind,omitempty"`
-	// Deprecated : Namespace field is deprecated, use SecretStore in the same namespace as ExternalSecret, or use ClusterSecretStore
+	// Namespace of the referenced SecretStore. Cross-namespace references are
+	// controlled by the enable-cross-namespace-auth-ref switch.
+	// Optional; defaults to the namespace of the ExternalSecret when empty.
 	// +optional
-	Namespace string `json:"namespace"`
+	Namespace string `json:"namespace,omitempty"`
 }
 
 type DataProcess struct {

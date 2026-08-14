@@ -33,7 +33,6 @@ func NewSimpleSecretOperationHandler(client client.Client, cleanUpSecretOnFailur
 }
 
 // HandleSecretOperation Handle complete Secret operation flow
-// Original behavior: creates/updates secrets WITHOUT owner reference
 func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 	ctx context.Context,
 	externalSec *api.ExternalSecret,
@@ -93,7 +92,7 @@ func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 		}
 	}
 
-	// Create or update secret WITHOUT owner reference (original behavior)
+	// Create or update secret WITHOUT owner reference
 	if secretExists {
 		return h.updateSecretWithoutOwner(ctx, currentSecret, secretData, labels, annotations)
 	} else {
@@ -120,12 +119,22 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 		Type: h.getSecretType(externalSec),
 	}
 
-	// Do NOT set owner reference (original behavior)
+	// Do NOT set owner reference
 	err := h.Client.Create(ctx, secret)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			// If already exists, update it
-			return h.updateSecretWithoutOwner(ctx, secret, secretData, labels, annotations)
+			// The Secret appeared after the existence check: re-fetch and update the
+			// live object (optimistic lock). If the cached client still returns
+			// NotFound (cache lag), this round fails and controller-runtime backoff
+			// converges.
+			existing := &corev1.Secret{}
+			if getErr := h.Client.Get(ctx, types.NamespacedName{
+				Namespace: externalSec.Namespace,
+				Name:      secretName,
+			}, existing); getErr != nil {
+				return fmt.Errorf("secret already exists but failed to re-fetch it: %w", getErr)
+			}
+			return h.updateSecretWithoutOwner(ctx, existing, secretData, labels, annotations)
 		}
 		// Check if it's a namespace termination error
 		if strings.Contains(err.Error(), "unable to create new content in namespace") &&
@@ -142,7 +151,6 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 }
 
 // updateSecretWithoutOwner updates an existing secret without owner reference
-// This method preserves the original behavior where secrets are created/updated without owner references
 func (h *SimpleSecretOperationHandler) updateSecretWithoutOwner(
 	ctx context.Context,
 	currentSecret *corev1.Secret,
@@ -167,19 +175,17 @@ func (h *SimpleSecretOperationHandler) updateSecretWithoutOwner(
 	return nil
 }
 
-// handleProviderDeletion Handle deletion when provider secret is deleted or unavailable.
-// Original behavior:
-// - CleanUpSecretOnFailure=true: delete the secret
-// - CleanUpSecretOnFailure=false: retain the secret
-//
-// Note: This method should ONLY be called when provider secrets are unavailable,
-// NOT when the ExternalSecret itself is being deleted.
+// handleProviderDeletion deletes the target Secret when provider data is
+// unavailable. It is ONLY invoked on the total-failure path with
+// CleanUpSecretOnFailure=true (HandleSecretOperation routes an empty dataset
+// here) -- NOT when the ExternalSecret itself is being deleted, and not from
+// any other round type.
 func (h *SimpleSecretOperationHandler) handleProviderDeletion(
 	ctx context.Context,
 	externalSec *api.ExternalSecret,
 	secretName string,
 ) error {
-	// Unified deletion logic for both legacy and new behavior
+	// Fetch first so a missing Secret is a no-op instead of a delete error.
 	secret := &corev1.Secret{}
 	err := h.Client.Get(ctx, types.NamespacedName{
 		Namespace: externalSec.Namespace,
@@ -196,12 +202,7 @@ func (h *SimpleSecretOperationHandler) handleProviderDeletion(
 		return fmt.Errorf("failed to delete secret: %w", err)
 	}
 
-	logContext := "provider data unavailability"
-	if externalSec.Spec.Target == nil {
-		logContext = "legacy deletion behavior (target not specified)"
-	}
-
-	h.Log.Info(fmt.Sprintf("Deleted secret due to %s", logContext),
+	h.Log.Info("Deleted secret due to provider data unavailability",
 		"namespace", externalSec.Namespace, "name", secretName)
 	return nil
 }

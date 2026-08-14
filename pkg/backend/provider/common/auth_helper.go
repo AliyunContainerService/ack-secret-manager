@@ -73,9 +73,13 @@ func BuildAuthConfig(
 	// Try to extract kubernetes.Interface from wrapped client
 	if wrappedClient, ok := kube.(interface{ GetKubeClient() kubernetes.Interface }); ok {
 		authConfig.KubeClient = wrappedClient.GetKubeClient()
-		klog.Info("Using kubernetes client interface from wrapped client for dynamic token acquisition")
-	} else {
-		klog.Info("Kubernetes client does not support GetKubeClient, skipping dynamic token acquisition")
+	}
+
+	// Fail-closed: when serviceAccountRef is explicitly configured, dynamic
+	// token acquisition is mandatory. Silently degrading to the file-based
+	// token would authenticate with a different identity than requested.
+	if authProvider != nil && authProvider.GetServiceAccountRef() != nil && authConfig.KubeClient == nil {
+		return authConfig, fmt.Errorf("serviceAccountRef is configured in SecretStore %s but the kubernetes client is unavailable for ServiceAccount authentication", authProvider.GetSecretStoreName())
 	}
 
 	if authProvider == nil {
@@ -91,6 +95,7 @@ func BuildAuthConfig(
 		// Merge ServiceAccount auth config into main config
 		authConfig.RoleArn = saConfig.RoleArn
 		authConfig.OidcArn = saConfig.OidcArn
+		authConfig.OidcArnFromDefault = saConfig.OidcArnFromDefault
 		authConfig.ServiceAccountName = saConfig.ServiceAccountName
 		authConfig.ServiceAccountNamespace = saConfig.ServiceAccountNamespace
 		authConfig.TokenAudiences = saConfig.TokenAudiences
@@ -107,6 +112,7 @@ func BuildAuthConfig(
 		authConfig.AccessSecretKey = traditionalConfig.AccessSecretKey
 		authConfig.RoleArn = traditionalConfig.RoleArn
 		authConfig.OidcArn = traditionalConfig.OidcArn
+		authConfig.OidcArnFromDefault = traditionalConfig.OidcArnFromDefault
 		authConfig.RoleSessionName = traditionalConfig.RoleSessionName
 		authConfig.RoleSessionExpiration = traditionalConfig.RoleSessionExpiration
 		authConfig.RemoteRoleSessionName = traditionalConfig.RemoteRoleSessionName
@@ -117,7 +123,7 @@ func BuildAuthConfig(
 	return authConfig, nil
 }
 
-// buildServiceAccountAuth builds authentication config from ServiceAccount
+// buildServiceAccountRefAuthConfig builds authentication config from a ServiceAccount reference (RRSA).
 func buildServiceAccountRefAuthConfig(
 	ctx context.Context,
 	store *v1alpha1.SecretStore,
@@ -129,11 +135,8 @@ func buildServiceAccountRefAuthConfig(
 	saRef := authProvider.GetServiceAccountRef()
 	sa := &corev1.ServiceAccount{}
 
-	// Determine the namespace for the ServiceAccount
+	// Resolve the reference namespace: ClusterSecretStore requires an explicit namespace; SecretStore allows cross-namespace only when EnableCrossNamespaceAuthRef is set.
 	saNamespace := store.Namespace
-	// If store.Namespace is empty, it means this is a ClusterSecretStore
-	// For ClusterSecretStore, we use the namespace specified in ServiceAccountRef
-	// For SecretStore, we check if cross namespace reference is enabled
 	if store.Namespace == "" {
 		// This is a ClusterSecretStore
 		if saRef.Namespace == "" {
@@ -171,6 +174,7 @@ func buildServiceAccountRefAuthConfig(
 
 	// Use configured OIDC Provider ARN, or default value if not configured
 	oidcProviderArn := authProvider.GetOIDCProviderARN()
+	oidcArnFromDefault := false
 	if oidcProviderArn == "" || !utils.IsValidOidcProviderArn(oidcProviderArn) {
 		if clusterId != "" && uid != "" {
 			klog.Warningf("Invalid oidcProviderARN %s defined in SecretStore %s, will use default", oidcProviderArn, authProvider.GetSecretStoreName())
@@ -181,6 +185,11 @@ func buildServiceAccountRefAuthConfig(
 				return auth.AuthConfig{}, err
 			}
 			oidcProviderArn = utils.GenerateDefaultOidcProviderArn(clusterId, uidInt64)
+			// Mark the ARN as auto-generated so the authentication chain can
+			// tell it apart from an explicitly configured oidcProviderARN.
+			oidcArnFromDefault = true
+		} else {
+			klog.Warningf("Cannot generate default OIDC provider ARN for SecretStore %s: cluster-id or uid is missing (clusterId=%q, uid=%q); oidcProviderARN stays %q", authProvider.GetSecretStoreName(), clusterId, uid, oidcProviderArn)
 		}
 	}
 
@@ -197,6 +206,7 @@ func buildServiceAccountRefAuthConfig(
 	return auth.AuthConfig{
 		RoleArn:                 roleArn,
 		OidcArn:                 oidcProviderArn,
+		OidcArnFromDefault:      oidcArnFromDefault,
 		ServiceAccountName:      saRef.Name,
 		ServiceAccountNamespace: saNamespace,
 		TokenAudiences:          tokenAudiences,
@@ -205,7 +215,7 @@ func buildServiceAccountRefAuthConfig(
 	}, nil
 }
 
-// buildTraditionalAuth builds authentication config from traditional auth methods
+// buildAuthConfigWithCrossNamespace builds authentication config from traditional (AK/OIDC/env) sources with cross-namespace checks.
 func buildAuthConfigWithCrossNamespace(
 	ctx context.Context,
 	store *v1alpha1.SecretStore,
@@ -219,11 +229,8 @@ func buildAuthConfigWithCrossNamespace(
 	}
 
 	if authProvider.GetAccessKey() != nil {
-		// Determine the namespace for the AccessKey Secret
+		// Resolve the reference namespace: ClusterSecretStore requires an explicit namespace; SecretStore allows cross-namespace only when EnableCrossNamespaceAuthRef is set.
 		accessKeyNamespace := store.Namespace
-		// If store.Namespace is empty, it means this is a ClusterSecretStore
-		// For ClusterSecretStore, we use the namespace specified in AccessKey
-		// For SecretStore, we check if cross namespace reference is enabled
 		if store.Namespace == "" {
 			// This is a ClusterSecretStore
 			if authProvider.GetAccessKey().Namespace == "" {
@@ -257,11 +264,8 @@ func buildAuthConfigWithCrossNamespace(
 	}
 
 	if authProvider.GetAccessKeySecret() != nil {
-		// Determine the namespace for the AccessKeySecret Secret
+		// Resolve the reference namespace: ClusterSecretStore requires an explicit namespace; SecretStore allows cross-namespace only when EnableCrossNamespaceAuthRef is set.
 		accessKeySecretNamespace := store.Namespace
-		// If store.Namespace is empty, it means this is a ClusterSecretStore
-		// For ClusterSecretStore, we use the namespace specified in AccessKeySecret
-		// For SecretStore, we check if cross namespace reference is enabled
 		if store.Namespace == "" {
 			// This is a ClusterSecretStore
 			if authProvider.GetAccessKeySecret().Namespace == "" {
@@ -317,6 +321,11 @@ func buildAuthConfigWithCrossNamespace(
 				return auth.AuthConfig{}, err
 			}
 			authConfig.OidcArn = utils.GenerateDefaultOidcProviderArn(clusterId, uidInt64)
+			// Mark the ARN as auto-generated so the authentication chain can
+			// tell it apart from an explicitly configured oidcProviderARN.
+			authConfig.OidcArnFromDefault = true
+		} else {
+			klog.Warningf("Cannot generate default OIDC provider ARN for SecretStore %s: cluster-id or uid is missing (clusterId=%q, uid=%q); oidcProviderARN stays %q", authProvider.GetSecretStoreName(), clusterId, uid, authConfig.OidcArn)
 		}
 	}
 
@@ -324,7 +333,7 @@ func buildAuthConfigWithCrossNamespace(
 }
 
 func BuildAuthConfigFromEnv() auth.AuthConfig {
-	return auth.AuthConfig{
+	cfg := auth.AuthConfig{
 		ClientName:            backend.EnvClient,
 		RoleArn:               os.Getenv("ALICLOUD_ROLE_ARN"),
 		OidcArn:               os.Getenv("ALICLOUD_OIDC_PROVIDER_ARN"),
@@ -336,4 +345,8 @@ func BuildAuthConfigFromEnv() auth.AuthConfig {
 		RemoteRoleArn:         os.Getenv("ALICLOUD_REMOTE_ROLE_ARN"),
 		RefreshPeriod:         time.Second * 10,
 	}
+	// Fill default session names so the AK+AssumeRole and cross-account tiers
+	// are not skipped when the corresponding env vars are not set.
+	cfg.NormalizeSessionNames()
+	return cfg
 }

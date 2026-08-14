@@ -108,6 +108,8 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
   2. `namespaces`: Explicitly lists allowed namespace names
   3. `namespaceRegexes`: Uses regex patterns to match allowed namespace names
 
+> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+
 ### ClusterSecretStore Access Control
 
 - ClusterSecretStore uses the `spec.conditions` field to define which namespaces are allowed to access this resource
@@ -115,6 +117,8 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
   1. `namespaceSelector`: Uses label selector to match allowed namespaces
   2. `namespaces`: Explicitly lists allowed namespace names
   3. `namespaceRegexes`: Uses regex patterns to match allowed namespace names
+
+> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
 
 ## Recommended Usage
 
@@ -172,6 +176,8 @@ Control which namespaces can use this ClusterSecretStore via `spec.conditions`, 
 2. **namespaceSelector**: Use label selectors to match namespaces
 3. **namespaceRegexes**: Use regex patterns to match namespace names
 
+> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+
 ### Configuration Notes
 
 ClusterSecretStore authentication configuration is the same as SecretStore, with additional notes:
@@ -190,14 +196,17 @@ ExternalSecret is a namespace-level resource used to define the basic informatio
 
 ### Configuration Notes
 
-Key ExternalSecret configuration fields:
+Key ExternalSecret configuration fields (indented fields belong to the level above them):
 - `provider`: Target cloud service (`kms` or `oos`, default `kms`)
-- `data[]`: List of credentials to sync, each specifying `key` (KMS credential name), `name` (key in K8s Secret), `versionId`, etc.
-- `secretStoreRef`: Reference to SecretStore or ClusterSecretStore (must specify `kind: ClusterSecretStore` when referencing ClusterSecretStore)
 - `rotationInterval`: Sync interval
-- `kmsEndpoint`: Credential-level KMS Endpoint (optional, overrides global configuration)
-- `jmesPath`: Parse specific fields in JSON/YAML credentials (optional)
 - `dataProcess`: Auto-parse JSON/YAML credentials (optional)
+- `data[]`: List of credentials to sync. Fields under each entry:
+  - `key`: Credential name in the backend (KMS credential name)
+  - `name`: Key in the K8s Secret
+  - `versionId`: Credential version to sync
+  - `secretStoreRef`: Reference to SecretStore or ClusterSecretStore, configured per `data[]` entry (must specify `kind: ClusterSecretStore` when referencing ClusterSecretStore)
+  - `kmsEndpoint`: Credential-level KMS Endpoint (optional, overrides global configuration)
+  - `jmesPath`: Parse specific fields in JSON/YAML credentials (optional)
 
 ### Multi-Key Configuration
 
@@ -213,16 +222,20 @@ metadata:
   namespace: production
 spec:
   provider: kms
-  secretStoreRef:
-    name: my-store
-    kind: SecretStore
   data:
     - key: db-password      # Credential name in KMS
       name: database-password # Key written to K8s Secret
+      secretStoreRef:       # Each data[] entry configures its own SecretStore reference
+        name: my-store
+        kind: SecretStore
     - key: api-key
       name: api-key
+      secretStoreRef:
+        name: my-store
     - key: tls-cert
       name: tls-certificate
+      secretStoreRef:
+        name: my-store
 ```
 
 The above configuration generates a K8s Secret named `my-app-secrets` with three keys in `data`:
@@ -238,8 +251,12 @@ K8s Secret (production/my-app-secrets)
 > **Notes**:
 > - `key` is the credential identifier in the backend (KMS/OOS), `name` is the key name written to K8s Secret `data`. They can be different
 > - If `name` is omitted, the `key` value is used as the Secret data key (e.g., `key: api-key` without `name` results in Secret data key `api-key`)
-> - Each `data[]` entry can independently configure `secretStoreRef`, `kmsEndpoint`, `versionId`, etc.; when not configured, default values are used
+> - Each `data[]` entry independently configures its own `secretStoreRef`, `kmsEndpoint`, `versionId`, etc.; `secretStoreRef` is a per-entry field (there is no spec-level `secretStoreRef`)
 > - Suitable for scenarios where multiple related credentials need to be centrally managed in the same K8s Secret (e.g., database connection info, TLS certificates)
+
+> **Status Semantics (v0.6.6)**: `status.dataSyncResults` is updated when the sync result semantics (per-key status/reason, or the overall success state) change, and the sync timestamp is forcibly refreshed after the controller actually writes to (or deletes) the target Kubernetes Secret; `synchronizationTime` records when the currently reported result occurred and is not refreshed every reconcile round: on steady-state polling rounds where the fetched data is unchanged and no Secret write occurs, it keeps the time of the last successful synchronization. Do not use it as a liveness heartbeat. For how failures affect the cluster Secret, see [Advanced Usage Guide - Sync Failure Handling Semantics](advanced_usage.md#sync-failure-handling-semantics).
+
+> **Deletion Behavior**: When an ExternalSecret is deleted, the finalizer unconditionally deletes the target Secret (`cleanupSecretOnFailure` is not consulted); if `target.name` points to a manually maintained Secret with the same name, that Secret is deleted as well.
 
 ### Complete Examples
 
@@ -314,7 +331,7 @@ See [examples/crd/crd-05-cluster-external-secret.yaml](../examples/crd/crd-05-cl
 
 | CRD Field | Description | Required | Default Behavior |
 | --------- | ----------- | -------- | ---------------- |
-| accessKey | Alibaba Cloud AccessKey authentication config | No | When not set, tries other auth methods in priority order (RRSA → AK AssumeRole → WorkerRole) |
+| accessKey | Alibaba Cloud AccessKey authentication config | No | When not set, another enabled (prerequisites met) authentication method is selected by priority (RRSA → WorkerRole) |
 | accessKeySecret | Alibaba Cloud AccessKey authentication config | No | Used together with accessKey |
 | ramRoleARN | RAM Role ARN for RRSA or AK AssumeRole authentication | No | When not set, role-based authentication is not used |
 | ramRoleSessionName | Role session name for STS AssumeRole | No | When not set, uses component default session name |
@@ -365,6 +382,8 @@ ClusterSecretStore is a cluster-level SecretStore resource that can be reference
 | namespaceRegexes | Uses regex patterns to match allowed namespace names | No |
 
 > The authentication fields under KMS/OOS (KMSAuth/OOSAuth) are the same as SecretStore, please refer to the SecretStore parameter description above.
+>
+> **Regex matching note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
 
 ### ExternalSecret
 
@@ -445,7 +464,7 @@ ClusterSecretStore is a cluster-level SecretStore resource that can be reference
 
 | Value | Description |
 | ----- | ----------- |
-| Replace | Completely use template field names (clear existing field names in the secret) |
+| Replace | Completely use template field names (clear existing field names in the secret). Exception: when all `templateFrom` entries target only Labels/Annotations, the Secret `data` is not cleared — see [Template Processing Guide - Merge Policy](template_processing_guide.md#merge-policy-mergepolicy) |
 | Merge | Merge template field names with existing field names in the secret. If field names overlap, template values take precedence |
 
 **data (Data sources that don't require special processing)**
@@ -453,11 +472,11 @@ ClusterSecretStore is a cluster-level SecretStore resource that can be reference
 | CRD Field | Description | Required | Default Behavior |
 | --------- | ----------- | -------- | ---------------- |
 | key | Unique identifier for the target credential (KMS credential name or OOS parameter name) | Yes | — |
-| name | Corresponding key name in K8s Secret data | Yes | Defaults to the `key` value when not set |
+| name | Corresponding key name in K8s Secret data | No | Defaults to the `key` value when not set |
 | versionStage | Target credential version stage (e.g., `ACSCurrent`, `ACSPrevious`) | No | When not set, fetches the latest version (`ACSCurrent`) |
 | versionId | Target credential version ID; not required when provider is `oos` | No | When not set, fetches the latest version |
 | jmesPath | When target credential is JSON/YAML format, extract specific fields via JMESPath expression | No | When not set, syncs the entire credential content |
-| secretStoreRef | SecretStore reference for this credential, can override ExternalSecret top-level configuration | No | When not set, uses default values |
+| secretStoreRef | SecretStore reference for this credential; each `data[]` entry specifies its own SecretStore via this field | No | When not set, this data source uses environment-variable or WorkerRole authentication (see the Authentication Guide) |
 | kmsEndpoint | KMS Endpoint address for this credential, can override global configuration | No | When not set, uses global `command.kmsEndpoint` → default `kms-vpc.{region}.aliyuncs.com` |
 
 **dataProcess (Data sources requiring special processing)**
@@ -501,7 +520,7 @@ ClusterExternalSecret is a resource for managing and coordinating ExternalSecret
 | externalSecretName | Name of the ExternalSecret to be created | No | Defaults to the ClusterExternalSecret's name |
 | externalSecretMetadata | Metadata of the ExternalSecret to be created | No | When not set, no additional metadata is added |
 | namespaceSelectors | Uses label selector to match allowed namespaces (deprecated) | No | Use `conditions` instead |
-| conditions | List of conditions for selecting target namespaces | No | When not set, no ExternalSecrets are created |
+| conditions | List of conditions for selecting target namespaces | No | When both `conditions` and `namespaceSelectors` are unset, ExternalSecrets are created in all namespaces; once either is configured, namespaces that match no condition are excluded (fail-closed) |
 | rotationInterval | Time interval for the controller to check namespace labels and reconcile objects | No | When not set, uses global `--polling-interval` (default 120s) |
 
 **externalSecretMetadata**
@@ -520,3 +539,5 @@ The externalSecretMetadata field allows you to automatically add additional meta
 | namespaceSelector | Uses label selector to match allowed namespaces | No |
 | namespaces | Explicitly lists allowed namespace names | No |
 | namespaceRegexes | Uses regex patterns to match allowed namespace names | No |
+
+> **Regex matching note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.

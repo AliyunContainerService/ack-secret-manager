@@ -108,6 +108,8 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
   2. `namespaces`：明确列出允许访问的命名空间名称列表
   3. `namespaceRegexes`：使用正则表达式匹配允许访问的命名空间名称列表
 
+> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+
 ### ClusterSecretStore 访问控制
 
 - ClusterSecretStore 通过 `spec.conditions` 字段定义允许访问该资源的命名空间条件
@@ -115,6 +117,8 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
   1. `namespaceSelector`：使用标签选择器匹配允许访问的命名空间
   2. `namespaces`：明确列出允许访问的命名空间名称列表
   3. `namespaceRegexes`：使用正则表达式匹配允许访问的命名空间名称列表
+
+> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ## 推荐使用方式
 
@@ -147,7 +151,7 @@ SecretStore 是命名空间级别资源，用于定义访问凭据（如 RRSA、
 
 ### 配置说明
 
-SecretStore 支持以下认证方式（ServiceAccount RRSA、RRSA、AK 扮演、AK），具体配置请参考 [认证配置指南](auth_guide_zh.md)。
+SecretStore 支持以下认证方式（ServiceAccount RRSA、RRSA、AK 扮演、AK、跨账号），具体配置请参考 [认证配置指南](auth_guide_zh.md)。
 
 关键配置要点：
 - **ServiceAccount RRSA**：通过 `serviceAccountRef.name` 引用同 namespace 的 ServiceAccount，可通过 `serviceAccountRef.namespace` 跨 namespace 引用
@@ -172,6 +176,8 @@ ClusterSecretStore 是集群级别资源，功能与 SecretStore 相同，但可
 2. **namespaceSelector**：使用标签选择器匹配 namespace
 3. **namespaceRegexes**：使用正则表达式匹配 namespace 名称
 
+> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+
 ### 配置说明
 
 ClusterSecretStore 的认证配置与 SecretStore 相同，额外需要注意：
@@ -190,14 +196,17 @@ ExternalSecret 是命名空间级别资源，用于定义需要同步的凭据�
 
 ### 配置说明
 
-ExternalSecret 的关键配置字段：
+ExternalSecret 的关键配置字段（缩进的字段隶属于其上一层级）：
 - `provider`：目标云服务（`kms` 或 `oos`，默认 `kms`）
-- `data[]`：定义同步的凭据列表，每个凭据指定 `key`（KMS 凭据名称）、`name`（K8s Secret 中的 key）、`versionId` 等
-- `secretStoreRef`：引用的 SecretStore 或 ClusterSecretStore（引用 ClusterSecretStore 时需指定 `kind: ClusterSecretStore`）
 - `rotationInterval`：同步间隔
-- `kmsEndpoint`：凭据级 KMS Endpoint（可选，覆盖全局配置）
-- `jmesPath`：解析 JSON/YAML 凭据中的特定字段（可选）
 - `dataProcess`：自动解析 JSON/YAML 凭据（可选）
+- `data[]`：定义同步的凭据列表。每个条目下的字段：
+  - `key`：后端中的凭据名称（KMS 凭据名称）
+  - `name`：K8s Secret 中的 key
+  - `versionId`：要同步的凭据版本
+  - `secretStoreRef`：引用的 SecretStore 或 ClusterSecretStore，按 `data[]` 条目配置（引用 ClusterSecretStore 时需指定 `kind: ClusterSecretStore`）
+  - `kmsEndpoint`：凭据级 KMS Endpoint（可选，覆盖全局配置）
+  - `jmesPath`：解析 JSON/YAML 凭据中的特定字段（可选）
 
 ### 多 Key 配置说明
 
@@ -213,16 +222,20 @@ metadata:
   namespace: production
 spec:
   provider: kms
-  secretStoreRef:
-    name: my-store
-    kind: SecretStore
   data:
     - key: db-password      # KMS 中的凭据名称
       name: database-password # 写入 K8s Secret 的 key
+      secretStoreRef:       # 每个 data[] 条目独立配置自己的 SecretStore 引用
+        name: my-store
+        kind: SecretStore
     - key: api-key
       name: api-key
+      secretStoreRef:
+        name: my-store
     - key: tls-cert
       name: tls-certificate
+      secretStoreRef:
+        name: my-store
 ```
 
 上述配置将生成一个名为 `my-app-secrets` 的 K8s Secret，其 `data` 包含三个 key：
@@ -238,8 +251,12 @@ K8s Secret (production/my-app-secrets)
 > **说明**：
 > - `key` 是后端（KMS/OOS）中凭据的标识符，`name` 是最终写入 K8s Secret `data` 中的 key 名称，两者可以不同
 > - 如果省略 `name`，默认使用 `key` 的值作为 Secret data 的 key（例如 `key: api-key` 未指定 `name` 时，Secret data 中的 key 也是 `api-key`）
-> - 每个 `data[]` 条目可以独立配置 `secretStoreRef`、`kmsEndpoint`、`versionId` 等，未配置时使用默认值
+> - 每个 `data[]` 条目独立配置自己的 `secretStoreRef`、`kmsEndpoint`、`versionId` 等；`secretStoreRef` 是条目级字段（spec 顶层不存在 `secretStoreRef`）
 > - 适用于需要将多个相关凭据集中管理到同一个 K8s Secret 的场景（如数据库连接信息、TLS 证书等）
+
+> **状态语义（v0.6.6）**：`status.dataSyncResults` 在同步结果语义（各键的状态/原因，或整体成功状态）变化时更新，并在控制器实际写入（或删除）目标 Kubernetes Secret 后强制刷新同步时间戳；`synchronizationTime` 记录当前上报结果的发生时间，不会每轮 reconcile 刷新：稳态轮询轮次（拉取到的数据无变化、未写入 Secret）中，时间戳保持为上次成功同步的时间。请勿将其用作活性心跳。失败对集群 Secret 的影响请参考[高级用法指南 - 同步失败处理语义](advanced_usage_zh.md#同步失败处理语义)。
+
+> **删除行为**：删除 ExternalSecret 时，finalizer 会无条件删除目标 Secret（不参考 `cleanupSecretOnFailure`）；若 `target.name` 指向人工维护的同名 Secret，该 Secret 也会被删除。
 
 ### 完整示例
 
@@ -365,6 +382,8 @@ ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任
 | namespaceRegexes | 使用正则表达式匹配允许访问的命名空间名称列表 | 否 |
 
 > KMS/OOS 下的认证字段（KMSAuth/OOSAuth）与 SecretStore 相同，请参考上方 SecretStore 参数说明。
+>
+> **正则匹配说明**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ### ExternalSecret
 
@@ -445,7 +464,7 @@ ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任
 
 | 值 | 描述 |
 | -- | ---- |
-| Replace | 完全使用模板字段名（清空现有secret中的字段名） |
+| Replace | 完全使用模板字段名（清空现有secret中的字段名）。例外：当 `templateFrom` 条目仅指向 Labels/Annotations 目标时不清空 Secret `data`，详见[模板解析指南 - 合并策略](template_processing_guide_zh.md#合并策略mergepolicy) |
 | Merge | 将模板字段名与现有secret中的字段名合并, 模板中包含的字段名和现有secret中的字段名相同，以模板值为准 |
 
 **data（无需经过特殊处理的数据源）**
@@ -453,11 +472,11 @@ ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任
 | crd 字段 | 描述 | 是否必选 | 默认行为 |
 | -------- | ---- | -------- | -------- |
 | key | 目标凭据的唯一标识（KMS 凭据名称或 OOS 参数名称） | 是 | — |
-| name | 同步到 K8s Secret data 中对应的 key 名称 | 是 | 未配置时默认使用 `key` 的值 |
+| name | 同步到 K8s Secret data 中对应的 key 名称 | 否 | 未配置时默认使用 `key` 的值 |
 | versionStage | 目标凭据的版本状态（如 `ACSCurrent`、`ACSPrevious`） | 否 | 不填时拉取最新版本（`ACSCurrent`） |
 | versionId | 目标凭据的版本号；当 provider 为 `oos` 时不需要指定 | 否 | 不填时拉取最新版本 |
 | jmesPath | 当目标凭据为 JSON/YAML 格式时，通过 JMESPath 表达式提取特定字段 | 否 | 不填时同步整个凭据内容 |
-| secretStoreRef | 该凭据引用的 SecretStore 信息，可覆盖 ExternalSecret 顶层配置 | 否 | 不填时使用默认值 |
+| secretStoreRef | 该凭据引用的 SecretStore 信息；每个 `data[]` 条目通过该字段指定各自的 SecretStore | 否 | 不填时该数据源使用环境变量或 WorkerRole 认证（参考认证配置指南） |
 | kmsEndpoint | 该凭据使用的 KMS Endpoint 地址，可覆盖全局配置 | 否 | 不填时依次使用全局 `command.kmsEndpoint` → 默认 `kms-vpc.{region}.aliyuncs.com` |
 
 **dataProcess（需要进行特殊处理的数据源）**
@@ -501,7 +520,7 @@ ClusterExternalSecret 是管理和协调多个命名空间下 ExternalSecret 的
 | externalSecretName | 要创建的 ExternalSecret 的名称 | 否 | 不填时默认为 ClusterExternalSecret 的名称 |
 | externalSecretMetadata | 要创建的 ExternalSecret 的元数据 | 否 | 不填时不添加额外元数据 |
 | namespaceSelectors | 使用标签选择器匹配允许访问的命名空间(已废弃) | 否 | 请使用 `conditions` 代替 |
-| conditions | 用于选择目标命名空间的条件列表 | 否 | 不填时不创建任何 ExternalSecret |
+| conditions | 用于选择目标命名空间的条件列表 | 否 | `conditions` 与 `namespaceSelectors` 均不配置时，向所有命名空间下发 ExternalSecret；配置了任一项后，未匹配任何条件的命名空间不下发（fail-closed） |
 | rotationInterval | 控制器检查命名空间标签和协调对象的时间间隔 | 否 | 不填时使用全局 `--polling-interval`（默认 120s） |
 
 **externalSecretMetadata**
@@ -520,3 +539,5 @@ externalSecretMetadata 字段允许您自动为 ClusterExternalSecret 创建的 
 | namespaceSelector | 使用标签选择器匹配允许访问的命名空间 | 否 |
 | namespaces | 明确列出允许访问的命名空间名称列表 | 否 |
 | namespaceRegexes | 使用正则表达式匹配允许访问的命名空间名称列表 | 否 |
+
+> **正则匹配说明**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。

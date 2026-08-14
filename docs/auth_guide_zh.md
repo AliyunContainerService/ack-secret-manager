@@ -31,7 +31,7 @@ ack-secret-manager 支持以下 5 种认证方式：
 > - **环境变量**方式：通过 Helm values 或 helm --set 注入认证参数，组件级别统一生效，ExternalSecret 无需指定 `secretStoreRef`
 > - **SecretStore** 方式：通过 SecretStore/ClusterSecretStore CRD 配置，ExternalSecret 通过 `secretStoreRef` 引用
 > - **ServiceAccount RRSA** 仅支持 SecretStore 方式（通过 `serviceAccountRef` 引用）
-> - **WorkerRole** 自动使用节点 ECS 的 RAM Role，无需任何配置，以上均未配置时自动回退
+> - **WorkerRole** 自动使用节点 ECS 的 RAM Role，无需任何配置，以上均未配置时自动选用
 
 ## 认证优先级
 
@@ -53,13 +53,13 @@ ack-secret-manager 支持以下 5 种认证方式：
 | -------- | -------------- | ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | 1（最高） | ServiceAccount RRSA | SecretStore | SecretStore 配置了 `serviceAccountRef` | 控制器读取目标 ServiceAccount 注解，通过 OIDC 动态 Token 获取凭据，安全性最高 |
 | 2 | RRSA | 环境变量 / SecretStore | 配置了 `ramRoleARN` + `oidcProviderARN` | 使用组件级 OIDC Token 获取临时凭据 |
-| 3 | AK 扮演 | 环境变量 / SecretStore | 配置了 `accessKey` + `accessKeySecret` + `ramRoleARN` | 使用 AK 登录后 AssumeRole 获取临时凭据 |
+| 3 | AK 扮演 | 环境变量 / SecretStore | 配置了 `accessKey` + `accessKeySecret` + `ramRoleARN`（`ramRoleSessionName` 可选） | 使用 AK 登录后 AssumeRole 获取临时凭据 |
 | 4 | 纯 AK | 环境变量 / SecretStore | 仅配置 `accessKey` + `accessKeySecret` | 直接使用静态 AK/SK |
-| 5（最低） | WorkerRole | 默认 | 以上均未配置时自动回退 | 使用节点 ECS 的 RAM Role |
+| 5（最低） | WorkerRole | 默认 | 以上均未配置时自动选用 | 使用节点 ECS 的 RAM Role |
 
 **重要说明**：
 
-- 认证链按优先级依次尝试**凭据获取**，当认证链前一种认证方式凭据获取失败（如 OIDC token 文件不存在）时回退到下一个
+- 认证链按优先级依次**选择认证档**：仅当某档前置条件缺失（该档未启用）时才跳到下一档；凭据获取失败（如 token 文件缺失、STS 报错）不会回退到下一档，认证链将停留在该失败档并报错
 - **一旦凭据获取成功，即使该凭据没有目标 API 的权限（如 KMS 403），也不会回退到认证链的下一种认证**
 - 当同时配置了多种认证字段时（例如同时配置 `RRSA` 和 `AK`），按上表优先级选择**唯一生效**的认证方式即会使用`RRSA`认证
 - ServiceAccount RRSA 由控制器读取目标 ServiceAccount 注解，通过 OIDC 动态 Token 获取凭据，提供 ServiceAccount 维度的细粒度权限隔离，安全性最高
@@ -78,8 +78,6 @@ ExternalSecret 的每个 `DataSource` 根据是否配置 `secretStoreRef` 决定
 ## Namespace 规则
 
 默认情况下，`command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 均为 `false`，**默认禁止跨 namespace 引用**。如需开启跨 namespace 引用，请将对应参数设置为 `true`。
-
-默认情况下，`command.enableCrossNamespaceSecretStore` 和 `command.enableCrossNamespaceAuthRef` 均为 `true`，**允许跨 namespace 引用**。
 
 **使用 SecretStore 时**：
 
@@ -168,7 +166,7 @@ AK 扮演使用 AccessKey + AssumeRole 获取临时凭据，相比纯 AK 更安�
 5. **创建 Secret**：包含 `id`、`secret` 和 `rolearn`
 6. **配置认证**（两种方式任选）：
    - **方式 A（环境变量）**：在 Helm values 中通过 `envVarsFromSecret` 注入 `ACCESS_KEY_ID`、`SECRET_ACCESS_KEY` 和 `ALICLOUD_ROLE_ARN`，ExternalSecret 无需 `secretStoreRef`
-   - **方式 B（SecretStore）**：创建 SecretStore 配置 `accessKey` + `accessKeySecret` + `ramRoleARN` + `ramRoleSessionName`，ExternalSecret 通过 `secretStoreRef` 引用
+   - **方式 B（SecretStore）**：创建 SecretStore 配置 `accessKey` + `accessKeySecret` + `ramRoleARN`（`ramRoleSessionName` 可选，不填时使用组件默认会话名 `ack-secret-manager`），ExternalSecret 通过 `secretStoreRef` 引用
 
 ### 3.3 完整示例
 

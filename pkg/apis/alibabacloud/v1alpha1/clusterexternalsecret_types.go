@@ -130,7 +130,7 @@ type ClusterExternalSecretStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:metadata:labels="external-secrets.io/component=controller"
 // +kubebuilder:printcolumn:name="Store",type=string,JSONPath=`.spec.externalSecretSpec.secretStoreRef.name`
-// +kubebuilder:printcolumn:name="Refresh Interval",type=string,JSONPath=`.spec.refreshTime`
+// +kubebuilder:printcolumn:name="Refresh Interval",type=string,JSONPath=`.spec.rotationInterval`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 type ClusterExternalSecret struct {
 	metav1.TypeMeta   `json:",inline"`

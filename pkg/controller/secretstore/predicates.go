@@ -32,7 +32,10 @@ func (p SecretStorePredicate) Update(e event.UpdateEvent) bool {
 	if !ok {
 		return false
 	}
-	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) || !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
+	// Status-only changes are intentionally ignored here to break the
+	// self-triggering loop caused by the controller writing status; the
+	// periodic ReconciliationPeriod requeue still acts as a safety net.
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) ||
 		oldObj.GetDeletionTimestamp() != newObj.GetDeletionTimestamp() ||
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true
@@ -71,7 +74,10 @@ func (p ClusterSecretStorePredicate) Update(e event.UpdateEvent) bool {
 	if !ok {
 		return false
 	}
-	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) || !reflect.DeepEqual(oldObj.Status, newObj.Status) ||
+	// Status-only changes are intentionally ignored here to break the
+	// self-triggering loop caused by the controller writing status; the
+	// periodic ReconciliationPeriod requeue still acts as a safety net.
+	if !reflect.DeepEqual(oldObj.Spec, newObj.Spec) ||
 		oldObj.GetDeletionTimestamp() != newObj.GetDeletionTimestamp() ||
 		oldObj.GetGeneration() != newObj.GetGeneration() {
 		return true

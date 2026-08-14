@@ -10,19 +10,22 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
-// isValidJSON checks if the given byte slice is valid JSON
+// isValidJSON delegates to utils.IsValidJSON.
 func isValidJSON(data []byte) bool {
-	if len(data) == 0 {
-		return false
+	return utils.IsValidJSON(data)
+}
+
+// ResolveTargetKey returns the target key for a non-jmesPath data entry:
+// spec.data[].name when set, otherwise falling back to spec.data[].key.
+// This matches the documented contract that omitting name defaults to the
+// key value, and is the single key-derivation implementation shared by the
+// success path (getExternalSecret) and the failure path
+// (collectFailedEntryTargetKeys).
+func ResolveTargetKey(data *v1alpha1.DataSource) string {
+	if data.Name != "" {
+		return data.Name
 	}
-	// Quick check: JSON must start with { or [
-	firstChar := data[0]
-	if firstChar != '{' && firstChar != '[' {
-		return false
-	}
-	// Attempt to unmarshal as JSON
-	var js interface{}
-	return json.Unmarshal(data, &js) == nil
+	return data.Key
 }
 
 // ProcessExternalSecretData processes external secret data with JMESPath support
@@ -44,8 +47,10 @@ func ProcessExternalSecretData(data *v1alpha1.DataSource, externalData []byte) (
 		}
 	}
 
-	// Use the default name if no JMESPath processing was done
-	secretDatas[data.Name] = externalData
+	// Use the default name if no JMESPath processing was done.
+	// When name is omitted, fall back to the data key so the produced
+	// Secret entry never carries an empty key (rejected by the API server).
+	secretDatas[ResolveTargetKey(data)] = externalData
 	return secretDatas, nil
 }
 
@@ -82,14 +87,17 @@ func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData
 		}
 	}
 
-	// Apply key replacement rules if any
+	// Apply key replacement rules if any. A rule that fails to compile is a
+	// configuration error: fail closed and propagate the error instead of
+	// continuing, because a nil rewrite result would silently drop every
+	// extracted key.
 	if len(data.ReplaceKey) != 0 {
 		for _, rule := range data.ReplaceKey {
 			var err error
 			kv, err = utils.RewriteRegexp(rule, kv)
 			if err != nil {
-				klog.Errorf("replace data key failed, error %v", err)
-				continue
+				klog.Errorf("replace data key failed, key %v, error %v", data.Extract.Key, err)
+				return nil, err
 			}
 		}
 	}

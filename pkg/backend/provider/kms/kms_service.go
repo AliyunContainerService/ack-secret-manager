@@ -1,9 +1,9 @@
 package kms
 
 import (
+	"context"
 	"encoding/base64"
 	"fmt"
-	"time"
 
 	kms "github.com/alibabacloud-go/kms-20160120/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
@@ -25,7 +25,7 @@ func (c *KMSClient) GetName() string {
 	return c.clientName
 }
 
-func (c *KMSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
+func (c *KMSClient) getExternalData(ctx context.Context, data v1alpha1.DataSource) ([]byte, error) {
 	if c.kmsClient == nil {
 		return nil, fmt.Errorf("kms client is nil,kms key %v", data.Key)
 	}
@@ -39,24 +39,30 @@ func (c *KMSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 		req.VersionId = tea.String(data.VersionId)
 	}
 
-	resp, err := c.kmsClient.GetSecretValue(req)
-	if err != nil {
-		if !utils.JudgeNeedRetry(err) {
-			klog.Errorf("failed to get secret value from kms,key %v,error %v", data.Key, err)
-			return nil, err
-		} else {
-			klog.Warningf("kms API throttled (Rejected.Throttling), will retry after backoff, key %v", data.Key)
-			time.Sleep(utils.GetWaitTimeExponential(1))
-			resp, err = c.kmsClient.GetSecretValue(req)
-			if err != nil {
-				klog.Errorf("retry to get secret value from kms failed,key %v,error %v", data.Key, err)
-				return nil, err
-			}
+	// Fetch with bounded retries on transient errors (throttling, 5xx, etc.).
+	// resp is only assigned on a successful call to avoid stale values.
+	var resp *kms.GetSecretValueResponse
+	if err := common.FetchWithRetry(ctx, func() error {
+		r, fetchErr := c.kmsClient.GetSecretValue(req)
+		if fetchErr != nil {
+			klog.Warningf("get secret value from kms failed, key %v, error %v", data.Key, fetchErr)
+			return fetchErr
 		}
+		resp = r
+		return nil
+	}); err != nil {
+		klog.Errorf("failed to get secret value from kms after retries, key %v, error %v", data.Key, err)
+		return nil, err
 	}
 
 	if resp == nil || resp.Body == nil {
 		return nil, fmt.Errorf("get secret value from kms failed because response is empty, key %v", data.Key)
+	}
+	// Guard against a structurally empty success response: dereferencing
+	// SecretData without this check would panic the manager (symmetric with
+	// the OOS side guard on Body/Parameter/Value).
+	if resp.Body.SecretData == nil {
+		return nil, fmt.Errorf("get secret value from kms failed because secret data is empty, key %v", data.Key)
 	}
 	if resp.Body.SecretDataType != nil && *resp.Body.SecretDataType == utils.BinaryType {
 		klog.Infof("got binary secret data from kms service,key %v", data.Key)
@@ -67,13 +73,13 @@ func (c *KMSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 		return originData, nil
 	}
 
-	klog.Infof("got secret data from kms service,key %v", data.Key)
+	klog.V(2).Infof("got secret data from kms service,key %v", data.Key)
 	return []byte(*resp.Body.SecretData), nil
 }
 
-func (c *KMSClient) GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
+func (c *KMSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
 	// getExternalData
-	externalData, err := c.getExternalData(*data)
+	externalData, err := c.getExternalData(ctx, *data)
 	if err != nil {
 		klog.Errorf("get external data error %v,key %v", err, data.Key)
 		return nil, err
@@ -83,13 +89,13 @@ func (c *KMSClient) GetExternalSecret(data *v1alpha1.DataSource, kube client.Cli
 	return common.ProcessExternalSecretData(data, externalData)
 }
 
-func (c *KMSClient) GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
+func (c *KMSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
 	if data.Extract == nil {
 		return nil, fmt.Errorf("extract data is empty")
 	}
 
 	// getExternalData
-	externalData, err := c.getExternalData(*data.Extract)
+	externalData, err := c.getExternalData(ctx, *data.Extract)
 	if err != nil {
 		return nil, err
 	}

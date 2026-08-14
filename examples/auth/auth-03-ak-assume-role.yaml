@@ -76,6 +76,11 @@
 #     ALICLOUD_ROLE_ARN:
 #       secretKeyRef: alibaba-credentials
 #       key: rolearn
+#     # ALICLOUD_ROLE_SESSION_NAME is optional: when omitted, the component default
+#     # session name "ack-secret-manager" is used. To customize it, inject:
+#     # ALICLOUD_ROLE_SESSION_NAME:
+#     #   secretKeyRef: alibaba-credentials
+#     #   key: rolesessionname
 #
 # Install command:
 #   helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
@@ -117,7 +122,7 @@ spec:
         name: alibaba-credentials
         key: secret
       ramRoleARN: acs:ram::<accountId>:role/kms-access-role
-      ramRoleSessionName: ack-secret-manager
+      ramRoleSessionName: ack-secret-manager  # Optional: when omitted, defaults to "ack-secret-manager"
 
 ---
 # Step 2: Create ExternalSecret (reference via secretStoreRef)

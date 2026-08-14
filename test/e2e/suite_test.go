@@ -40,6 +40,11 @@ var (
 const (
 	ResourceSecretStore        = "SecretStore"
 	ResourceClusterSecretStore = "ClusterSecretStore"
+
+	// ackSecretManagerDeploymentName is the name of the ack-secret-manager Deployment.
+	ackSecretManagerDeploymentName = "ack-secret-manager"
+	// ackSecretManagerNamespace is the namespace where ack-secret-manager is deployed.
+	ackSecretManagerNamespace = "kube-system"
 )
 
 var _ = BeforeSuite(func() {
@@ -80,26 +85,38 @@ var _ = BeforeSuite(func() {
 	clusterID := os.Getenv("CLUSTER_ID")
 
 	if accountID == "" || clusterID == "" {
-		Fail("Required environment variables for ResourceManager are not set: ALIBABA_CLOUD_ACCOUNT_ID, CLUSTER_ID, ACK_WORKER_ROLE_NAME")
+		Fail("Required environment variables for ResourceManager are not set: ALIBABA_CLOUD_ACCOUNT_ID, CLUSTER_ID")
 	}
 
 	GlobalResourceManager, err = NewResourceManager(accountID, clusterID)
 	Expect(err).NotTo(HaveOccurred())
 
 	// Configure target account (Account B) credentials for cross-account testing
-	// These are optional - if not set, cross-account tests will use same-account simulation
-	remoteAccountID := os.Getenv("REMOTE_ACCOUNT_ID")
-	remoteAccessKeyID := os.Getenv("REMOTE_ACCESS_KEY_ID")
-	remoteAccessKeySecret := os.Getenv("REMOTE_ACCESS_KEY_SECRET")
-	remoteKMSKeyID := os.Getenv("REMOTE_KMS_KEY_ID")
-	remoteKMSInstanceID := os.Getenv("REMOTE_KMS_INSTANCE_ID")
+	// These are optional - if not set, cross-account resource creation is skipped
+	// gracefully and cross-account tests are Skipped
+	remoteAccountID := os.Getenv("CROSS_ACCOUNT_ID")
+	remoteAccessKeyID := os.Getenv("CROSS_ACCOUNT_ACCESS_KEY_ID")
+	remoteAccessKeySecret := os.Getenv("CROSS_ACCOUNT_ACCESS_KEY_SECRET")
+	remoteKMSKeyID := os.Getenv("CROSS_ACCOUNT_KMS_KEY_ID")
+	remoteKMSInstanceID := os.Getenv("CROSS_ACCOUNT_KMS_INSTANCE_ID")
+
+	// Backward-compatibility hint: the cross-account env vars were renamed
+	// from REMOTE_* to CROSS_ACCOUNT_*. When the old names are still set but
+	// the new CROSS_ACCOUNT_ID is absent, print a prominent warning so users
+	// know their old settings are ignored; do not Fail.
+	if remoteAccountID == "" && (os.Getenv("REMOTE_ACCOUNT_ID") != "" || os.Getenv("REMOTE_ACCESS_KEY_ID") != "") {
+		GinkgoWriter.Printf("WARNING: cross-account env vars have been renamed from REMOTE_* to CROSS_ACCOUNT_* " +
+			"(CROSS_ACCOUNT_ID, CROSS_ACCOUNT_ACCESS_KEY_ID, CROSS_ACCOUNT_ACCESS_KEY_SECRET, " +
+			"CROSS_ACCOUNT_KMS_KEY_ID, CROSS_ACCOUNT_KMS_INSTANCE_ID). Detected REMOTE_* variables are set but " +
+			"CROSS_ACCOUNT_ID is not, so the REMOTE_* values are IGNORED. Please migrate to the CROSS_ACCOUNT_* names.\n")
+	}
 
 	if remoteAccountID != "" && remoteAccessKeyID != "" && remoteAccessKeySecret != "" {
 		By("configuring target account credentials for cross-account testing")
 		err = GlobalResourceManager.SetRemoteAccountCredentials(remoteAccountID, remoteAccessKeyID, remoteAccessKeySecret, remoteKMSKeyID, remoteKMSInstanceID)
 		Expect(err).NotTo(HaveOccurred())
 	} else {
-		By("cross-account credentials not configured, using same-account simulation for cross-account tests")
+		By("cross-account credentials not configured, skipping cross-account resource creation (cross-account tests will be Skipped)")
 	}
 
 	err = GlobalResourceManager.SetupTestResources(ctx)
@@ -119,9 +136,14 @@ var _ = AfterSuite(func() {
 		Expect(err).NotTo(HaveOccurred())
 	}
 
+	// Remove the RRSA env vars from the Deployment BEFORE deleting the env
+	// Secret below, so no secretKeyRef on the Deployment ever dangles.
+	By("cleaning up RRSA env vars from the Deployment")
+	cleanupDeploymentRRSAEnv(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+
 	// Clean up the RRSA env Secret created in ensureRRSAEnabled
 	By("cleaning up RRSA env Secret")
-	_ = clientset.CoreV1().Secrets("kube-system").Delete(ctx, "ack-secret-manager-rrsa-env", metav1.DeleteOptions{})
+	_ = clientset.CoreV1().Secrets(ackSecretManagerNamespace).Delete(ctx, "ack-secret-manager-rrsa-env", metav1.DeleteOptions{})
 
 	By("tearing down the test environment")
 	cancel()
@@ -237,18 +259,11 @@ func CleanupExternalSecret(ctx context.Context, externalSecret *api.ExternalSecr
 	}, time.Second*10, time.Second*1).Should(BeTrue(), "ExternalSecret should be deleted before test ends")
 }
 
-// CleanupExternalSecretAndSyncedSecret thoroughly cleans up an ExternalSecret and all
-// associated K8s Secrets. This is critical because:
-//  1. cleanupSecretOnFailure is false by default, so synced Secrets may persist after ExternalSecret deletion
-//  2. The controller may not immediately clean up synced Secrets when ExternalSecret is deleted
-//  3. If ExternalSecret is not cleaned up, deleteTestNamespace will hang waiting for it
-//
-// This function:
-//   - Deletes all synced K8s Secrets (named after each DataSource entry)
-//   - Deletes the ExternalSecret itself
-//   - Waits for both to be fully gone
-//
-// Safe to call in DeferCleanup - tolerates already-deleted resources.
+// CleanupExternalSecretAndSyncedSecret thoroughly cleans up an ExternalSecret
+// and all associated K8s Secrets: synced Secrets may persist after deletion
+// (cleanupSecretOnFailure defaults to false), and a leftover ExternalSecret
+// would make deleteTestNamespace hang. Deletes the synced Secrets and the
+// ExternalSecret, waits for both; safe in DeferCleanup (tolerates missing).
 func CleanupExternalSecretAndSyncedSecret(ctx context.Context, es *api.ExternalSecret) {
 	if es == nil {
 		return
@@ -291,7 +306,12 @@ func validateExternalSecretSucceededAndSecretCreated(ctx context.Context, namesp
 			return false
 		}
 
-		// Check if there are sync results with Succeeded status
+		// Check if there are sync results with Succeeded status. An empty
+		// DataSyncResults slice would otherwise pass the loop vacuously.
+		if len(createdExternalSecret.Status.DataSyncResults) == 0 {
+			lastCheckError = "ExternalSecret has no DataSyncResults yet"
+			return false
+		}
 		for i, result := range createdExternalSecret.Status.DataSyncResults {
 			if result.Status != "Succeeded" {
 				lastCheckError = fmt.Sprintf(
@@ -321,8 +341,9 @@ func validateExternalSecretSucceededAndSecretCreated(ctx context.Context, namesp
 		})
 }
 
-// Validate parsed secret content based on whether specific keys exist or if general data processing occurred
-func validateParsedSecretContent(ctx context.Context, externalSecret *api.ExternalSecret, expectedKeyAliases []string) {
+// Validate parsed secret content: every expected key must exist in the
+// synced Secret and its value must equal the expected value.
+func validateParsedSecretContent(ctx context.Context, externalSecret *api.ExternalSecret, expectedValues map[string]string) {
 	var lastCheckError string
 	Eventually(func() bool {
 		kubeSecret := &corev1.Secret{}
@@ -335,33 +356,103 @@ func validateParsedSecretContent(ctx context.Context, externalSecret *api.Extern
 			return false
 		}
 
-		// Check if ALL expected key aliases exist in the created Kubernetes secret
-		missingKeys := []string{}
-		for _, alias := range expectedKeyAliases {
-			if kubeSecret.Data[alias] == nil {
-				missingKeys = append(missingKeys, alias)
+		// Check if ALL expected keys exist with the expected values
+		for key, expectedValue := range expectedValues {
+			if kubeSecret.Data[key] == nil {
+				lastCheckError = fmt.Sprintf("Missing expected key %q in secret", key)
+				return false
+			}
+			if string(kubeSecret.Data[key]) != expectedValue {
+				lastCheckError = fmt.Sprintf("Secret key %q has value %q, expected %q", key, string(kubeSecret.Data[key]), expectedValue)
+				return false
 			}
 		}
 
-		if len(missingKeys) > 0 {
-			lastCheckError = fmt.Sprintf("Missing expected keys in secret: %v", missingKeys)
-			return false
-		}
-
-		// Only return true if ALL expected keys exist
 		return true
 	}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
 		func() string {
 			if lastCheckError != "" {
-				return fmt.Sprintf("Parsed secret should contain all expected keys, but: %s", lastCheckError)
+				return fmt.Sprintf("Parsed secret should contain all expected keys with expected values, but: %s", lastCheckError)
 			}
-			return "Parsed secret should contain all expected keys"
+			return "Parsed secret should contain all expected keys with expected values"
 		})
+}
+
+// createAKSecret creates a Kubernetes Secret holding AK/SK credentials and
+// returns it. Shared by all auth-related tests that need an accessKeyId /
+// accessKeySecret Secret referenced by SecretStore authentication.
+func createAKSecret(ctx context.Context, namespace, name, accessKeyID, accessKeySecret string) *corev1.Secret {
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Data: map[string][]byte{
+			"accessKeyId":     []byte(accessKeyID),
+			"accessKeySecret": []byte(accessKeySecret),
+		},
+	}
+	Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+	return secret
+}
+
+// createRRSASecretStore creates an OIDC/RRSA SecretStore in the given
+// namespace and waits until it becomes Ready.
+func createRRSASecretStore(ctx context.Context, namespace, name string) *api.SecretStore {
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: namespace,
+		},
+		Spec: api.SecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					RAMRoleARN:      RAMRoleArnForRRSA,
+					OIDCProviderARN: OIDCProviderARN,
+				},
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, store)).To(Succeed())
+	waitForSecretStoreReady(ctx, namespace, name)
+	return store
 }
 
 func TestE2E(t *testing.T) {
 	RegisterFailHandler(Fail)
 	RunSpecs(t, "ACK Secret Manager E2E Suite")
+}
+
+// createRRSAServiceAccountForTest creates a dedicated RAM role whose trust
+// policy targets the given ServiceAccount, then creates the ServiceAccount
+// annotated with the role ARN. The RAM role cleanup is registered before the
+// ServiceAccount is created so the role is always deleted, even when the
+// ServiceAccount creation fails (cleanup failures only emit a WARNING,
+// matching the suite's cleanup conventions). The ServiceAccount itself is
+// removed by the namespace cascade deletion, so no separate cleanup is needed.
+func createRRSAServiceAccountForTest(ctx context.Context, namespace, saName string) *corev1.ServiceAccount {
+	roleArn, roleName, err := GlobalResourceManager.CreateRamRoleForServiceAccount(ctx, namespace, saName)
+	Expect(err).NotTo(HaveOccurred(), "failed to create RAM role for ServiceAccount %s/%s", namespace, saName)
+
+	// Register cleanup before creating the ServiceAccount so the RAM role is
+	// never leaked even if the creation below fails.
+	DeferCleanup(func() {
+		if err := GlobalResourceManager.DeleteRamRole(roleName); err != nil {
+			GinkgoWriter.Printf("WARNING: failed to delete RAM role %s: %v\n", roleName, err)
+		}
+	})
+
+	serviceAccount := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      saName,
+			Namespace: namespace,
+			Annotations: map[string]string{
+				ACKRRSAAnnotation: roleArn,
+			},
+		},
+	}
+	Expect(k8sClient.Create(ctx, serviceAccount)).To(Succeed())
+	return serviceAccount
 }
 
 // waitForClusterSecretStoreReady waits until a ClusterSecretStore becomes Ready.
@@ -379,6 +470,13 @@ func waitForClusterSecretStoreReady(ctx context.Context, name string) {
 			return false
 		}
 		for _, c := range store.Status.Conditions {
+			// Deterministic failure: spec validation failed and cannot
+			// self-heal, so fail fast instead of polling until timeout.
+			// Other reasons (e.g. ClientCreationFailed) remain retryable.
+			if c.Type == api.SecretStoreReady && c.Status == corev1.ConditionFalse && c.Reason == api.ReasonValidationFailed {
+				Fail(fmt.Sprintf("ClusterSecretStore %s failed validation: reason=%s message=%s",
+					name, c.Reason, c.Message))
+			}
 			if c.Type != api.SecretStoreReady || c.Status != corev1.ConditionTrue {
 				lastError = fmt.Sprintf("SecretStoreReady condition type=%s status=%s reason=%s message=%s",
 					c.Type, c.Status, c.Reason, c.Message)
@@ -410,6 +508,13 @@ func waitForSecretStoreReady(ctx context.Context, namespace, name string) {
 			return false
 		}
 		for _, c := range store.Status.Conditions {
+			// Deterministic failure: spec validation failed and cannot
+			// self-heal, so fail fast instead of polling until timeout.
+			// Other reasons (e.g. ClientCreationFailed) remain retryable.
+			if c.Type == api.SecretStoreReady && c.Status == corev1.ConditionFalse && c.Reason == api.ReasonValidationFailed {
+				Fail(fmt.Sprintf("SecretStore %s/%s failed validation: reason=%s message=%s",
+					namespace, name, c.Reason, c.Message))
+			}
 			if c.Type != api.SecretStoreReady || c.Status != corev1.ConditionTrue {
 				lastError = fmt.Sprintf("SecretStoreReady condition type=%s status=%s reason=%s message=%s",
 					c.Type, c.Status, c.Reason, c.Message)
@@ -431,25 +536,214 @@ func waitForSecretStoreReady(ctx context.Context, namespace, name string) {
 // are unavailable.
 func waitForDeploymentRollout(ctx context.Context, namespace, name string) {
 	Eventually(func() error {
-		dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-		if err != nil {
-			return err
-		}
-		if dep.Status.ObservedGeneration < dep.Generation {
-			return fmt.Errorf("deployment %s/%s not yet observed (gen=%d, observed=%d)",
-				namespace, name, dep.Generation, dep.Status.ObservedGeneration)
-		}
-		if dep.Status.UpdatedReplicas < *dep.Spec.Replicas {
-			return fmt.Errorf("deployment %s/%s rolling update in progress (updated=%d/%d)",
-				namespace, name, dep.Status.UpdatedReplicas, *dep.Spec.Replicas)
-		}
-		if dep.Status.UnavailableReplicas > 0 {
-			return fmt.Errorf("deployment %s/%s has %d unavailable replicas",
-				namespace, name, dep.Status.UnavailableReplicas)
-		}
-		return nil
-	}).WithTimeout(time.Second*120).WithPolling(time.Second*5).Should(Succeed(),
+		return checkDeploymentRolloutComplete(ctx, namespace, name)
+	}).WithTimeout(rolloutWaitTimeout).WithPolling(rolloutPollInterval).Should(Succeed(),
 		"Deployment %s/%s did not complete rollout within timeout", namespace, name)
+}
+
+// waitForDeploymentRolloutQuietly polls the Deployment rollout status like
+// waitForDeploymentRollout but returns an error instead of failing the suite,
+// so it can be used in AfterSuite cleanup without masking test results.
+// It shares the exact same completion criteria (checkDeploymentRolloutComplete),
+// timeout and polling interval as waitForDeploymentRollout.
+func waitForDeploymentRolloutQuietly(ctx context.Context, namespace, name string) error {
+	deadline := time.Now().Add(rolloutWaitTimeout)
+	var lastErr error
+	for {
+		if lastErr = checkDeploymentRolloutComplete(ctx, namespace, name); lastErr == nil {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return lastErr
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(rolloutPollInterval):
+		}
+	}
+}
+
+const (
+	// rolloutWaitTimeout is the maximum time shared rollout waiters allow for
+	// a Deployment rollout to complete.
+	rolloutWaitTimeout = 120 * time.Second
+	// rolloutPollInterval is the polling interval shared by rollout waiters.
+	rolloutPollInterval = 5 * time.Second
+)
+
+// checkDeploymentRolloutComplete reports whether the Deployment has finished
+// its rolling update: the latest generation has been observed, all desired
+// replicas run the updated template, and no replica is unavailable.
+func checkDeploymentRolloutComplete(ctx context.Context, namespace, name string) error {
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if dep.Status.ObservedGeneration < dep.Generation {
+		return fmt.Errorf("deployment %s/%s not yet observed (gen=%d, observed=%d)",
+			namespace, name, dep.Generation, dep.Status.ObservedGeneration)
+	}
+	if dep.Status.UpdatedReplicas < *dep.Spec.Replicas {
+		return fmt.Errorf("deployment %s/%s rolling update in progress (updated=%d/%d)",
+			namespace, name, dep.Status.UpdatedReplicas, *dep.Spec.Replicas)
+	}
+	if dep.Status.UnavailableReplicas > 0 {
+		return fmt.Errorf("deployment %s/%s has %d unavailable replicas",
+			namespace, name, dep.Status.UnavailableReplicas)
+	}
+	return nil
+}
+
+// bumpRestartAnnotationAndUpdate sets the restartedAt annotation to force a
+// rolling restart and updates the Deployment. It is the quiet counterpart of
+// updateDeploymentAndRollout: it performs no Ginkgo assertions so it can be
+// used in AfterSuite cleanup where failures must only warn, never fail the
+// suite. Callers are expected to retry on conflict.
+func bumpRestartAnnotationAndUpdate(ctx context.Context, namespace, name string, dep *appsv1.Deployment) error {
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+	_, err := clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+	return err
+}
+
+// filterRRSAEnvVars strips the RRSA env vars (ALICLOUD_ROLE_ARN,
+// ALICLOUD_OIDC_PROVIDER_ARN) from the Deployment's first container and
+// reports whether anything was removed. Shared by removeRRSAEnvTemporarily
+// (per-test) and cleanupDeploymentRRSAEnv (AfterSuite).
+func filterRRSAEnvVars(dep *appsv1.Deployment) bool {
+	rrsaEnvNames := map[string]bool{
+		"ALICLOUD_ROLE_ARN":          true,
+		"ALICLOUD_OIDC_PROVIDER_ARN": true,
+	}
+	filteredEnv := make([]corev1.EnvVar, 0, len(dep.Spec.Template.Spec.Containers[0].Env))
+	removed := false
+	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
+		if rrsaEnvNames[env.Name] {
+			removed = true
+			continue
+		}
+		filteredEnv = append(filteredEnv, env)
+	}
+	dep.Spec.Template.Spec.Containers[0].Env = filteredEnv
+	return removed
+}
+
+// updateDeploymentAndRollout fetches the Deployment, applies mutate to it,
+// sets the restartedAt annotation to force a rolling restart, updates the
+// Deployment and waits for the rollout to complete.
+func updateDeploymentAndRollout(ctx context.Context, namespace, name string, mutate func(dep *appsv1.Deployment)) {
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to get Deployment %s/%s", namespace, name)
+
+	mutate(dep)
+
+	if dep.Spec.Template.Annotations == nil {
+		dep.Spec.Template.Annotations = make(map[string]string)
+	}
+	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+
+	_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to update Deployment %s/%s", namespace, name)
+
+	By(fmt.Sprintf("waiting for Deployment %s/%s rollout to complete", namespace, name))
+	waitForDeploymentRollout(ctx, namespace, name)
+}
+
+// getDeploymentArgs returns a copy of the current args of the first
+// container of the ack-secret-manager Deployment. It is a read-only helper
+// used to capture the args baseline BEFORE registering cleanup, so the
+// DeferCleanup registration never depends on a (potentially failing) patch
+// call. Fails when the Deployment cannot be retrieved.
+func getDeploymentArgs(ctx context.Context) []string {
+	dep, err := clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment for args baseline capture")
+
+	args := make([]string, len(dep.Spec.Template.Spec.Containers[0].Args))
+	copy(args, dep.Spec.Template.Spec.Containers[0].Args)
+	return args
+}
+
+// patchDeploymentArgs patches the ack-secret-manager Deployment args: every
+// arg matching one of removePrefixes is dropped and addArgs are appended,
+// then the Deployment is restarted and the rollout awaited. Returns the
+// original args so callers can restore them via restoreDeploymentArgs.
+//
+// Idempotent: when the current args already satisfy the desired state (no
+// arg matches any removePrefix except when it is one of addArgs, and every
+// addArg is present), the Update and rollout are skipped entirely.
+func patchDeploymentArgs(ctx context.Context, removePrefixes []string, addArgs []string) (originalArgs []string) {
+	dep, err := clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment for args patch")
+
+	originalArgs = make([]string, len(dep.Spec.Template.Spec.Containers[0].Args))
+	copy(originalArgs, dep.Spec.Template.Spec.Containers[0].Args)
+
+	// Check whether the current args already satisfy the desired state.
+	alreadySatisfied := true
+	for _, arg := range originalArgs {
+		for _, prefix := range removePrefixes {
+			if !strings.HasPrefix(arg, prefix) {
+				continue
+			}
+			// An arg that exactly matches one of addArgs is part of the
+			// desired state, so it does not break satisfaction.
+			isDesired := false
+			for _, addArg := range addArgs {
+				if arg == addArg {
+					isDesired = true
+					break
+				}
+			}
+			if !isDesired {
+				alreadySatisfied = false
+				break
+			}
+		}
+		if !alreadySatisfied {
+			break
+		}
+	}
+	if alreadySatisfied {
+		for _, addArg := range addArgs {
+			found := false
+			for _, arg := range originalArgs {
+				if arg == addArg {
+					found = true
+					break
+				}
+			}
+			if !found {
+				alreadySatisfied = false
+				break
+			}
+		}
+	}
+	if alreadySatisfied {
+		By("Deployment args already match the desired state, skipping patch and rollout")
+		return originalArgs
+	}
+
+	updateDeploymentAndRollout(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName, func(dep *appsv1.Deployment) {
+		newArgs := make([]string, 0, len(dep.Spec.Template.Spec.Containers[0].Args)+len(addArgs))
+		for _, arg := range dep.Spec.Template.Spec.Containers[0].Args {
+			removed := false
+			for _, prefix := range removePrefixes {
+				if strings.HasPrefix(arg, prefix) {
+					removed = true
+					break
+				}
+			}
+			if !removed {
+				newArgs = append(newArgs, arg)
+			}
+		}
+		dep.Spec.Template.Spec.Containers[0].Args = append(newArgs, addArgs...)
+	})
+
+	return originalArgs
 }
 
 // ensureRRSAEnvSecret ensures the RRSA env Secret exists with the correct data.
@@ -557,47 +851,134 @@ func patchDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
 	// Ensure the RRSA env Secret exists
 	ensureRRSAEnvSecret(ctx, namespace)
 
-	// Get and patch the Deployment
+	// Get the Deployment and check whether it already matches the desired state
 	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred(), "failed to get Deployment for RRSA env patch")
 
-	needsUpdate := patchDeploymentEnvWithRRSA(ctx, dep)
-
-	if needsUpdate {
-		if dep.Spec.Template.Annotations == nil {
-			dep.Spec.Template.Annotations = make(map[string]string)
-		}
-		dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-		_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-		Expect(err).NotTo(HaveOccurred(), "failed to update Deployment with RRSA env vars")
-		By("waiting for Deployment rollout after RRSA env patch")
-		waitForDeploymentRollout(ctx, namespace, name)
-	} else {
+	if !patchDeploymentEnvWithRRSA(ctx, dep) {
 		By("Deployment already has correct RRSA env vars via secretKeyRef, skipping patch")
-	}
-}
-
-// restoreDeploymentRRSAEnv removes RRSA env vars from the Deployment and triggers a rollout.
-// Used to clean up after ENV-based authentication tests.
-func restoreDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
-	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: failed to get Deployment %s/%s for RRSA env restoration: %v\n", namespace, name, err)
 		return
 	}
 
-	// Remove RRSA env vars
-	rrsaEnvNames := map[string]bool{
-		"ALICLOUD_ROLE_ARN":          true,
-		"ALICLOUD_OIDC_PROVIDER_ARN": true,
+	updateDeploymentAndRollout(ctx, namespace, name, func(dep *appsv1.Deployment) {
+		patchDeploymentEnvWithRRSA(ctx, dep)
+	})
+}
+
+// restoreDeploymentRRSAEnv restores the ack-secret-manager Deployment to the
+// RRSA env baseline established by BeforeSuite (ensureRRSAEnabled): the env
+// Secret ack-secret-manager-rrsa-env exists and ALICLOUD_ROLE_ARN /
+// ALICLOUD_OIDC_PROVIDER_ARN are present via secretKeyRef.
+//
+// IMPORTANT: this must NOT simply remove the RRSA env vars. BeforeSuite
+// injects them globally, so removing them here would silently change the
+// baseline for every subsequent test (and deleting the env Secret would even
+// break pod startup because the remaining secretKeyRef env vars would dangle).
+// Restoration therefore means "return to the BeforeSuite baseline state".
+func restoreDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
+	restoreRRSAEnvBaseline(ctx, namespace, name)
+}
+
+// removeRRSAEnvTemporarily removes the RRSA env vars (ALICLOUD_ROLE_ARN,
+// ALICLOUD_OIDC_PROVIDER_ARN) from the Deployment and triggers a rollout.
+// It is used by WorkerRole tests: with the globally injected ENV OIDC
+// credentials present, an ExternalSecret without SecretStoreRef would be
+// served by ENV RRSA (auth chain priority 2) instead of WorkerRole
+// (priority 5). Removing the two env vars forces the chain down to the
+// WorkerRole provider.
+//
+// Callers MUST restore the baseline afterwards via restoreRRSAEnvBaseline
+// (typically in DeferCleanup), otherwise subsequent tests lose ENV RRSA.
+func removeRRSAEnvTemporarily(ctx context.Context, namespace, name string) {
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to get Deployment for RRSA env removal")
+
+	if !filterRRSAEnvVars(dep) {
+		By("RRSA env vars already absent from Deployment, nothing to remove")
+		return
 	}
-	var filteredEnv []corev1.EnvVar
-	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
-		if !rrsaEnvNames[env.Name] {
-			filteredEnv = append(filteredEnv, env)
+
+	updateDeploymentAndRollout(ctx, namespace, name, func(dep *appsv1.Deployment) {
+		filterRRSAEnvVars(dep)
+	})
+}
+
+// cleanupDeploymentRRSAEnv removes the RRSA env vars (ALICLOUD_ROLE_ARN,
+// ALICLOUD_OIDC_PROVIDER_ARN) from the ack-secret-manager Deployment as part
+// of AfterSuite cleanup. It MUST run before the RRSA env Secret is deleted so
+// that no secretKeyRef on the Deployment ever dangles (a dangling reference
+// would leave restarted pods stuck in CreateContainerConfigError).
+//
+// Idempotent: when the two env vars are already absent, no update or rollout
+// happens. All failures are logged as warnings and never fail the suite, so
+// cleanup issues do not mask test results.
+func cleanupDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
+	needsRollout := false
+	cleanupOnce := func() error {
+		dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+		if err != nil {
+			return err
+		}
+		if !filterRRSAEnvVars(dep) {
+			needsRollout = false
+			return nil
+		}
+		if err := bumpRestartAnnotationAndUpdate(ctx, namespace, name, dep); err != nil {
+			return err
+		}
+		needsRollout = true
+		return nil
+	}
+
+	if err := cleanupOnce(); err != nil {
+		// Retry once (re-Get then Update) before giving up.
+		if err = cleanupOnce(); err != nil {
+			GinkgoWriter.Printf("WARNING: failed to remove RRSA env vars from Deployment %s/%s after retry; "+
+				"the env vars may remain and their secretKeyRef will dangle once the RRSA env Secret is deleted: %v\n",
+				namespace, name, err)
+			return
 		}
 	}
-	dep.Spec.Template.Spec.Containers[0].Env = filteredEnv
+
+	if !needsRollout {
+		By("RRSA env vars already absent from Deployment, skipping cleanup rollout")
+		return
+	}
+
+	By("waiting for Deployment rollout after removing RRSA env vars")
+	if err := waitForDeploymentRolloutQuietly(ctx, namespace, name); err != nil {
+		GinkgoWriter.Printf("WARNING: Deployment %s/%s rollout after RRSA env cleanup did not finish cleanly: %v\n",
+			namespace, name, err)
+	}
+}
+
+// restoreRRSAEnvBaseline restores the RRSA env baseline established by
+// BeforeSuite (ensureRRSAEnabled): it re-ensures the RRSA env Secret and the
+// secretKeyRef env vars, patching + rolling out only when the Deployment has
+// drifted from the baseline. The env Secret is deliberately NOT deleted here
+// (AfterSuite owns its final cleanup) so the secretKeyRef env vars always
+// resolve and pods keep starting up.
+func restoreRRSAEnvBaseline(ctx context.Context, namespace, name string) {
+	if RAMRoleArnForRRSA == "" || OIDCProviderARN == "" {
+		GinkgoWriter.Printf("WARNING: RRSA baseline not configured (RAMRoleArnForRRSA=%q, OIDCProviderARN=%q), skipping baseline restore\n",
+			RAMRoleArnForRRSA, OIDCProviderARN)
+		return
+	}
+
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		GinkgoWriter.Printf("WARNING: failed to get Deployment %s/%s for RRSA env baseline restoration: %v\n", namespace, name, err)
+		return
+	}
+
+	// Re-ensure the env Secret (it may have been absent) before referencing it.
+	ensureRRSAEnvSecret(ctx, namespace)
+
+	needsUpdate := patchDeploymentEnvWithRRSA(ctx, dep)
+	if !needsUpdate {
+		By("Deployment already matches the RRSA env baseline, skipping restore")
+		return
+	}
 
 	if dep.Spec.Template.Annotations == nil {
 		dep.Spec.Template.Annotations = make(map[string]string)
@@ -605,14 +986,30 @@ func restoreDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
 	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
 	_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
 	if err != nil {
-		GinkgoWriter.Printf("WARNING: failed to restore Deployment %s/%s RRSA env vars: %v\n", namespace, name, err)
+		GinkgoWriter.Printf("WARNING: failed to restore Deployment %s/%s RRSA env baseline: %v\n", namespace, name, err)
 		return
 	}
-	By("waiting for Deployment rollout after RRSA env cleanup")
+	By("waiting for Deployment rollout after RRSA env baseline restore")
 	waitForDeploymentRollout(ctx, namespace, name)
+}
 
-	// Clean up the Secret
-	_ = clientset.CoreV1().Secrets(namespace).Delete(ctx, "ack-secret-manager-rrsa-env", metav1.DeleteOptions{})
+// workerRoleEnabledInDeployment reports whether the ack-secret-manager
+// Deployment runs with --enable-worker-role enabled. The flag defaults to
+// true (see cmd/manager/main.go), so its absence means enabled; only an
+// explicit --enable-worker-role=false disables the WorkerRole auth provider.
+func workerRoleEnabledInDeployment(ctx context.Context, namespace, name string) bool {
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		GinkgoWriter.Printf("WARNING: failed to get Deployment %s/%s to inspect --enable-worker-role: %v\n", namespace, name, err)
+		// Flag default is true; assume enabled when we cannot inspect.
+		return true
+	}
+	for _, arg := range dep.Spec.Template.Spec.Containers[0].Args {
+		if strings.HasPrefix(arg, "--enable-worker-role=") {
+			return strings.TrimPrefix(arg, "--enable-worker-role=") == "true"
+		}
+	}
+	return true
 }
 
 // restoreDeploymentEnv restores the original env vars of a Deployment's first container.
@@ -640,74 +1037,77 @@ func restoreDeploymentEnv(ctx context.Context, namespace, name string, originalE
 // --enable-cross-namespace-secret-store and --enable-cross-namespace-auth-ref flags.
 // Returns the original args so they can be restored later.
 func patchDeploymentCrossNamespaceArgs(ctx context.Context, enableSecretStore, enableAuthRef bool) (originalArgs []string) {
-	const (
-		deploymentName = "ack-secret-manager"
-		namespace      = "kube-system"
-	)
-
-	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
-	Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment for cross-namespace patch")
-
-	originalArgs = make([]string, len(dep.Spec.Template.Spec.Containers[0].Args))
-	copy(originalArgs, dep.Spec.Template.Spec.Containers[0].Args)
-
-	newArgs := make([]string, 0, len(originalArgs))
-	for _, arg := range originalArgs {
-		if strings.HasPrefix(arg, "--enable-cross-namespace-secret-store") {
-			continue
-		}
-		if strings.HasPrefix(arg, "--enable-cross-namespace-auth-ref") {
-			continue
-		}
-		newArgs = append(newArgs, arg)
-	}
-	newArgs = append(newArgs,
-		fmt.Sprintf("--enable-cross-namespace-secret-store=%v", enableSecretStore),
-		fmt.Sprintf("--enable-cross-namespace-auth-ref=%v", enableAuthRef),
-	)
-
-	dep.Spec.Template.Spec.Containers[0].Args = newArgs
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
-	}
-	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-
-	_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-	Expect(err).NotTo(HaveOccurred(), "failed to update Deployment cross-namespace args")
-
-	By("waiting for Deployment rollout after cross-namespace args patch")
-	waitForDeploymentRollout(ctx, namespace, deploymentName)
-
-	return originalArgs
+	return patchDeploymentArgs(ctx,
+		[]string{"--enable-cross-namespace-secret-store", "--enable-cross-namespace-auth-ref"},
+		[]string{
+			fmt.Sprintf("--enable-cross-namespace-secret-store=%v", enableSecretStore),
+			fmt.Sprintf("--enable-cross-namespace-auth-ref=%v", enableAuthRef),
+		})
 }
 
 // restoreDeploymentArgs restores the original args of the ack-secret-manager Deployment.
+//
+// Skips the Update and rollout when the current args already match the
+// original baseline element by element. On Get or Update failure it retries
+// once (re-Get then Update); a second failure escalates to Fail because a
+// silent restore failure would leak the modified args baseline to every
+// subsequent test.
 func restoreDeploymentArgs(ctx context.Context, originalArgs []string) {
-	const (
-		deploymentName = "ack-secret-manager"
-		namespace      = "kube-system"
-	)
+	namespace := ackSecretManagerNamespace
+	deploymentName := ackSecretManagerDeploymentName
 
-	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	argsMatch := func(currentArgs []string) bool {
+		if len(currentArgs) != len(originalArgs) {
+			return false
+		}
+		for i := range currentArgs {
+			if currentArgs[i] != originalArgs[i] {
+				return false
+			}
+		}
+		return true
+	}
+
+	// restoreOnce re-Gets the Deployment and applies the original args.
+	// Returns whether an Update was actually performed.
+	restoreOnce := func() (bool, error) {
+		dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+		if err != nil {
+			return false, fmt.Errorf("failed to get Deployment %s/%s for restoration: %v", namespace, deploymentName, err)
+		}
+
+		// Skip when the Deployment already matches the original baseline.
+		if argsMatch(dep.Spec.Template.Spec.Containers[0].Args) {
+			By("Deployment args already match the original baseline, skipping restore")
+			return false, nil
+		}
+
+		dep.Spec.Template.Spec.Containers[0].Args = originalArgs
+		if dep.Spec.Template.Annotations == nil {
+			dep.Spec.Template.Annotations = make(map[string]string)
+		}
+		dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
+
+		if _, err := clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+			return false, fmt.Errorf("failed to restore Deployment %s/%s args: %v", namespace, deploymentName, err)
+		}
+		return true, nil
+	}
+
+	updated, err := restoreOnce()
 	if err != nil {
-		GinkgoWriter.Printf("WARNING: failed to get Deployment %s/%s for restoration: %v\n", namespace, deploymentName, err)
-		return
+		// Retry once (re-Get then Update) before escalating.
+		updated, err = restoreOnce()
+		if err != nil {
+			Fail(fmt.Sprintf("failed to restore Deployment %s/%s args after retry; leaking the modified args baseline would break subsequent tests: %v",
+				namespace, deploymentName, err))
+		}
 	}
 
-	dep.Spec.Template.Spec.Containers[0].Args = originalArgs
-	if dep.Spec.Template.Annotations == nil {
-		dep.Spec.Template.Annotations = make(map[string]string)
+	if updated {
+		By("waiting for Deployment rollout after restoring args")
+		waitForDeploymentRollout(ctx, namespace, deploymentName)
 	}
-	dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-
-	_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-	if err != nil {
-		GinkgoWriter.Printf("WARNING: failed to restore Deployment %s/%s args: %v\n", namespace, deploymentName, err)
-		return
-	}
-
-	By("waiting for Deployment rollout after restoring args")
-	waitForDeploymentRollout(ctx, namespace, deploymentName)
 }
 
 // ensureRRSAEnabled checks whether the ack-secret-manager Deployment already has
@@ -721,82 +1121,80 @@ func restoreDeploymentArgs(ctx context.Context, originalArgs []string) {
 //	open /var/run/secrets/tokens/ack-secret-manager: no such file or directory
 func ensureRRSAEnabled(ctx context.Context) {
 	const (
-		deploymentName = "ack-secret-manager"
-		namespace      = "kube-system"
-		volumeName     = "ack-secret-manager"
-		mountPath      = "/var/run/secrets/tokens"
-		tokenPath      = "ack-secret-manager"
-		audience       = "sts.aliyuncs.com"
+		volumeName = "ack-secret-manager"
+		mountPath  = "/var/run/secrets/tokens"
+		tokenPath  = "ack-secret-manager"
+		audience   = "sts.aliyuncs.com"
 	)
 
-	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	dep, err := clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment")
 
-	needsUpdate := false
-
 	// Check if the projected volume is already present
-	hasVolume := false
-	for _, v := range dep.Spec.Template.Spec.Volumes {
-		if v.Name == volumeName && v.Projected != nil {
-			hasVolume = true
-			break
-		}
-	}
-
-	if !hasVolume {
+	needsUpdate := !hasRRSAProjectedVolume(dep, volumeName)
+	if needsUpdate {
 		By("patching Deployment to enable RRSA (projected OIDC token volume)")
-
-		// Add projected volume with serviceAccountToken
-		expSeconds := int64(7200)
-		dep.Spec.Template.Spec.Volumes = append(dep.Spec.Template.Spec.Volumes,
-			corev1.Volume{
-				Name: volumeName,
-				VolumeSource: corev1.VolumeSource{
-					Projected: &corev1.ProjectedVolumeSource{
-						Sources: []corev1.VolumeProjection{
-							{
-								ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
-									Path:              tokenPath,
-									ExpirationSeconds: &expSeconds,
-									Audience:          audience,
-								},
-							},
-						},
-					},
-				},
-			},
-		)
-
-		// Add volumeMount to the first container
-		dep.Spec.Template.Spec.Containers[0].VolumeMounts = append(
-			dep.Spec.Template.Spec.Containers[0].VolumeMounts,
-			corev1.VolumeMount{
-				Name:      volumeName,
-				MountPath: mountPath,
-			},
-		)
-		needsUpdate = true
 	} else {
 		By("RRSA projected volume already configured, skipping volume patch")
 	}
 
 	// Ensure RRSA env vars are set for ENV-based authentication using shared helpers.
-	ensureRRSAEnvSecret(ctx, namespace)
+	ensureRRSAEnvSecret(ctx, ackSecretManagerNamespace)
 	if patchDeploymentEnvWithRRSA(ctx, dep) {
 		needsUpdate = true
 	}
 
 	if needsUpdate {
-		// Force rolling restart
-		if dep.Spec.Template.Annotations == nil {
-			dep.Spec.Template.Annotations = make(map[string]string)
-		}
-		dep.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-
-		_, err = clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{})
-		Expect(err).NotTo(HaveOccurred(), "failed to update Deployment with RRSA config")
-
-		By("waiting for Deployment rollout after RRSA patch")
-		waitForDeploymentRollout(ctx, namespace, deploymentName)
+		updateDeploymentAndRollout(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName, func(dep *appsv1.Deployment) {
+			addRRSAProjectedVolume(dep, volumeName, mountPath, tokenPath, audience)
+			patchDeploymentEnvWithRRSA(ctx, dep)
+		})
 	}
+}
+
+// hasRRSAProjectedVolume reports whether the Deployment already carries the
+// RRSA projected OIDC token volume.
+func hasRRSAProjectedVolume(dep *appsv1.Deployment, volumeName string) bool {
+	for _, v := range dep.Spec.Template.Spec.Volumes {
+		if v.Name == volumeName && v.Projected != nil {
+			return true
+		}
+	}
+	return false
+}
+
+// addRRSAProjectedVolume adds the RRSA projected OIDC token volume and its
+// volumeMount to the Deployment's first container (no-op when already present).
+func addRRSAProjectedVolume(dep *appsv1.Deployment, volumeName, mountPath, tokenPath, audience string) {
+	if hasRRSAProjectedVolume(dep, volumeName) {
+		return
+	}
+
+	expSeconds := int64(7200)
+	dep.Spec.Template.Spec.Volumes = append(dep.Spec.Template.Spec.Volumes,
+		corev1.Volume{
+			Name: volumeName,
+			VolumeSource: corev1.VolumeSource{
+				Projected: &corev1.ProjectedVolumeSource{
+					Sources: []corev1.VolumeProjection{
+						{
+							ServiceAccountToken: &corev1.ServiceAccountTokenProjection{
+								Path:              tokenPath,
+								ExpirationSeconds: &expSeconds,
+								Audience:          audience,
+							},
+						},
+					},
+				},
+			},
+		},
+	)
+
+	dep.Spec.Template.Spec.Containers[0].VolumeMounts = append(
+		dep.Spec.Template.Spec.Containers[0].VolumeMounts,
+		corev1.VolumeMount{
+			Name:      volumeName,
+			MountPath: mountPath,
+		},
+	)
 }

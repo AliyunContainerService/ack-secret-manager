@@ -4,6 +4,8 @@ English | [中文简体](./README.md)
 
 [ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager)   enables you to securely import credentials stored in [Alibaba Cloud KMS Secrets Manager](https://www.alibabacloud.com/help/en/key-management-service) or [Alibaba Cloud OOS Encryption Parameter ](https://www.alibabacloud.com/help/en/oos/getting-started/manage-encryption-parameters)  into your Kubernetes cluster as native Secret objects. This ensures automatic synchronization of encrypted data while allowing applications to safely consume secrets by mounting them in Pod configurations. It helps mitigate sensitive data exposure risks in the development and deployment stages of the supply chain, ensuring compliance with security best practices.
 
+> **⚠️ Breaking Change (since v0.6.4)**: For security hardening, the default values of `enableCrossNamespaceSecretStore` and `enableCrossNamespaceAuthRef` were changed from `true` to `false`. After upgrading, cross-namespace references (ExternalSecret → SecretStore, SecretStore → ServiceAccount/AccessKey Secret) are rejected by default. If your deployment relies on cross-namespace references, explicitly set `command.enableCrossNamespaceSecretStore` and/or `command.enableCrossNamespaceAuthRef` to `true` in `values.yaml` to restore the previous behavior. See the [Release Note](#release-note) for details.
+
 ## 📚 Documentation
 
 | Document | Description |
@@ -83,8 +85,12 @@ English | [中文简体](./README.md)
 
 ## Configuration instructions
 
+> **CRD installation notes**: The core CRDs (`externalsecrets`, `secretstores`) are always installed with the chart; the `crds.createClusterSecretStore` and `crds.createClusterExternalSecret` switches only control whether the cluster-scoped CRDs (`clustersecretstores`, `clusterexternalsecrets`) are installed.
+
 | **parameter**                                       | **introduction**                                                                                                                                          | **default value** |
 | --------------------------------------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------- |
+| crds.createClusterSecretStore                       | Whether to install the ClusterSecretStore CRD                                                                                                             | true              |
+| crds.createClusterExternalSecret                    | Whether to install the ClusterExternalSecret CRD                                                                                                          | true              |
 | env.WATCH_NAMESPACE                                 | Specify the namespace of the component watch (the default empty value represents all namespaces of watch)                                                 |                   |
 | envVarsFromSecret.ACCESS_KEY_ID                     | You can build the SDK client by specifying the credential AK by setting the ACCESS_KEY_ID variable, which needs to be defined in the secret instance named alibaba-credentials | |
 | envVarsFromSecret.SECRET_ACCESS_KEY                 | You can build the SDK client by specifying the credential SK by setting the SECRET_ACCESS_KEY variable, which needs to be defined in the secret instance named alibaba-credentials | |
@@ -106,16 +112,20 @@ English | [中文简体](./README.md)
 | command.maxConcurrentSecretPulls                    | Deprecated                                                                                                                                                          | -       |
 | command.maxConcurrentKmsSecretPulls                 | Maximum concurrent synchronization per second of kms secrets                                                                                                        | 10      |
 | command.maxConcurrentOosSecretPulls                 | Maximum concurrent synchronization per second of oos secrets                                                                                                        | 10      |
-| command.cleanupSecretOnFailure                      | Remove cluster secret on failed KMS secret sync                                                                                                                     | false   |
+| command.cleanupSecretOnFailure                      | Delete the corresponding cluster Secret when all data sources fail to sync (no data available) and this flag is enabled, including templated ExternalSecrets; on partial failures the Secret is not deleted and is handled by the merge/fail-closed strategy instead | false   |
 | command.processClusterSecretStore                   | Enable processing of ClusterSecretStore resources                                                                                                                   | true    |
 | command.processClusterExternalSecret                | Enable processing of ClusterExternalSecret resources                                                                                                                | true    |
-| command.enableCrossNamespaceSecretStore             | Enable cross namespace SecretStore reference in ExternalSecret                                                                                                      | false    |
-| command.enableCrossNamespaceAuthRef                 | Enable cross namespace reference for authentication resources (ServiceAccount, AccessKey Secret) in SecretStore                                                      | false    |
+| command.enableCrossNamespaceSecretStore             | Enable cross namespace SecretStore reference in ExternalSecret                                                                                                      | false   |
+| command.enableCrossNamespaceAuthRef                 | Enable cross namespace reference for authentication resources (ServiceAccount, AccessKey Secret) in SecretStore                                                      | false   |
+| command.enableWorkerRole                            | Whether to enable WorkerRole (ECS RAM Role) authentication                                                                                                           | true    |
 | command.aliuid                                      | Alibaba Cloud account for splicing OIDC identity provider ARN                                                                                               |         |
 | command.clusterId                                   | Aliyun Container Service Cluster ID for splicing OIDC identity provider ARN                                                                                               |         |
-| image.repository                                    | Specified ack-secret-manager mirror warehouse name                                                                                                                  | acs/ack-secret-manager |
-| image.tag                                           | Specified ack-secret-manager image tag                                                                                                                              | v0.5.0  |
-| image.pullPolicy                                    | Image pull strategy, default is Always                                                                                                                              | Always  |
+| image.repository                                    | Specified ack-secret-manager mirror warehouse name                                                                                                                  | registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager |
+| image.tag                                           | Specified ack-secret-manager image tag                                                                                                                              | v0.6.6  |
+| image.pullPolicy                                    | Image pull strategy, default is IfNotPresent                                                                                                                        | IfNotPresent  |
+| cleanupImage.repository                             | Repository of the externally pre-built image used by the pre-uninstall cleanup Job (helm pre-delete hook)                                                           | registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager-cleanup |
+| cleanupImage.tag                                    | Image tag of the cleanup Job                                                                                                                                        | v0.4.1  |
+| cleanupImage.pullPolicy                             | Image pull policy of the cleanup Job                                                                                                                                | IfNotPresent  |
 | nameOverride                                        | Override app name                                                                                                                                                   | nil     |
 | fullnameOverride                                    | Override application full name                                                                                                                                      | nil     |
 | rbac.create                                         | Whether to create and use RBAC resources, the default is true                                                                                                       | true    |
@@ -125,7 +135,7 @@ English | [中文简体](./README.md)
 | serviceAccount.annotations                          | Specify adding the serviceaccount annotation tag                                                                                                                    | nil     |
 | podAnnotations                                      | Specify the annotation label added to the pod                                                                                                                       | {}      |
 | podLabels                                           | Specify the Label added to the pod                                                                                                                                  | {}      |
-| replicaCount                                        | Number of controller copies                                                                                                                                         | 1       |
+| replicaCount                                        | Number of controller copies                                                                                                                                         | 2       |
 | nodeSelector                                        | The specified nodeSelector tag                                                                                                                                      | {}      |
 | tolerations                                         | Specified taint tolerance configuration                                                                                                                             | []      |
 | affinity                                            | Specified Pod affinity configuration                                                                                                                                | {}      |
@@ -237,10 +247,11 @@ ack-secret-manager provides various advanced features. For detailed usage, pleas
 | Feature | Description | Documentation |
 |---------|-------------|---------------|
 | JSON/YAML Parsing | Use `jmesPath` to extract JSON/YAML credential fields, use `dataProcess` for auto-parsing | [Advanced Usage](../../docs/advanced_usage.md#jsonyaml-credential-parsing) |
-| Cross-Account Sync | Cross-account credential synchronization via `remoteRamRoleArn` | [Advanced Usage](../../docs/advanced_usage.md#cross-account-sync) |
+| Cross-Account Sync | Cross-account credential synchronization via `remoteRamRoleARN` | [Advanced Usage](../../docs/advanced_usage.md#cross-account-sync) |
 | kmsEndpoint Configuration | Configure dedicated gateway, VPC endpoint, public endpoint, etc. | [Advanced Usage](../../docs/advanced_usage.md#kmsendpoint-configuration) |
 | Credential Rotation | Configurable reconciliation and rotation intervals for continuous secret synchronization | [Advanced Usage](../../docs/advanced_usage.md#credential-rotation) |
 | Multi-Data Source Support | Synchronize secrets from both KMS Secrets Manager and OOS Encryption Parameters | [Advanced Usage](../../docs/advanced_usage.md#multi-data-source-support) |
+| Sync Failure Handling Semantics | How sync failures affect the cluster Secret: merge-write on partial failure, fail-closed for templated ExternalSecrets, zero-output protection | [Advanced Usage](../../docs/advanced_usage.md#sync-failure-handling-semantics) |
 
 ### 5. Template Processing
 
@@ -282,3 +293,5 @@ Please report vulnerabilities by email to **kubernetes-security@service.aliyun.c
 | `0.6.2`  | 2026/3/2   | Support advanced template processing capabilities to transform and customize secret data before creating Kubernetes Secret when synchronizing external secrets |
 | `0.6.3`  | 2026/6/30  | Bug fixes and documentation optimization |
 | `0.6.4`  | 2026/7/30  | **Breaking Change** (security hardening):<br />1.Cross-namespace references disabled by default (`enableCrossNamespaceSecretStore` and `enableCrossNamespaceAuthRef` changed from `true` to `false`). Set to `true` explicitly if needed.<br />2.Added KMS endpoint SSRF validation. |
+| `0.6.5`  | 2026/8/10  | 1.Sync failure handling: when some data sources fail to fetch credentials or credential parsing fails, the Secret is written via a merge — successfully fetched keys are updated with new values while failed keys retain their previous values in the Secret; ExternalSecrets with templates configured use fail-closed (write is skipped, previous values are preserved).<br />2.Other feature optimizations |
+| `0.6.6`  | 2026/8/14  | Function optimization |

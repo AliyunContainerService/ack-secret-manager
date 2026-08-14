@@ -1,9 +1,10 @@
-// test/e2e/provider_test.go - Test ExternalSecret providers (KMS and OOS)
+// test/e2e/provider_test.go - Test ExternalSecret providers (OOS)
+// Note: the KMS provider sync path is covered by data_fetch_test.go
+// ("Should fetch normal data"), so no dedicated KMS spec is kept here.
 package e2e
 
 import (
 	"context"
-	"fmt"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -29,95 +30,6 @@ var _ = Describe("Provider E2E", func() {
 		deleteTestNamespace(ctx, testNamespace)
 	})
 
-	Context("ExternalSecret with KMS provider", func() {
-		It("should sync secret data from KMS", func() {
-			// Create SecretStore for KMS
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "kms-provider-store",
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			var lastSecretStoreError string
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      secretStore.Name,
-					Namespace: secretStore.Namespace,
-				}, createdStore)
-				if err != nil {
-					lastSecretStoreError = fmt.Sprintf("Error getting SecretStore: %v", err)
-					return false
-				}
-
-				if len(createdStore.Status.Conditions) == 0 {
-					lastSecretStoreError = "SecretStore has no status conditions"
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type != api.SecretStoreReady || condition.Status != corev1.ConditionTrue {
-						lastSecretStoreError = fmt.Sprintf("SecretStoreReady condition type is %s, expected Ready, status is %s, expected True, reason: %s, message: %s", condition.Type, string(condition.Status), condition.Reason, condition.Message)
-						return false
-					}
-				}
-
-				return true
-			}).WithTimeout(time.Minute*2).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastSecretStoreError != "" {
-						return fmt.Sprintf("SecretStore should eventually become ready, but: %s", lastSecretStoreError)
-					}
-					return "SecretStore should eventually become ready"
-				})
-
-			// Create ExternalSecret using KMS provider
-			externalSecret := &api.ExternalSecret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "kms-provider-externalsecret",
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.ExternalSecretSpec{
-					Provider:         "kms",
-					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
-					Data: []api.DataSource{
-						{
-							Key:       CommonKMSSecretName, // Using the common KMS secret created by ResourceManager
-							Name:      "test-secret-key",
-							VersionId: "v1",
-							SecretStoreRef: &api.SecretStoreRef{
-								Name:      secretStore.Name,
-								Namespace: secretStore.Namespace,
-								Kind:      ResourceSecretStore,
-							},
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
-
-			// Validate ExternalSecret syncs successfully
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
-
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
-		})
-	})
-
 	Context("ExternalSecret with OOS provider", func() {
 		It("should sync secret data from OOS", func() {
 			// Create SecretStore for OOS
@@ -139,38 +51,7 @@ var _ = Describe("Provider E2E", func() {
 			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			var lastSecretStoreError string
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      secretStore.Name,
-					Namespace: secretStore.Namespace,
-				}, createdStore)
-				if err != nil {
-					lastSecretStoreError = fmt.Sprintf("Error getting SecretStore: %v", err)
-					return false
-				}
-
-				if len(createdStore.Status.Conditions) == 0 {
-					lastSecretStoreError = "SecretStore has no status conditions"
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type != api.SecretStoreReady || condition.Status != corev1.ConditionTrue {
-						lastSecretStoreError = fmt.Sprintf("SecretStoreReady condition type is %s, expected Ready, status is %s, expected True, reason: %s, message: %s", condition.Type, string(condition.Status), condition.Reason, condition.Message)
-						return false
-					}
-				}
-
-				return true
-			}).WithTimeout(time.Minute*2).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastSecretStoreError != "" {
-						return fmt.Sprintf("SecretStore should eventually become ready, but: %s", lastSecretStoreError)
-					}
-					return "SecretStore should eventually become ready"
-				})
+			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
 
 			// Create ExternalSecret using OOS provider
 			externalSecret := &api.ExternalSecret{
@@ -199,6 +80,17 @@ var _ = Describe("Provider E2E", func() {
 
 			// Validate ExternalSecret syncs successfully
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+
+			// Validate the synced Secret content matches the preset OOS
+			// encrypted parameter value created by ResourceManager, proving the
+			// OOS provider fetched the actual source data (not just any bytes).
+			syncedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: externalSecret.Namespace,
+				Name:      externalSecret.Name,
+			}, syncedSecret)).To(Succeed())
+			Expect(string(syncedSecret.Data["oos-secret-key"])).To(Equal(CommonOOSSecretParameterValue),
+				"synced Secret content should match the preset OOS parameter value")
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace

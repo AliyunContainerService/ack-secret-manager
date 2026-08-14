@@ -1,8 +1,8 @@
 package oos
 
 import (
+	"context"
 	"fmt"
-	"time"
 
 	oos "github.com/alibabacloud-go/oos-20190601/v3/client"
 	"github.com/alibabacloud-go/tea/tea"
@@ -11,7 +11,6 @@ import (
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 // Client interface represent a backend client interface that should be implemented
@@ -24,7 +23,7 @@ func (c *OOSClient) GetName() string {
 	return c.clientName
 }
 
-func (c *OOSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
+func (c *OOSClient) getExternalData(ctx context.Context, data v1alpha1.DataSource) ([]byte, error) {
 	if c.oosClient == nil {
 		return nil, fmt.Errorf("oos client is nil,oos key %v", data.Key)
 	}
@@ -32,29 +31,34 @@ func (c *OOSClient) getExternalData(data v1alpha1.DataSource) ([]byte, error) {
 		Name:           tea.String(data.Key),
 		WithDecryption: tea.Bool(true),
 	}
-	resp, err := c.oosClient.GetSecretParameter(req)
-	if err != nil {
-		if !utils.JudgeNeedRetry(err) {
-			klog.Errorf("failed to get secret value from oos,key %v,error %v", data.Key, err)
-			return nil, err
-		} else {
-			klog.Warningf("oos API throttled (Rejected.Throttling), will retry after backoff, key %v", data.Key)
-			time.Sleep(utils.GetWaitTimeExponential(1))
-			resp, err = c.oosClient.GetSecretParameter(req)
-			if err != nil {
-				klog.Errorf("retry to get secret value from oos failed,key %v,error %v", data.Key, err)
-				return nil, err
-			}
+	// Fetch with bounded retries on transient errors (throttling, 5xx, etc.).
+	// resp is only assigned on a successful call to avoid stale values.
+	var resp *oos.GetSecretParameterResponse
+	if err := common.FetchWithRetry(ctx, func() error {
+		r, fetchErr := c.oosClient.GetSecretParameter(req)
+		if fetchErr != nil {
+			klog.Warningf("get secret parameter from oos failed, key %v, error %v", data.Key, fetchErr)
+			return fetchErr
 		}
+		resp = r
+		return nil
+	}); err != nil {
+		klog.Errorf("failed to get secret parameter from oos after retries, key %v, error %v", data.Key, err)
+		return nil, err
 	}
 
+	// Guard against a structurally empty success response: dereferencing
+	// Body/Parameter/Value without these checks would panic the manager.
+	if resp == nil || resp.Body == nil || resp.Body.Parameter == nil || resp.Body.Parameter.Value == nil {
+		return nil, fmt.Errorf("get secret parameter from oos failed because response is empty, key %v", data.Key)
+	}
 	klog.Infof("got secret data from oos service,key %v", data.Key)
 	return []byte(*resp.Body.Parameter.Value), nil
 }
 
-func (c *OOSClient) GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
+func (c *OOSClient) GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error) {
 	// getExternalData
-	externalData, err := c.getExternalData(*data)
+	externalData, err := c.getExternalData(ctx, *data)
 	if err != nil {
 		klog.Errorf("get external data error %v,key %v", err, data.Key)
 		return nil, err
@@ -64,13 +68,13 @@ func (c *OOSClient) GetExternalSecret(data *v1alpha1.DataSource, kube client.Cli
 	return common.ProcessExternalSecretData(data, externalData)
 }
 
-func (c *OOSClient) GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
+func (c *OOSClient) GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error) {
 	if data.Extract == nil {
 		return nil, fmt.Errorf("extract data is empty")
 	}
 
 	// getExternalData
-	externalData, err := c.getExternalData(*data.Extract)
+	externalData, err := c.getExternalData(ctx, *data.Extract)
 	if err != nil {
 		return nil, err
 	}

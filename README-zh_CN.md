@@ -4,6 +4,8 @@
 
 [ack-secret-manager](https://github.com/AliyunContainerService/ack-secret-manager) 可以帮助您将存储在[阿里云KMS凭据管家](https://www.alibabacloud.com/help/zh/doc-detail/152001.html) 中的密钥凭据或[阿里云OOS加密参数](https://www.alibabacloud.com/help/zh/oos/getting-started/manage-encryption-parameters), 以K8s原生Secret对象的形式导入到集群中并实现密钥数据的自动同步，您可以在应用Pod中以挂载Secret等形式将存储在凭据管家或加密参数中的密文引入到应用程序中使用，避免敏感数据在应用开发构建流程中的传播和泄露。
 
+> **⚠️ 不兼容变更（自 v0.6.4 起）**：出于安全加固，`enableCrossNamespaceSecretStore` 与 `enableCrossNamespaceAuthRef` 的默认值由 `true` 改为 `false`。升级后，跨命名空间引用（ExternalSecret → SecretStore、SecretStore → ServiceAccount/AccessKey Secret）默认将被拒绝。若您的部署依赖跨命名空间引用，请在 `values.yaml` 中显式将 `command.enableCrossNamespaceSecretStore` 和/或 `command.enableCrossNamespaceAuthRef` 设置为 `true` 以恢复旧行为。详见 [Release Note](#release-note)。
+
 ## 📚 文档导航
 
 | 文档 | 说明 |
@@ -83,8 +85,12 @@
 
 ## 配置说明
 
+> **CRD 安装说明**：核心 CRD（`externalsecrets`、`secretstores`）随 Chart 无条件安装；`crds.createClusterSecretStore` 和 `crds.createClusterExternalSecret` 开关仅控制集群级 CRD（`clustersecretstores`、`clusterexternalsecrets`）是否安装。
+
 | **参数**                                            | **说明**                                                                                                                                  | **默认值**             |
 | --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- | ---------------------- |
+| crds.createClusterSecretStore                       | 是否安装 ClusterSecretStore CRD                                                                                                       | true                   |
+| crds.createClusterExternalSecret                    | 是否安装 ClusterExternalSecret CRD                                                                                                    | true                   |
 | env.WATCH_NAMESPACE                                 | 指定组件watch的namespace（默认空值代表watch所有命名空间）                                                                                     |                       |
 | envVarsFromSecret.ACCESS_KEY_ID                     | 可以通过设置ACCESS_KEY_ID变量指定凭证AK构建SDK client，需要定义在名称为alibaba-credentials的secret实例中                                       |                        |
 | envVarsFromSecret.SECRET_ACCESS_KEY                 | 可以通过设置SECRET_ACCESS_KEY变量指定凭证SK构建SDK client，需要定义在名称为alibaba-credentials的secret实例中                                   |                        |
@@ -106,16 +112,20 @@
 | command.maxConcurrentSecretPulls                    | 已弃用                                                                                                                                    | -                      |
 | command.maxConcurrentKmsSecretPulls                 | kms secret 每秒同步的最大并发数量                                                                                                          | 10                     |
 | command.maxConcurrentOosSecretPulls                 | oos secret 每秒同步的最大并发数量                                                                                                          | 10                     |
-| command.cleanupSecretOnFailure                      | kms 凭据同步失败时是否删除集群 Secret                                                                                                       | false                  |
+| command.cleanupSecretOnFailure                      | 当所有数据源拉取失败（无可用数据）且该开关开启时，删除对应集群 Secret（含模板场景）；部分失败时不删除，按合并/fail-closed 策略处理                                                                                                       | false                  |
 | command.processClusterSecretStore                   | 是否处理 ClusterSecretStore 资源                                                                                                           | true                   |
 | command.processClusterExternalSecret                | 是否处理 ClusterExternalSecret 资源                                                                                                        | true                   |
-| command.enableCrossNamespaceSecretStore             | 是否启用跨命名空间的 SecretStore 引用                                                                                                      | false                   |
-| command.enableCrossNamespaceAuthRef                 | 是否允许 SecretStore 跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）                                                            | false                   |
-| command.aliuiid                                     | 用于拼接OIDC身份提供商ARN的阿里云账号                                                                                                       |                        |
+| command.enableCrossNamespaceSecretStore             | 是否启用跨命名空间的 SecretStore 引用                                                                                                      | false                  |
+| command.enableCrossNamespaceAuthRef                 | 是否允许 SecretStore 跨命名空间引用认证资源（ServiceAccount、AccessKey Secret）                                                            | false                  |
+| command.enableWorkerRole                            | 是否启用 WorkerRole（ECS RAM Role）认证                                                                                                  | true                   |
+| command.aliuid                                      | 用于拼接OIDC身份提供商ARN的阿里云账号                                                                                                       |                        |
 | command.clusterId                                   | 用于拼接OIDC身份提供商ARN的阿里云容器服务集群ID                                                                                              |                        |
-| image.repository                                    | 指定的ack-secret-manager 镜像仓库名称                                                                                                      | acs/ack-secret-manager |
-| image.tag                                           | 指定的ack-secret-manager 镜像tag                                                                                                          | v0.5.0                 |
-| image.pullPolicy                                    | 镜像拉取策略，默认为Always                                                                                                                 | Always                 |
+| image.repository                                    | 指定的ack-secret-manager 镜像仓库名称                                                                                                      | registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager |
+| image.tag                                           | 指定的ack-secret-manager 镜像tag                                                                                                          | v0.6.6                 |
+| image.pullPolicy                                    | 镜像拉取策略，默认为IfNotPresent                                                                                                           | IfNotPresent           |
+| cleanupImage.repository                             | 卸载前清理 Job（helm pre-delete hook）使用的外部预构建镜像仓库名称                                                                        | registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager-cleanup |
+| cleanupImage.tag                                    | 清理 Job 镜像tag                                                                                                                        | v0.4.1                 |
+| cleanupImage.pullPolicy                             | 清理 Job 镜像拉取策略                                                                                                                   | IfNotPresent           |
 | nameOverride                                        | 覆盖应用名称                                                                                                                              | nil                    |
 | fullnameOverride                                    | 覆盖应用全名                                                                                                                              | nil                    |
 | rbac.create                                         | 是否创建并使用RBAC资源，默认为true                                                                                                         | true                   |
@@ -125,7 +135,7 @@
 | serviceAccount.annotations                          | 指定添加serviceaccount annotation标签                                                                                                     | nil                    |
 | podAnnotations                                      | 指定添加到pod中的annotation标签                                                                                                           | {}                     |
 | podLabels                                           | 指定添加到pod中的Label标签                                                                                                                | {}                     |
-| replicaCount                                        | 控制器副本个数                                                                                                                            | 1                      |
+| replicaCount                                        | 控制器副本个数                                                                                                                            | 2                      |
 | nodeSelector                                        | 指定的nodeSelector标签                                                                                                                    | {}                     |
 | tolerations                                         | 指定的污点容忍配置                                                                                                                        | []                      |
 | affinity                                            | 指定的Pod亲和性配置                                                                                                                       | {}                     |
@@ -237,10 +247,11 @@ ack-secret-manager 提供了多种高级功能，详细使用说明请参考对�
 | 功能 | 说明 | 文档 |
 |------|------|------|
 | JSON/YAML 凭据解析 | 使用 `jmesPath` 解析提取 JSON/YAML 凭据字段，使用 `dataProcess` 自解析凭据 | [高级用法指南](docs/advanced_usage_zh.md#jsonyaml-凭据解析) |
-| 跨账号同步 | 通过 `remoteRamRoleArn` 实现跨阿里云账号凭据同步 | [高级用法指南](docs/advanced_usage_zh.md#跨账号同步) |
+| 跨账号同步 | 通过 `remoteRamRoleARN` 实现跨阿里云账号凭据同步 | [高级用法指南](docs/advanced_usage_zh.md#跨账号同步) |
 | kmsEndpoint 配置 | 配置专属网关、VPC endpoint、公网 endpoint 等 | [高级用法指南](docs/advanced_usage_zh.md#kmsendpoint-配置) |
 | 凭据轮转 | 可配置同步间隔，持续获取最新凭据版本 | [高级用法指南](docs/advanced_usage_zh.md#凭据轮转) |
 | 多数据源支持 | 同时支持 KMS 凭据管家和 OOS 加密参数两种数据源 | [高级用法指南](docs/advanced_usage_zh.md#多数据源支持) |
+| 同步失败处理语义 | 同步失败对集群 Secret 的影响：部分失败合并写入、模板 ExternalSecret fail-closed、零产出保护 | [高级用法指南](docs/advanced_usage_zh.md#同步失败处理语义) |
 
 ### 5. 模板解析
 
@@ -282,3 +293,5 @@ ack-secret-manager 涉及四种 CRD 资源，各 CRD 概述、跨命名空间控
 | `0.6.2`  | 2026年3月2日  | 支持同步外部secret时，使用高级模板解析功能在创建 Kubernetes Secret 之前转换和自定义密钥数据 |
 | `0.6.3`  | 2026年6月30日  | 功能修复与文档优化 |
 | `0.6.4`  | 2026年7月30日  | **不兼容变更**（安全加固）：<br />1.跨命名空间引用默认禁止（`enableCrossNamespaceSecretStore` 和 `enableCrossNamespaceAuthRef` 默认值从 `true` 改为 `false`），如需跨命名空间引用请显式设置为 `true`<br />2.新增 KMS Endpoint SSRF 验证 |
+| `0.6.5`  | 2026年8月10日  | 1.同步失败处理：当部分数据源凭据获取失败或凭据解析失败时，Secret 采用合并写入——成功拉取的 key 更新为新值，失败的 key 保留 Secret 中的旧值；配置了模板的 ExternalSecret 采用 fail-closed（跳过写入，保留旧值）。 <br />2. 其它功能优化|
+| `0.6.6`  | 2026年8月14日  | 部分功能优化 |

@@ -18,26 +18,11 @@ var kmsEndpointRe = regexp.MustCompile(
 	`^(kms(-vpc)?\.[a-z0-9-]+\.aliyuncs\.com|[a-z0-9-]+\.cryptoservice\.kms\.aliyuncs\.com)$`,
 )
 
-// validateKmsEndpoint validates that a user-supplied KMS endpoint is a
-// legitimate Alibaba Cloud KMS domain. It prevents SSRF attacks (CWE-918)
-// by strictly matching the three documented endpoint patterns.
-//
-// The KmsEndpoint field comes from ExternalSecret CR YAML which is
-// user-controlled. Without validation, a multi-tenant cluster user can
-// redirect signed KMS API requests (carrying the controller's STS
-// credentials) to an attacker-controlled host.
-//
-// The endpoint is passed to the Alibaba Cloud KMS SDK as-is, so it must
-// be a bare lowercase hostname. The SDK prepends "https://" itself and
-// uses the raw value in signature computation, therefore scheme prefixes,
-// port suffixes, and uppercase characters all cause runtime failures:
-//   - scheme ("https://...") → SDK produces "https://https//..." → DNS error
-//   - port (":443")          → signature mismatch (IncompleteSignature)
-//   - uppercase ("KMS.")     → signature mismatch (IncompleteSignature)
-//
-// The caller guarantees a non-empty endpoint: custom endpoints come from
-// ExternalSecret CR fields, and the default endpoint comes from
-// Provider.GetEndpoint() which always returns a valid value.
+// validateKmsEndpoint prevents SSRF (CWE-918): the endpoint comes from
+// user-controlled ExternalSecret CRs and is passed to the KMS SDK as-is, so
+// it must be a bare lowercase hostname matching one of the three allowed
+// patterns (no scheme/port/uppercase, which break DNS or signature
+// computation). Callers guarantee a non-empty endpoint.
 func validateKmsEndpoint(endpoint string) error {
 	host := strings.TrimSpace(endpoint)
 	if !kmsEndpointRe.MatchString(host) {

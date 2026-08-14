@@ -1,4 +1,4 @@
-// test/e2e/resource_manager.go - Test Resource Manager for ACK Secret Manager E2E Tests
+// test/e2e/resource_manager_test.go - Test Resource Manager for ACK Secret Manager E2E Tests
 package e2e
 
 import (
@@ -30,9 +30,16 @@ const (
 	ACKRRSAAnnotation           = "ack.alibabacloud.com/role-arn"
 )
 
+// Preset credential values created by ResourceManager. They are exported so
+// e2e assertions can verify that synced K8s Secret contents exactly match the
+// source KMS/OOS values instead of only checking for non-empty data.
+const (
+	CommonKMSSecretValue          = "this ia a common kms secret for testing"
+	CommonOOSSecretParameterValue = "this is an oos encrypted parameter for testing"
+)
+
 const (
 	CSEndpointFormat  = "cs.%s.aliyuncs.com"
-	kMSEndpointFormat = "kms.%s.aliyuncs.com"
 	OOSEndpointFormat = "oos.%s.aliyuncs.com"
 	RAMEndpointFormat = "ram.aliyuncs.com"
 )
@@ -61,7 +68,9 @@ var (
 	RAMRoleArnForSAAuth               string
 	ServiceaccountNamespaceForSAAuth  *corev1.Namespace
 
-	// Cross-account test variables (simulated via remoteRamRoleARN in same account)
+	// Cross-account test variables (only populated when CROSS_ACCOUNT_* account
+	// credentials are configured; otherwise left empty so cross-account
+	// tests hit their Skip conditions)
 	RAMRoleArnForCrossAccount string
 	CrossAccountKMSSecretName string // KMS secret name created in the target account for cross-account testing
 
@@ -105,7 +114,7 @@ var (
 	RAMRoleNameForRolePlay     string
 	RAMRoleNameForSAAuth       string
 	RAMRoleNameForCrossAccount string
-	CrossAccountPolicyName     string // KMS access policy created for cross-account role (may be in remote account)
+	CrossAccountPolicyName     string // KMS access policy created for the cross-account role in the remote target account
 )
 
 // ResourceManager manages cloud resources needed for E2E tests
@@ -119,12 +128,6 @@ type ResourceManager struct {
 	regionID            string
 	commonKMSInstanceID string
 	commonKMSKeyID      string
-	// Endpoint configuration for testing
-	KMSEndpoint          string // Custom/dedicated endpoint
-	KMSVPCEndpoint       string // VPC endpoint
-	KMSDedicatedEndpoint string // Dedicated gateway endpoint
-	KMSSecretName        string // KMS secret name for testing
-	Region               string // Region ID
 
 	// Remote account clients for cross-account testing
 	// When remote account AK/SK is configured, these clients use the target account's credentials
@@ -139,6 +142,9 @@ type ResourceManager struct {
 // NewResourceManager creates a new ResourceManager instance
 func NewResourceManager(accountID, clusterID string) (*ResourceManager, error) {
 	region := os.Getenv("REGION")
+	if region == "" {
+		return nil, fmt.Errorf("required environment variable REGION is not set; REGION is required to build the KMS/OOS/CS service endpoints")
+	}
 
 	credential, err := credential.NewCredential(nil)
 	if err != nil {
@@ -148,7 +154,7 @@ func NewResourceManager(accountID, clusterID string) (*ResourceManager, error) {
 	config := &openapi.Config{
 		Credential: credential,
 	}
-	config.Endpoint = tea.String(fmt.Sprintf(kMSEndpointFormat, region))
+	config.Endpoint = tea.String(fmt.Sprintf(SharedKMSEndpointFormat, region))
 	kmsClient, err := kms20160120.NewClient(config)
 	if err != nil {
 		return nil, err
@@ -173,7 +179,13 @@ func NewResourceManager(accountID, clusterID string) (*ResourceManager, error) {
 	}
 
 	commonKMSKeyID := os.Getenv("KMS_KEY_ID")
+	if commonKMSKeyID == "" {
+		return nil, fmt.Errorf("required environment variable KMS_KEY_ID is not set; it is required to create the test KMS credentials")
+	}
 	commonKMSInstanceID := os.Getenv("KMS_INSTANCE_ID")
+	if commonKMSInstanceID == "" {
+		return nil, fmt.Errorf("required environment variable KMS_INSTANCE_ID is not set; it is required to build the dedicated gateway endpoint and create the test KMS credentials")
+	}
 	return &ResourceManager{
 		kmsClient:           kmsClient,
 		ramClient:           ramClient,
@@ -189,11 +201,13 @@ func NewResourceManager(accountID, clusterID string) (*ResourceManager, error) {
 
 // SetRemoteAccountCredentials configures the ResourceManager with target account (Account B) credentials.
 // When configured, cross-account tests will create resources in the target account using these credentials,
-// ensuring true cross-account testing rather than same-account simulation.
+// ensuring true cross-account testing.
+// When not configured, cross-account resource creation is skipped gracefully and
+// cross-account tests are Skipped (no same-account simulation).
 // remoteKMSKeyID and remoteKMSInstanceID are required for creating KMS secrets in the target account.
 func (rm *ResourceManager) SetRemoteAccountCredentials(remoteAccountID, accessKeyID, accessKeySecret, remoteKMSKeyID, remoteKMSInstanceID string) error {
 	if remoteAccountID == "" || accessKeyID == "" || accessKeySecret == "" {
-		return nil // Cross-account not configured, will use same-account simulation
+		return nil // Cross-account not configured, cross-account resources will be skipped
 	}
 
 	rm.remoteAccountID = remoteAccountID
@@ -224,7 +238,7 @@ func (rm *ResourceManager) SetRemoteAccountCredentials(remoteAccountID, accessKe
 	// Create remote KMS client (uses target account's credentials)
 	kmsConfig := &openapi.Config{
 		Credential: remoteCred,
-		Endpoint:   tea.String(fmt.Sprintf(kMSEndpointFormat, rm.regionID)),
+		Endpoint:   tea.String(fmt.Sprintf(SharedKMSEndpointFormat, rm.regionID)),
 	}
 	rm.remoteKmsClient, err = kms20160120.NewClient(kmsConfig)
 	if err != nil {
@@ -238,19 +252,13 @@ func (rm *ResourceManager) SetRemoteAccountCredentials(remoteAccountID, accessKe
 // SetupTestResources creates all required test resources once
 func (rm *ResourceManager) SetupTestResources(ctx context.Context) error {
 	var err error
-	// Set endpoint configuration for testing
-	rm.Region = rm.regionID
-	rm.KMSSecretName = CommonKMSSecretName
-	rm.KMSDedicatedEndpoint = fmt.Sprintf(DedicatedKMSEndpointFormat, rm.commonKMSInstanceID)
-	rm.KMSEndpoint = rm.KMSDedicatedEndpoint // Use dedicated endpoint as default custom endpoint
-	rm.KMSVPCEndpoint = fmt.Sprintf("kms-vpc.%s.aliyuncs.com", rm.regionID)
-
-	DedicatedKMSEndpoint = rm.KMSDedicatedEndpoint
+	// Set endpoint configuration for testing (consumed by specs via globals)
+	DedicatedKMSEndpoint = fmt.Sprintf(DedicatedKMSEndpointFormat, rm.commonKMSInstanceID)
 	SharedKMSEndpoint = fmt.Sprintf(SharedKMSEndpointFormat, rm.regionID)
 
 	err = rm.CreateNamespace()
 	if err != nil {
-		return fmt.Errorf("failed to create service account: %v", err)
+		return fmt.Errorf("failed to create namespace: %v", err)
 	}
 
 	// Get cluster details for some information
@@ -346,13 +354,15 @@ func (rm *ResourceManager) SetupTestResources(ctx context.Context) error {
 		return fmt.Errorf("failed to create RAM role for SA auth: %v", err)
 	}
 
-	// Create RAM role for cross-account authentication simulation
+	// Create RAM role for cross-account authentication (skipped gracefully when
+	// remote account credentials are not configured)
 	RAMRoleArnForCrossAccount, RAMRoleNameForCrossAccount, err = rm.CreateRamRoleForCrossAccount(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create RAM role for cross-account: %v", err)
 	}
 
-	// Create KMS secret in the target account for cross-account testing
+	// Create KMS secret in the target account for cross-account testing (skipped
+	// gracefully when remote account credentials are not configured)
 	CrossAccountKMSSecretName, err = rm.CreateRemoteKMSCredential(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to create remote KMS secret for cross-account: %v", err)
@@ -384,7 +394,8 @@ func (rm *ResourceManager) CreateNamespace() error {
 	return nil
 }
 
-// getClusterWorkerRoleName get the WorkerRole name and vpc ID  of cluster based on cluster ID
+// GetClusterInfos gets the WorkerRole name, VPC ID and vSwitch ID of the
+// cluster based on cluster ID
 func (rm *ResourceManager) GetClusterInfos(clusterID string) (string, string, string, error) {
 	resp, err := rm.csClient.DescribeClusterDetail(tea.String(clusterID))
 	if err != nil {
@@ -420,7 +431,7 @@ func (rm *ResourceManager) CreateCommonKMSCredential(ctx context.Context, common
 	createSecretReq := &kms20160120.CreateSecretRequest{}
 	createSecretReq.SecretName = tea.String(secretName)
 	createSecretReq.VersionId = tea.String("v1")
-	createSecretReq.SecretData = tea.String("this ia a common kms secret for testing")
+	createSecretReq.SecretData = tea.String(CommonKMSSecretValue)
 	createSecretReq.DKMSInstanceId = tea.String(commonKMSInstanceID)
 	createSecretReq.EncryptionKeyId = tea.String(commonKMSKeyID)
 	_, err := rm.kmsClient.CreateSecret(createSecretReq)
@@ -431,18 +442,52 @@ func (rm *ResourceManager) CreateCommonKMSCredential(ctx context.Context, common
 	return secretName, nil
 }
 
-// PutSecretValueForCommonKMSCredential update a common KMS credential
-func (rm *ResourceManager) PutSecretValueForCommonKMSCredential(ctx context.Context, secretName string) error {
+// CreateKMSSecretForCredentialUpdate creates a KMS secret dedicated to a single test
+// case, so that credential-update tests do not mutate the shared CommonKMSSecretName
+// (which other specs may read without a VersionId). The initial version is v1 with
+// plain-text data; tests may append a new version via PutSecretValueForKMSSecret.
+func (rm *ResourceManager) CreateKMSSecretForCredentialUpdate(ctx context.Context) (string, error) {
+	secretName := TestResourcePrefix + "reconcile-update-secret-" + getRandString()
+
+	createSecretReq := &kms20160120.CreateSecretRequest{}
+	createSecretReq.SecretName = tea.String(secretName)
+	createSecretReq.VersionId = tea.String("v1")
+	createSecretReq.SecretData = tea.String("initial kms secret data for reconcile update testing")
+	createSecretReq.DKMSInstanceId = tea.String(rm.commonKMSInstanceID)
+	createSecretReq.EncryptionKeyId = tea.String(rm.commonKMSKeyID)
+
+	_, err := rm.kmsClient.CreateSecret(createSecretReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to create dedicated KMS secret for credential update test: %v", err)
+	}
+
+	return secretName, nil
+}
+
+// PutSecretValueForKMSSecret appends a new version to the given KMS secret.
+func (rm *ResourceManager) PutSecretValueForKMSSecret(ctx context.Context, secretName string) error {
 	putSecretValueReq := &kms20160120.PutSecretValueRequest{}
 	putSecretValueReq.SecretName = tea.String(secretName)
 	putSecretValueReq.VersionId = tea.String("v2")
 	putSecretValueReq.SecretData = tea.String(`{"key1":"value1","key2":"value2"}`)
 
 	_, err := rm.kmsClient.PutSecretValue(putSecretValueReq)
-	if err != nil {
-		return err
-	}
+	return err
+}
 
+// DeleteKMSSecret force-deletes the given KMS secret. Tolerates already-deleted
+// secrets so it is safe to call from DeferCleanup.
+func (rm *ResourceManager) DeleteKMSSecret(secretName string) error {
+	if secretName == "" {
+		return nil
+	}
+	deleteSecretReq := &kms20160120.DeleteSecretRequest{}
+	deleteSecretReq.SecretName = tea.String(secretName)
+	deleteSecretReq.ForceDeleteWithoutRecovery = tea.String("true")
+	_, err := rm.kmsClient.DeleteSecret(deleteSecretReq)
+	if err != nil && !strings.Contains(err.Error(), "Resource not found") {
+		return fmt.Errorf("failed to delete KMS secret %s: %v", secretName, err)
+	}
 	return nil
 }
 
@@ -834,7 +879,7 @@ func (rm *ResourceManager) CreateCommonOOSSecretParameter(ctx context.Context) (
 	createOOSSecretParamReq := &oos20190601.CreateSecretParameterRequest{}
 	createOOSSecretParamReq.RegionId = tea.String(rm.regionID)
 	createOOSSecretParamReq.Name = tea.String(oosParamName)
-	createOOSSecretParamReq.Value = tea.String("this is an oos encrypted parameter for testing")
+	createOOSSecretParamReq.Value = tea.String(CommonOOSSecretParameterValue)
 
 	_, err := rm.oosClient.CreateSecretParameter(createOOSSecretParamReq)
 	if err != nil {
@@ -916,6 +961,66 @@ func (rm *ResourceManager) CreateRamUserForAccessKey(ctx context.Context) (strin
 	return accessKeyId, accessKeySecret, userName, nil
 }
 
+// CreateRamUserWithoutKMSPermission creates a RAM user with NO policy attached
+// and returns its access key. The AK is used as a negative discriminator in the
+// authentication priority test: any KMS call authenticated by this AK fails
+// with a permanent 403 permission error.
+func (rm *ResourceManager) CreateRamUserWithoutKMSPermission(ctx context.Context) (string, string, string, error) {
+	userName := TestResourcePrefix + "no-kms-permission-user-" + getRandString()
+	createUserReq := &ram20150501.CreateUserRequest{}
+	createUserReq.UserName = tea.String(userName)
+
+	_, err := rm.ramClient.CreateUser(createUserReq)
+	if err != nil {
+		return "", "", "", err
+	}
+
+	// Intentionally do NOT attach any policy: the user must have no KMS permission.
+
+	// Create access key for the user
+	createAccessKeyReq := &ram20150501.CreateAccessKeyRequest{}
+	createAccessKeyReq.UserName = tea.String(userName)
+
+	resp, err := rm.ramClient.CreateAccessKey(createAccessKeyReq)
+	if err != nil {
+		// best-effort rollback to avoid leaking the RAM user
+		deleteUserReq := &ram20150501.DeleteUserRequest{}
+		deleteUserReq.UserName = tea.String(userName)
+		_, _ = rm.ramClient.DeleteUser(deleteUserReq)
+		return "", "", userName, err
+	}
+
+	accessKeyId := tea.StringValue(resp.Body.AccessKey.AccessKeyId)
+	accessKeySecret := tea.StringValue(resp.Body.AccessKey.AccessKeySecret)
+
+	return accessKeyId, accessKeySecret, userName, nil
+}
+
+// DeleteRamUserAndAccessKey detaches all policies attached to the user, deletes
+// the given access key (if non-empty) and then deletes the user. It tolerates
+// not-found errors ("Resource not found" and RAM OpenAPI's "EntityNotExist"
+// family, e.g. EntityNotExist.User) so it is idempotent and safe to call from
+// DeferCleanup.
+func (rm *ResourceManager) DeleteRamUserAndAccessKey(userName, accessKeyID string) error {
+	err := rm.deleteRamUser(userName, accessKeyID)
+	if err != nil && (strings.Contains(err.Error(), "Resource not found") || strings.Contains(err.Error(), "EntityNotExist")) {
+		return nil
+	}
+	return err
+}
+
+// DeleteRamRole detaches all policies attached to the role and then deletes
+// the role in the source account. It tolerates not-found errors ("Resource
+// not found" and RAM OpenAPI's "EntityNotExist" family, e.g.
+// EntityNotExist.Role) so it is idempotent and safe to call from DeferCleanup.
+func (rm *ResourceManager) DeleteRamRole(roleName string) error {
+	err := rm.deleteRamRole(roleName)
+	if err != nil && (strings.Contains(err.Error(), "Resource not found") || strings.Contains(err.Error(), "EntityNotExist")) {
+		return nil
+	}
+	return err
+}
+
 // CreateRamRoleForRRSA creates a RAM role for RRSA testing
 func (rm *ResourceManager) CreateRamRoleForRRSA(ctx context.Context) (string, string, error) {
 	roleName := TestResourcePrefix + "rrsa-role-" + getRandString()
@@ -931,7 +1036,7 @@ func (rm *ResourceManager) CreateRamRoleForRRSA(ctx context.Context) (string, st
             "sts.aliyuncs.com"
           ],
           "oidc:iss": [
-            "https://oidc-ack-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/%s"
+            "https://oidc-ack-%s.oss-%s.aliyuncs.com/%s"
           ],
           "oidc:sub": [
             "system:serviceaccount:kube-system:ack-secret-manager"
@@ -948,7 +1053,7 @@ func (rm *ResourceManager) CreateRamRoleForRRSA(ctx context.Context) (string, st
   ],
   "Version": "1"
 }
-`, rm.clusterID, rm.accountID, rm.clusterID)
+`, rm.regionID, rm.regionID, rm.clusterID, rm.accountID, rm.clusterID)
 
 	createRoleReq := &ram20150501.CreateRoleRequest{}
 	createRoleReq.RoleName = tea.String(roleName)
@@ -977,8 +1082,10 @@ func (rm *ResourceManager) CreateRamRoleUserForRolePlay(ctx context.Context) (st
 	userName := TestResourcePrefix + "role-play-user-" + getRandString()
 
 	// Create RAM role with proper trust relationship.
-	// Trust both the account root (for AK+AssumeRole) and the OIDC provider (for OIDC-based auth),
-	// because the code auto-injects OIDCProviderARN making OIDC the highest priority auth method.
+	// Trust both the account root (for AK+AssumeRole) and the OIDC provider (for OIDC-based auth);
+	// under this AK+roleArn combination AK AssumeRole takes effect (auto-derived OIDC does not
+	// enter the auth chain when complete AK is configured), and the dual trust policy ensures
+	// credentials obtained via the AK AssumeRole path can assume the role successfully.
 	policyDocument := fmt.Sprintf(`{
   "Statement": [
     {
@@ -1073,8 +1180,10 @@ func (rm *ResourceManager) CreateRamRoleUserForRolePlay(ctx context.Context) (st
 	return roleArn, accessKeyId, accessKeySecret, roleName, userName, nil
 }
 
-// CreateRamRoleServiceAccountForAuth creates RAM role and service account for service account authentication testing
-func (rm *ResourceManager) CreateRamRoleServiceAccountForAuth(ctx context.Context) (string, string, error) {
+// CreateRamRoleForServiceAccount creates a RAM role whose trust policy allows
+// the given ServiceAccount (saNamespace/saName) to assume it via RRSA, and
+// attaches the KMS access policy. Returns the role ARN and role name.
+func (rm *ResourceManager) CreateRamRoleForServiceAccount(ctx context.Context, saNamespace, saName string) (string, string, error) {
 	roleName := TestResourcePrefix + "sa-auth-role-" + getRandString()
 
 	// Create RAM role with trust relationship for service account
@@ -1088,7 +1197,7 @@ func (rm *ResourceManager) CreateRamRoleServiceAccountForAuth(ctx context.Contex
             "sts.aliyuncs.com"
           ],
           "oidc:iss": [
-            "https://oidc-ack-cn-hangzhou.oss-cn-hangzhou.aliyuncs.com/%s"
+            "https://oidc-ack-%s.oss-%s.aliyuncs.com/%s"
           ],
           "oidc:sub": [
             "system:serviceaccount:%s:%s"
@@ -1104,7 +1213,7 @@ func (rm *ResourceManager) CreateRamRoleServiceAccountForAuth(ctx context.Contex
     }
   ],
   "Version": "1"
-}`, rm.clusterID, ServiceaccountNamespaceForSAAuth.Name, ServiceaccountNameForSAAuth, rm.accountID, rm.clusterID)
+}`, rm.regionID, rm.regionID, rm.clusterID, saNamespace, saName, rm.accountID, rm.clusterID)
 
 	createRoleReq := &ram20150501.CreateRoleRequest{}
 	createRoleReq.RoleName = tea.String(roleName)
@@ -1129,10 +1238,23 @@ func (rm *ResourceManager) CreateRamRoleServiceAccountForAuth(ctx context.Contex
 	return roleArn, roleName, nil
 }
 
+// CreateRamRoleServiceAccountForAuth creates RAM role and service account for service account authentication testing
+func (rm *ResourceManager) CreateRamRoleServiceAccountForAuth(ctx context.Context) (string, string, error) {
+	return rm.CreateRamRoleForServiceAccount(ctx, ServiceaccountNamespaceForSAAuth.Name, ServiceaccountNameForSAAuth)
+}
+
 // CreateRamRoleForCrossAccount creates a RAM role in the target account (Account B) for cross-account testing.
 // The role's trust policy allows the source account (Account A) to assume it.
 // A KMS access policy is also created in the target account and attached to the role.
 func (rm *ResourceManager) CreateRamRoleForCrossAccount(ctx context.Context) (string, string, error) {
+	// Cross-account credentials not configured: skip gracefully; the empty
+	// result makes cross-account tests hit their Skip conditions and cleanup
+	// return early.
+	if rm.remoteRamClient == nil {
+		log.Printf("Cross-account credentials not configured (CROSS_ACCOUNT_* env vars unset), skipping cross-account RAM role creation")
+		return "", "", nil
+	}
+
 	roleName := TestResourcePrefix + "cross-account-role-" + getRandString()
 
 	log.Printf("Creating cross-account role in target account %s, trusting source account %s", rm.remoteAccountID, rm.accountID)
@@ -1233,6 +1355,28 @@ func (rm *ResourceManager) createCrossAccountKMSPolicy(ramClient *ram20150501.Cl
 // CreateRemoteKMSCredential creates a KMS secret in the target account (Account B) for cross-account testing.
 // Requires remote account credentials to be configured via SetRemoteAccountCredentials.
 func (rm *ResourceManager) CreateRemoteKMSCredential(ctx context.Context) (string, error) {
+	// Cross-account credentials not configured: skip gracefully; the empty
+	// result makes cross-account tests hit their Skip conditions and cleanup
+	// return early.
+	if rm.remoteKmsClient == nil {
+		log.Printf("Cross-account credentials not configured (CROSS_ACCOUNT_* env vars unset), skipping cross-account KMS secret creation")
+		return "", nil
+	}
+
+	// Cross-account is configured but the target-account KMS key/instance is
+	// not provided: fail fast with a clear message listing the missing
+	// variables, instead of calling CreateSecret with empty parameters.
+	var missingVars []string
+	if rm.remoteKMSKeyID == "" {
+		missingVars = append(missingVars, "CROSS_ACCOUNT_KMS_KEY_ID")
+	}
+	if rm.remoteKMSInstanceID == "" {
+		missingVars = append(missingVars, "CROSS_ACCOUNT_KMS_INSTANCE_ID")
+	}
+	if len(missingVars) > 0 {
+		return "", fmt.Errorf("cross-account credentials are configured but required variables are missing: %s; set them to create the cross-account KMS secret in target account %s", strings.Join(missingVars, ", "), rm.remoteAccountID)
+	}
+
 	secretName := TestResourcePrefix + "cross-account-kms-secret-" + getRandString()
 
 	log.Printf("Creating KMS secret in target account %s", rm.remoteAccountID)
@@ -1313,7 +1457,7 @@ func (rm *ResourceManager) CleanupAllResources(ctx context.Context) error {
 	}
 
 	// Clean up Ram policys
-	err = rm.deleteRamPolicys()
+	err = rm.deleteRamPolicies()
 	if err != nil {
 		errs = append(errs, err)
 	}
@@ -1397,7 +1541,12 @@ func (rm *ResourceManager) deleteKMSSecrets() error {
 
 // deleteCrossAccountKMSSecret deletes the cross-account KMS secret from the target account (Account B).
 func (rm *ResourceManager) deleteCrossAccountKMSSecret() error {
-	if CrossAccountKMSSecretName == "" {
+	// Symmetric with CreateRemoteKMSCredential: when remote account credentials
+	// are not configured the secret is never created and
+	// CrossAccountKMSSecretName stays empty, so return early without touching
+	// the (nil) remote client. When the name is non-empty, the remote client is
+	// guaranteed to be configured.
+	if CrossAccountKMSSecretName == "" || rm.remoteKmsClient == nil {
 		return nil
 	}
 	deleteSecretReq := &kms20160120.DeleteSecretRequest{}
@@ -1440,7 +1589,12 @@ func (rm *ResourceManager) deleteRamRoles() error {
 
 // deleteCrossAccountRamRole deletes the cross-account RAM role and its KMS policy from the target account (Account B).
 func (rm *ResourceManager) deleteCrossAccountRamRole() error {
-	if RAMRoleNameForCrossAccount == "" {
+	// Symmetric with CreateRamRoleForCrossAccount: when remote account
+	// credentials are not configured the role is never created and
+	// RAMRoleNameForCrossAccount stays empty, so return early without touching
+	// the (nil) remote client. When the name is non-empty, the remote client is
+	// guaranteed to be configured.
+	if RAMRoleNameForCrossAccount == "" || rm.remoteRamClient == nil {
 		return nil
 	}
 	if err := rm.deleteRamRoleWithClient(rm.remoteRamClient, RAMRoleNameForCrossAccount); err != nil {
@@ -1563,7 +1717,7 @@ func (rm *ResourceManager) detachPolicyForClusterWorkerRole() error {
 	return err
 }
 
-func (rm *ResourceManager) deleteRamPolicys() error {
+func (rm *ResourceManager) deleteRamPolicies() error {
 	for _, policyName := range []string{PolicyNameForAccess, PolicyNameForRolePlay} {
 		if policyName == "" {
 			continue

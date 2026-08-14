@@ -180,9 +180,10 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 - 模板输出：`DB_HOST=db.example.com\nDB_PORT=5432`
 - KeysAndValues 解析后：`DB_HOST` → `"db.example.com"`，`DB_PORT` → `"5432"`
 
-**关键要求**：
-- 模板输出必须是严格的 `key=value` 格式，行首行尾不能有多余空格
+**解析行为**：
 - 每行一个 key=value 对，用换行符分隔
+- 行首尾空格以及 key/value 两侧的空格会自动去除（如 `KEY1= value1` 可正常解析），空行会被跳过
+- 不包含 `=` 分隔符的行会被忽略
 
 ## 模板使用方式
 
@@ -205,6 +206,8 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 | ConfigMap | `templateFrom[].configMap` | 从 ConfigMap 的 key 中读取模板内容 |
 | Secret | `templateFrom[].secret` | 从 Secret 的 key 中读取模板内容 |
 | 字面量 | `templateFrom[].literal` | 直接内联模板字符串 |
+
+> **`literal` 说明**：`templateFrom[].literal` 条目的渲染结果固定写入名为 `literal` 的 key；配置多个 `literal` 条目时会互相覆盖（`literal` key 下最终只保留其中一个条目的渲染结果）。如需产出多个 key，请改用 `templateFrom[].configMap`/`secret` 配合 `templateAs: KeysAndValues`，或使用内联 `template.data`。
 
 **模板作用域（templateAs）**：
 
@@ -248,6 +251,30 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 
 > 更多生产场景示例（微服务配置、TLS 证书、多环境管理等）请参考 [examples/template/template-04-advanced-scenarios.yaml](../examples/template/template-04-advanced-scenarios.yaml)
 
+### 数据拉取失败时的行为
+
+配置了模板解析时，若数据拉取失败，控制器自 v0.6.5 起按以下两层语义处理：
+
+1. **跳过写入（fail-closed）是默认保护行为，不受 `cleanupSecretOnFailure` 影响**：模板可能引用或遍历任意同步键，使用部分数据渲染可能产生错误的 Secret，因此失败轮次跳过 Secret 写入、保留旧 Secret。
+2. **删除行为由 `cleanupSecretOnFailure` 单独控制**：仅当所有数据源全量失败且 `cleanupSecretOnFailure=true` 时，删除契约优先于跳过写入，控制器会删除集群 Secret；此时即使模板能渲染出静态内容，也不会被写入。
+
+| 失败范围 | cleanupSecretOnFailure | 处理行为 |
+| -------- | ---------------------- | -------- |
+| 部分失败（部分数据源成功） | 任意 | 整体跳过 Secret 写入，保留旧 Secret |
+| 全量失败（所有数据源失败） | `false`（默认） | 跳过 Secret 写入，保留旧 Secret |
+| 全量失败（所有数据源失败） | `true` | 删除集群 Secret；模板渲染出的静态内容永远不会被写入 |
+
+**说明**：
+
+- 即使模板只包含静态内容、全量失败时也能渲染成功，只要未满足上述删除条件，失败轮次同样不会写入任何模板输出——失败可见性由 `status.dataSyncResults` 与控制器日志承载。
+- 部分失败时无论 `cleanupSecretOnFailure` 如何取值都不会删除 Secret。
+- 所有数据源恢复后，下一个成功轮次会正常渲染并写入模板。
+- 完整的失败处理矩阵（含未配置模板的 ExternalSecret）请参考[高级用法指南 - 同步失败处理语义](advanced_usage_zh.md#同步失败处理语义)
+
+> 模板致命错误（如模板语法解析错误）在数据源全部成功的轮次会产生 `template_processing_fatal` 并零写入；若同一轮数据源也存在失败，数据源失败契约保持优先，模板错误降级为 `template_processing_errors` 报告。
+
+> **零产出守卫（fail-closed）**：数据源全部成功但轮次产出 0 个 key 时（如 `dataProcess[].extract` 引用的后端文档被清空为 `{}`/空字符串），控制器跳过 Secret 写入、不触发 cleanup 删除，保留已有 Secret，并在 `status.dataSyncResults` 中上报 `zero_output_guard` 条目。该判定基于模板处理前的数据，模板静态内容不会掩盖零产出信号；故意清空后端文档不再导致 Secret 被清空/删除。守卫触发轮次，模板元数据（Labels/Annotations）更新同样被推迟。**模板后零产出守卫**覆盖渲染阶段的同类缺口：所有数据源成功且源数据非空，但模板渲染产出 0 个数据键时（Replace 模式下内联数据模板全部执行失败，或 Data 目标的 `templateFrom` 渲染出零个有效键），同样跳过写入、扣住删除，并上报 `template_zero_output_guard` 条目；仅元数据目标的 `templateFrom` 不会误触发，因为原始数据会被保留。详见[高级用法指南 - 同步失败处理语义](advanced_usage_zh.md#同步失败处理语义)。
+
 ## 常见问题与排查
 
 ### Q1: 模板输出为空或不符合预期
@@ -271,9 +298,10 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 **现象**：模板执行成功，但 Secret 中没有预期的 keys
 
 **可能原因**：
-- 模板输出格式不是严格的 `key=value`（如 `KEY1= value1` 有多余空格）
-- 行首行尾有空格
+- 模板输出不是 `key=value` 格式（如某行不包含 `=` 分隔符，该行会被忽略）
 - 缺少换行符分隔
+
+> 说明：行首尾空格以及 key/value 两侧的空格不会导致解析失败，会自动去除。
 
 **验证方法**：`kubectl describe externalsecret <name>` 查看模板实际输出
 
@@ -297,6 +325,6 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 
 ### 通用调试技巧
 
-1. **启用详细日志**：`kubectl edit deployment ack-secret-manager`，添加参数 `--v=4`
+1. **查看控制器日志**：`kubectl logs -l app=ack-secret-manager --tail=100` 查看模板处理详情与错误（组件未提供额外的日志级别开关）
 2. **分步验证**：不要一次性写复杂的模板，逐步验证每个步骤的输出
 3. **参考测试用例**：查看 `test/e2e/template_test.go` 和 `test/e2e/advanced_template_test.go` 获取更多正确使用的示例

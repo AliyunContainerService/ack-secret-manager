@@ -33,7 +33,7 @@
 | File | Description | Related Documentation |
 |------|-------------|----------------------|
 | [advanced-01-jmespath-parsing.yaml](advanced/advanced-01-jmespath-parsing.yaml) | JMESPath field extraction + dataProcess.extract auto-parsing | [Advanced Usage §JSON/YAML](../docs/advanced_usage.md#jsonyaml-credential-parsing) |
-| [advanced-02-cross-account.yaml](advanced/advanced-02-cross-account.yaml) | Cross-account authentication (all methods) | [Advanced Usage §Cross-Account](../docs/advanced_usage.md#cross-account-synchronization) |
+| [advanced-02-cross-account.yaml](advanced/advanced-02-cross-account.yaml) | Cross-account authentication (all methods) | [Advanced Usage §Cross-Account](../docs/advanced_usage.md#cross-account-sync) |
 | [advanced-03-kms-endpoint.yaml](advanced/advanced-03-kms-endpoint.yaml) | KMS Endpoint configuration (including dedicated instances) | [Advanced Usage §kmsEndpoint](../docs/advanced_usage.md#kmsendpoint-configuration) |
 | [advanced-04-credential-rotation.yaml](advanced/advanced-04-credential-rotation.yaml) | Credential rotation configuration (credential-level + global) | [Advanced Usage §Credential Rotation](../docs/advanced_usage.md#credential-rotation) |
 | [advanced-05-oos-parameter.yaml](advanced/advanced-05-oos-parameter.yaml) | OOS parameter synchronization | [Advanced Usage §Multi-DataSource](../docs/advanced_usage.md#multi-data-source-support) |
