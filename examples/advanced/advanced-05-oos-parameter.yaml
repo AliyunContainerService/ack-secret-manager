@@ -40,6 +40,8 @@ spec:
       secretStoreRef:
         name: oos-store
         kind: SecretStore
+        # Optional: the namespace field enables cross-namespace store references,
+        # controlled by enableCrossNamespaceSecretStore (default false); omitted here for same-namespace reference
 
 # ============================================================================
 # Multiple OOS Parameter Synchronization

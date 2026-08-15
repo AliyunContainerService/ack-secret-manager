@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	stderrors "errors"
 	"fmt"
 	"reflect"
 	"sort"
@@ -42,6 +43,17 @@ const (
 	ManagedKeysAnnotation = "ack-alibabacloud.com/managed-keys"
 )
 
+// Sentinel errors distinguishing template PARSE failures (fatal: the
+// template is structurally invalid and can never render) from EXECUTION
+// failures (non-fatal per the established grading: the template is valid
+// but this round's data cannot render it). executeTemplate wraps both via
+// fmt.Errorf %w so callers classify with errors.Is instead of string
+// sniffing; the user-visible message format is unchanged.
+var (
+	errTemplateParse     = stderrors.New("failed to parse template")
+	errTemplateExecution = stderrors.New("template execution failed")
+)
+
 // UnifiedTemplateResult represents the complete result of all template processing
 type UnifiedTemplateResult struct {
 	// Processed secret data
@@ -70,9 +82,10 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 	rawData map[string][]byte,
 ) (*UnifiedTemplateResult, error) {
 
-	// If ExternalSecret is being deleted, skip template processing
-	// This prevents re-adding managed keys that were intentionally removed
-	// by the Merge deletion policy during cleanup
+	// If ExternalSecret is being deleted, skip template processing.
+	// The deletion flow intentionally bypasses templates so that raw data
+	// alone drives the round; re-rendering templates here would re-add
+	// managed keys that the deletion flow has intentionally removed.
 	if externalSec.GetDeletionTimestamp() != nil {
 		// Return raw data only, without processing templates
 		result := &UnifiedTemplateResult{
@@ -141,7 +154,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 		result.Data[k] = v
 	}
 
-	// Track all managed keys for template cleanup
+	// Track managed keys for the ManagedKeysAnnotation written below
 	managedKeys := make(map[string]bool)
 
 	// Process inline data templates (Template.Data section)
@@ -161,7 +174,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 			for key, templateStr := range externalSec.Spec.Target.Template.Data {
 				processedValue, err := stp.executeTemplate(templateStr, interfaceData)
 				if err != nil {
-					if strings.Contains(err.Error(), "failed to parse template") {
+					if stderrors.Is(err, errTemplateParse) {
 						result.Stats.FatalErrors = append(result.Stats.FatalErrors,
 							fmt.Sprintf("data template %s parse failed: %v", key, err))
 					} else {
@@ -193,10 +206,16 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 			isReplaceMode := externalSec.Spec.Target.Template.MergePolicy == "" ||
 				externalSec.Spec.Target.Template.MergePolicy == api.MergePolicyReplace
 
+			// Presence of the "Data" target is checked by KEY (not output): a
+			// Data-targeted templateFrom keeps Replace semantics even when it yields
+			// zero keys; Labels/Annotations-only lists must not clear raw data (O-1).
+			_, hasDataTarget := templateFromResults[string(api.TemplateTargetData)]
+
 			// Only clear data if:
 			// 1. MergePolicy is Replace AND
-			// 2. No inline Template.Data was processed (to avoid double-clearing)
-			if isReplaceMode && !hasTemplateData {
+			// 2. No inline Template.Data was processed (to avoid double-clearing) AND
+			// 3. At least one templateFrom entry targets Data
+			if isReplaceMode && !hasTemplateData && hasDataTarget {
 				clear(result.Data)
 			}
 
@@ -255,7 +274,6 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				if stp.isValidLabelKey(key) {
 					result.Metadata.Labels[key] = string(processedValue)
 					result.Stats.MetadataTemplatesProcessed++
-					managedKeys[key] = true // Track metadata label keys for template cleanup
 				}
 			}
 		}
@@ -271,7 +289,6 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				if stp.isValidAnnotationKey(key) {
 					result.Metadata.Annotations[key] = string(processedValue)
 					result.Stats.MetadataTemplatesProcessed++
-					managedKeys[key] = true // Track metadata annotation keys for template cleanup
 				}
 			}
 		}
@@ -378,19 +395,21 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	return funcMap
 }
 
-// executeTemplate Execute single template with support for standard Go template syntax and custom functions
+// executeTemplate Execute single template with support for standard Go template syntax and custom functions.
+// Parse failures wrap errTemplateParse (fatal), execution failures wrap
+// errTemplateExecution (non-fatal); callers classify via errors.Is.
 func (stp *SimpleTemplateProcessor) executeTemplate(templateStr string, data map[string]interface{}) ([]byte, error) {
 	// Use cached function map instead of recreating it
 	tmpl, err := template.New("").Funcs(stp.funcMap).Parse(templateStr)
 	if err != nil {
-		return nil, fmt.Errorf("failed to parse template: %w", err)
+		return nil, fmt.Errorf("%w: %v", errTemplateParse, err)
 	}
 
 	var buf bytes.Buffer
-	// Pass the underlying data map to enable {{ .key }} syntax (same as external-secrets)
+	// Pass the underlying data map to enable {{ .key }} syntax.
 	// This allows: {{ .password }}, {{ range $k, $v := . }}, {{ if .enabled }}, etc.
 	if err := tmpl.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("template execution failed: %w", err)
+		return nil, fmt.Errorf("%w: %v", errTemplateExecution, err)
 	}
 
 	return buf.Bytes(), nil

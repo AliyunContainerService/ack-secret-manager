@@ -90,7 +90,7 @@ spec:
     - key: dedicated-secret
       name: dedicated-credential
       versionId: v1
-      kmsEndpoint: kmsi-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
+      kmsEndpoint: kst-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
       secretStoreRef:
         name: kms-store
         kind: SecretStore
@@ -109,7 +109,7 @@ spec:
 #
 # values.yaml (all credentials use the dedicated instance):
 #   command:
-#     kmsEndpoint: kmsi-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
+#     kmsEndpoint: kst-xxxxxxxxxxxxx.cryptoservice.kms.aliyuncs.com
 
 # ============================================================================
 # Verification:

@@ -31,7 +31,7 @@ spec:
       kmsEndpoint: kms.cn-hangzhou.aliyuncs.com
       secretStoreRef:
         name: scdemo
-        namespace: default
+        namespace: default  # Cross-namespace reference, controlled by enableCrossNamespaceSecretStore (default false); same-namespace reference works without enabling it
       jmesPath:
         - path: "name"
           objectAlias: "name"
@@ -98,7 +98,7 @@ spec:
         kmsEndpoint: kms.cn-hangzhou.aliyuncs.com
         secretStoreRef:
           name: scdemo
-          namespace: default
+          namespace: default  # Cross-namespace reference, controlled by enableCrossNamespaceSecretStore (default false); same-namespace reference works without enabling it
       replaceRule:
         - source: "^n.*e$"   # Replace keys starting with 'n' and ending with 'e' to 'alibabacloud'
           target: "alibabacloud"
@@ -119,7 +119,7 @@ spec:
 #
 # dataProcess.extract field description:
 #   extract.key:            KMS credential name
-#   extract.name:           ExternalSecret name
+#   extract.name:           Optional field; not used by the controller on the extract path
 #   extract.versionId:      KMS credential version (optional)
 #   extract.kmsEndpoint:    KMS service endpoint (optional)
 #   extract.secretStoreRef: SecretStore reference (optional)

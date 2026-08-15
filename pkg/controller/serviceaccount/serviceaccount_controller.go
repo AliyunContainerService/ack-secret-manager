@@ -45,9 +45,16 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	err := r.Get(ctx, req.NamespacedName, serviceAccount)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+			// The service account was deleted: reference matching only needs
+			// name/namespace, so construct a synthetic object and still trigger
+			// referencing stores.
+			log.Info("ServiceAccount not found, treating as a delete event for reference matching")
+			serviceAccount = &corev1.ServiceAccount{}
+			serviceAccount.Name = req.Name
+			serviceAccount.Namespace = req.Namespace
+		} else {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
 	}
 
 	// Find all SecretStore and ClusterSecretStore objects that reference this service account
@@ -65,7 +72,7 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	// Trigger reconcile for each referencing store
 	for _, store := range secretStoreList.Items {
-		if r.serviceAccountIsReferenced(serviceAccount, &store.Spec) {
+		if r.serviceAccountIsReferenced(serviceAccount, &store.Spec, store.Namespace) {
 			log.Info("Triggering reconcile for SecretStore", "store", store.Name, "namespace", store.Namespace)
 			err := r.triggerStoreReconcile(ctx, &store)
 			if err != nil {
@@ -87,18 +94,20 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-// serviceAccountIsReferenced checks if a service account is referenced by the store spec
-func (r *ServiceAccountReconciler) serviceAccountIsReferenced(sa *corev1.ServiceAccount, spec *api.SecretStoreSpec) bool {
+// serviceAccountIsReferenced checks if a service account is referenced by the store spec.
+// storeNamespace is the namespace of the SecretStore owning the spec, used to
+// resolve references that omit the namespace field.
+func (r *ServiceAccountReconciler) serviceAccountIsReferenced(sa *corev1.ServiceAccount, spec *api.SecretStoreSpec, storeNamespace string) bool {
 	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
-		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef) {
+		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef, storeNamespace) {
 			return true
 		}
 	}
 
 	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
-		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef) {
+		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef, storeNamespace) {
 			return true
 		}
 	}
@@ -106,18 +115,20 @@ func (r *ServiceAccountReconciler) serviceAccountIsReferenced(sa *corev1.Service
 	return false
 }
 
-// serviceAccountIsReferencedByClusterStore checks if a service account is referenced by the cluster store spec
+// serviceAccountIsReferencedByClusterStore checks if a service account is referenced by the cluster store spec.
+// ClusterSecretStore is cluster-scoped, so references must specify the namespace;
+// an empty reference namespace resolves to "" and never matches a namespaced service account.
 func (r *ServiceAccountReconciler) serviceAccountIsReferencedByClusterStore(sa *corev1.ServiceAccount, spec *api.ClusterSecretStoreSpec) bool {
 	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
-		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef) {
+		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef, "") {
 			return true
 		}
 	}
 
 	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
-		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef) {
+		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef, "") {
 			return true
 		}
 	}
@@ -125,17 +136,18 @@ func (r *ServiceAccountReconciler) serviceAccountIsReferencedByClusterStore(sa *
 	return false
 }
 
-// checkServiceAccount checks if a service account reference matches the given service account
-func (r *ServiceAccountReconciler) checkServiceAccount(sa *corev1.ServiceAccount, ref *api.ServiceAccountRef) bool {
+// checkServiceAccount checks if a service account reference matches the given service account.
+// storeNamespace is used as the expected namespace when ref.Namespace is omitted,
+// mirroring the auth chain which defaults an empty reference namespace to the
+// store's own namespace.
+func (r *ServiceAccountReconciler) checkServiceAccount(sa *corev1.ServiceAccount, ref *api.ServiceAccountRef, storeNamespace string) bool {
 	if ref == nil {
 		return false
 	}
 
-	// For SecretStore, if ref.Namespace is not specified, it defaults to the store's namespace
-	// For ClusterSecretStore, ref.Namespace is always specified
-	expectedNamespace := sa.Namespace
-	if ref.Namespace != "" {
-		expectedNamespace = ref.Namespace
+	expectedNamespace := ref.Namespace
+	if expectedNamespace == "" {
+		expectedNamespace = storeNamespace
 	}
 
 	return sa.Name == ref.Name && sa.Namespace == expectedNamespace

@@ -46,6 +46,12 @@ func RegisterProvider(providerName string, provider Provider) {
 	providerMap.Store(providerName, provider)
 }
 
+// DeleteProvider removes a registered provider (inverse of RegisterProvider).
+// Test-only; never call from production code.
+func DeleteProvider(providerName string) {
+	providerMap.Delete(providerName)
+}
+
 func GetProviderByName(providerName string) Provider {
 	ins, ok := providerMap.Load(providerName)
 	if !ok {
@@ -100,12 +106,22 @@ type Provider interface {
 type SecretClient interface {
 	GetName() string
 	// GetSecret gets secret via externalSecret
-	GetExternalSecret(data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
-	GetExternalSecretWithExtract(data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
+	GetExternalSecret(ctx context.Context, data *v1alpha1.DataSource, kube client.Client) (map[string][]byte, error)
+	GetExternalSecretWithExtract(ctx context.Context, data *v1alpha1.DataProcess, kube client.Client) (map[string][]byte, error)
 }
 
 type ClientManager interface {
 	Register(clientKey string, secretClient SecretClient)
 	GetClient(clientKey string) (SecretClient, error)
 	Delete(clientKey string)
+	// DeletePrefixed removes the plain clientKey client together with every
+	// composite "clientKey#endpoint" variant. Endpoint-specific clients are
+	// created on-demand by the ExternalSecret controller under composite
+	// keys, so store-level lifecycle events (spec update / store deletion)
+	// must retire all variants of the store's clientName at once.
+	// NOT atomic: implementations scan sync.Map.Range, whose weakly
+	// consistent snapshot may miss a composite client registered
+	// concurrently; such a client self-heals only on the next store
+	// lifecycle event.
+	DeletePrefixed(clientKey string)
 }

@@ -19,6 +19,8 @@ package clusterexternalsecret
 import (
 	"context"
 	"fmt"
+	"reflect"
+	"strings"
 	"time"
 
 	"github.com/go-logr/logr"
@@ -108,8 +110,14 @@ func (r *ClusterExternalSecretReconciler) Reconcile(ctx context.Context, req ctr
 		return r.Requeue(reconcile.Result{RequeueAfter: r.ReconciliationPeriod}), err
 	}
 
-	// Update status to ready
-	r.updateStatusWithReady(log, clusterExternalSecret)
+	// The resource is only ready when every selected namespace was
+	// provisioned successfully; any recorded failure flips Ready to False
+	// with a failure summary so partial failures are observable.
+	if len(clusterExternalSecret.Status.FailedNamespaces) > 0 {
+		r.updateStatusWithFailure(log, clusterExternalSecret, clusterExternalSecret.Status.FailedNamespaces)
+	} else {
+		r.updateStatusWithReady(log, clusterExternalSecret)
+	}
 
 	return r.Requeue(ctrl.Result{RequeueAfter: rotationInterval}), nil
 }
@@ -151,7 +159,7 @@ func (r *ClusterExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, rec
 func (r *ClusterExternalSecretReconciler) addFinalizer(logger logr.Logger, ces *api.ClusterExternalSecret) error {
 	logger.Info("Adding Finalizer for the ClusterExternalSecret", "name", ces.Name)
 	ces.SetFinalizers(append(ces.GetFinalizers(), clusterExternalSecretFinalizer))
-	err := r.Update(context.TODO(), ces)
+	err := r.Update(r.Ctx, ces)
 	if err != nil {
 		logger.Error(err, "Failed to update ClusterExternalSecret with finalizer", "name", ces.Name)
 		return err
@@ -206,21 +214,21 @@ func (r *ClusterExternalSecretReconciler) reconcileExternalSecrets(logger logr.L
 	// Get namespaces that match the selectors
 	matchingNamespaces, err := r.getMatchingNamespaces(ces)
 	if err != nil {
-		// Update status with the error
-		failedNamespaces := []api.ClusterExternalSecretNamespaceFailure{
+		// Record the failure, but keep the existing ProvisionedNamespaces
+		// ledger intact: a transient namespace List failure must not wipe
+		// the record of previously provisioned namespaces (the finalizer
+		// cleanup path depends on it).
+		originalStatus := ces.Status.DeepCopy()
+		ces.Status.FailedNamespaces = []api.ClusterExternalSecretNamespaceFailure{
 			{
 				Namespace: "",
 				Reason:    fmt.Sprintf("Failed to list namespaces: %v", err),
 			},
 		}
-		ces.Status.ProvisionedNamespaces = []string{}
-		ces.Status.FailedNamespaces = failedNamespaces
 
 		// Try to update status even though we're returning an error
-		statusErr := r.Status().Update(context.Background(), ces)
-		if statusErr != nil {
-			logger.Error(statusErr, "Failed to update ClusterExternalSecret status")
-		}
+		// (debounced: no Update when the status did not change).
+		r.updateStatusIfNeeded(logger, ces, originalStatus)
 
 		return fmt.Errorf("failed to get matching namespaces: %w", err)
 	}
@@ -274,7 +282,7 @@ func (r *ClusterExternalSecretReconciler) handleNoMatchingNamespaces(logger logr
 			hasNamespace := false
 			for _, namespace := range allNamespacesList.Items {
 				hasNamespace = true
-				if !utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace, r.Get) {
+				if !utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace) {
 					// Namespace doesn't match, add to failed namespaces with reason
 					failedNamespaces = append(failedNamespaces, api.ClusterExternalSecretNamespaceFailure{
 						Namespace: namespace.Name,
@@ -368,7 +376,7 @@ func (r *ClusterExternalSecretReconciler) getMatchingNamespaces(ces *api.Cluster
 
 	// Check each namespace against the conditions using new utility function
 	for _, namespace := range namespaceList.Items {
-		if utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace, r.Get) {
+		if utils.IsNamespaceAllowedForClusterExternalSecret(ces, namespace) {
 			matchingNamespaces = append(matchingNamespaces, namespace.Name)
 		}
 	}
@@ -468,7 +476,7 @@ func (r *ClusterExternalSecretReconciler) validateDataSourceSecretStoreAccess(da
 	case "ClusterSecretStore":
 		// Check if namespace is allowed to access this ClusterSecretStore
 		clusterSecretStore := &api.ClusterSecretStore{}
-		err := r.Get(context.Background(), client.ObjectKey{
+		err := r.Get(r.Ctx, client.ObjectKey{
 			Name: secretStoreRef.Name,
 		}, clusterSecretStore)
 		if err != nil {
@@ -547,26 +555,72 @@ func (r *ClusterExternalSecretReconciler) updateStatusWithError(logger logr.Logg
 		Message: err.Error(),
 	}
 
+	originalStatus := ces.Status.DeepCopy()
 	r.setCondition(ces, condition)
-
-	statusErr := r.Status().Update(context.Background(), ces)
-	if statusErr != nil {
-		logger.Error(statusErr, "Failed to update ClusterExternalSecret status with error")
-	}
+	r.updateStatusIfNeeded(logger, ces, originalStatus)
 }
 
-// updateStatusWithReady updates the status to indicate the store is ready
+// updateStatusWithReady updates the status to indicate the resource is ready
 func (r *ClusterExternalSecretReconciler) updateStatusWithReady(logger logr.Logger, ces *api.ClusterExternalSecret) {
 	condition := api.ClusterExternalSecretStatusCondition{
 		Type:   ClusterExternalSecretReady,
 		Status: corev1.ConditionTrue,
 	}
 
+	originalStatus := ces.Status.DeepCopy()
 	r.setCondition(ces, condition)
+	r.updateStatusIfNeeded(logger, ces, originalStatus)
+}
 
-	statusErr := r.Status().Update(context.Background(), ces)
+// updateStatusWithFailure updates the status to indicate that some selected
+// namespaces failed to be provisioned. Ready is set to False with a failure
+// summary so partial failures are observable.
+func (r *ClusterExternalSecretReconciler) updateStatusWithFailure(logger logr.Logger, ces *api.ClusterExternalSecret, failedNamespaces []api.ClusterExternalSecretNamespaceFailure) {
+	condition := api.ClusterExternalSecretStatusCondition{
+		Type:    ClusterExternalSecretReady,
+		Status:  corev1.ConditionFalse,
+		Message: summarizeNamespaceFailures(failedNamespaces),
+	}
+
+	originalStatus := ces.Status.DeepCopy()
+	r.setCondition(ces, condition)
+	r.updateStatusIfNeeded(logger, ces, originalStatus)
+}
+
+// summarizeNamespaceFailures builds a short human-readable summary of the
+// failed namespaces for the Ready condition message. At most a few namespace
+// names are listed; the total count is always included.
+func summarizeNamespaceFailures(failedNamespaces []api.ClusterExternalSecretNamespaceFailure) string {
+	names := make([]string, 0, len(failedNamespaces))
+	for _, f := range failedNamespaces {
+		name := f.Namespace
+		if name == "" {
+			name = "<cluster-wide>"
+		}
+		names = append(names, name)
+	}
+
+	const maxListedNames = 5
+	if len(names) > maxListedNames {
+		return fmt.Sprintf("failed to provision ExternalSecrets in %d namespace(s): %s, ...",
+			len(failedNamespaces), strings.Join(names[:maxListedNames], ", "))
+	}
+	return fmt.Sprintf("failed to provision ExternalSecrets in %d namespace(s): %s",
+		len(failedNamespaces), strings.Join(names, ", "))
+}
+
+// updateStatusIfNeeded writes the status subresource only when the status
+// actually changed compared to originalStatus (debounce). setCondition
+// preserves LastTransitionTime when the condition status is unchanged, so an
+// unchanged status compares equal and no Update is issued.
+func (r *ClusterExternalSecretReconciler) updateStatusIfNeeded(logger logr.Logger, ces *api.ClusterExternalSecret, originalStatus *api.ClusterExternalSecretStatus) {
+	if reflect.DeepEqual(originalStatus, &ces.Status) {
+		return
+	}
+
+	statusErr := r.Status().Update(r.Ctx, ces)
 	if statusErr != nil {
-		logger.Error(statusErr, "Failed to update ClusterExternalSecret status with ready condition")
+		logger.Error(statusErr, "Failed to update ClusterExternalSecret status")
 	}
 }
 

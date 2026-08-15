@@ -8,6 +8,8 @@
 #
 # Authentication Priority:
 #   ServiceAccount RRSA > RRSA (OIDC) > AK AssumeRole > AK > WorkerRole
+#   Exception: when oidcProviderARN is auto-derived (not explicitly configured) and complete
+#   AccessKey credentials are configured, AK AssumeRole takes effect instead
 #   ramRoleARN + oidcProviderARN in SecretStore use the same authentication path as environment variable RRSA
 #
 # Prerequisites:

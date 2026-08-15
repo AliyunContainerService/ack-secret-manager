@@ -48,3 +48,19 @@ jobs:
 
     - name: Build
       run: make build
+
+  unit-test:
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version-file: go.mod
+        cache: true
+
+    - name: Unit tests
+      # Only ./pkg/...: test/e2e requires a live kubeconfig (Ginkgo
+      # BeforeSuite fails without one) and must not run here.
+      run: go test -count=1 -race ./pkg/...

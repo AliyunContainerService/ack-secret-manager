@@ -3,6 +3,8 @@
 > This directory contains complete usage examples for ACK Secret Manager, organized by feature category, covering authentication, CRD resources, advanced features, template processing, and best practices.
 >
 > All examples use a comment-driven style. Prerequisites, verification steps, notes, etc. are all provided as YAML comments and can be applied directly with `kubectl apply -f`.
+>
+> **Note**: The examples below use various command-line tools, including [aliyun CLI](https://github.com/aliyun/aliyun-cli), [ack-ram-tool](https://github.com/AliyunContainerService/ack-ram-tool), `kubectl`, `helm`, etc. You can also perform these operations via the [Alibaba Cloud Console](https://home.console.aliyun.com/) or by calling Alibaba Cloud OpenAPIs. Make sure each tool is installed and configured before use — for example, run `aliyun configure` to set up credentials and region for aliyun CLI, and configure kubeconfig for `kubectl` to connect to your cluster.
 
 ## Examples List
 
@@ -31,7 +33,7 @@
 | File | Description | Related Documentation |
 |------|-------------|----------------------|
 | [advanced-01-jmespath-parsing.yaml](advanced/advanced-01-jmespath-parsing.yaml) | JMESPath field extraction + dataProcess.extract auto-parsing | [Advanced Usage §JSON/YAML](../docs/advanced_usage.md#jsonyaml-credential-parsing) |
-| [advanced-02-cross-account.yaml](advanced/advanced-02-cross-account.yaml) | Cross-account authentication (all methods) | [Advanced Usage §Cross-Account](../docs/advanced_usage.md#cross-account-synchronization) |
+| [advanced-02-cross-account.yaml](advanced/advanced-02-cross-account.yaml) | Cross-account authentication (all methods) | [Advanced Usage §Cross-Account](../docs/advanced_usage.md#cross-account-sync) |
 | [advanced-03-kms-endpoint.yaml](advanced/advanced-03-kms-endpoint.yaml) | KMS Endpoint configuration (including dedicated instances) | [Advanced Usage §kmsEndpoint](../docs/advanced_usage.md#kmsendpoint-configuration) |
 | [advanced-04-credential-rotation.yaml](advanced/advanced-04-credential-rotation.yaml) | Credential rotation configuration (credential-level + global) | [Advanced Usage §Credential Rotation](../docs/advanced_usage.md#credential-rotation) |
 | [advanced-05-oos-parameter.yaml](advanced/advanced-05-oos-parameter.yaml) | OOS parameter synchronization | [Advanced Usage §Multi-DataSource](../docs/advanced_usage.md#multi-data-source-support) |

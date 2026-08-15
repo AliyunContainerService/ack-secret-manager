@@ -102,11 +102,11 @@ func main() {
 	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
 	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
 	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
-	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "clean up the corresponding secret in the Kubernetes cluster when the secret sync operation fails.")
+	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "delete the corresponding cluster Secret when all data sources fail to sync (no data available), including ExternalSecrets with templates; on partial failures the Secret is never deleted and is handled by the merge/fail-closed strategy instead.")
 	flag.BoolVar(&processClusterSecretStore, "process-cluster-secret-store", true, "Enable processing of ClusterSecretStore resources")
 	flag.BoolVar(&processClusterExternalSecret, "process-cluster-external-secret", true, "Enable processing of ClusterExternalSecret resources")
-	flag.BoolVar(&enableCrossNamespaceSecretStore, "enable-cross-namespace-secret-store", true, "Enable cross namespace SecretStore reference in ExternalSecret. Set to false to disable.")
-	flag.BoolVar(&enableCrossNamespaceAuthRef, "enable-cross-namespace-auth-ref", true, "Enable cross namespace AuthRef reference in SecretStore. Set to false to disable.")
+	flag.BoolVar(&enableCrossNamespaceSecretStore, "enable-cross-namespace-secret-store", false, "Enable cross namespace SecretStore reference in ExternalSecret. Set to false to disable.")
+	flag.BoolVar(&enableCrossNamespaceAuthRef, "enable-cross-namespace-auth-ref", false, "Enable cross namespace AuthRef reference in SecretStore. Set to false to disable.")
 
 	flag.Parse()
 

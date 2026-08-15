@@ -5,6 +5,7 @@ import (
 	"context"
 	"fmt"
 	"regexp"
+	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -27,12 +28,13 @@ var _ = Describe("Match Conditions E2E", func() {
 
 	BeforeEach(func() {
 		testNamespace = createTestNamespace(ctx, "test-match-conditions-"+getRandString())
+		// Register namespace cleanup immediately after creation so the namespace
+		// is deleted even when a later assertion fails before the spec's own
+		// DeferCleanup is registered. deleteTestNamespace tolerates an
+		// already-deleted namespace, so running it twice is harmless.
+		DeferCleanup(deleteTestNamespace, ctx, testNamespace)
 		testNamespace2 = createTestNamespace(ctx, "test-match-conditions2-"+getRandString())
-	})
-
-	AfterEach(func() {
-		// Do not call deleteTestNamespace here to avoid race conditions
-		// All cleanup is handled in DeferCleanup to ensure proper ordering
+		DeferCleanup(deleteTestNamespace, ctx, testNamespace2)
 	})
 
 	Context("ClusterSecretStore namespace matching", func() {
@@ -74,37 +76,7 @@ var _ = Describe("Match Conditions E2E", func() {
 			})
 
 			// Validate ClusterSecretStore status update
-			var lastClusterStoreError string
-			Eventually(func() bool {
-				createdStore := &api.ClusterSecretStore{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: clusterSecretStore.Name,
-				}, createdStore)
-				if err != nil {
-					lastClusterStoreError = fmt.Sprintf("Error getting ClusterSecretStore: %v", err)
-					return false
-				}
-
-				if len(createdStore.Status.Conditions) == 0 {
-					lastClusterStoreError = "ClusterSecretStore has no status conditions"
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type != api.SecretStoreReady || condition.Status != corev1.ConditionTrue {
-						lastClusterStoreError = fmt.Sprintf("SecretStoreReady condition type is %s, expected Ready, status is %s, expected True, reason: %s, message: %s", condition.Type, string(condition.Status), condition.Reason, condition.Message)
-						return false
-					}
-				}
-
-				return true
-			}).WithTimeout(time.Minute*2).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastClusterStoreError != "" {
-						return fmt.Sprintf("ClusterSecretStore should eventually become ready, but: %s", lastClusterStoreError)
-					}
-					return "ClusterSecretStore should eventually become ready"
-				})
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
 
 			// Create ExternalSecret using the store in a namespace without matching labels
 			externalSecret := &api.ExternalSecret{
@@ -131,9 +103,11 @@ var _ = Describe("Match Conditions E2E", func() {
 
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
-			// Initially, ExternalSecret should fail to sync because the namespace doesn't match conditions
+			// Initially, ExternalSecret should fail to sync because the namespace doesn't match conditions.
+			// Consistently alone would fail immediately because the controller needs time to process,
+			// so first wait for the initial Failed result, then verify it persists.
 			var lastCheckError string
-			Consistently(func() bool {
+			Eventually(func() bool {
 				createdExternalSecret := &api.ExternalSecret{}
 				err := k8sClient.Get(ctx, types.NamespacedName{
 					Name:      externalSecret.Name,
@@ -148,11 +122,22 @@ var _ = Describe("Match Conditions E2E", func() {
 					lastCheckError = "DataSyncResults is empty, waiting for sync results..."
 					return false
 				}
-				// Check if there are sync failures due to namespace not matching conditions
+				// Check if there are sync failures due to namespace not matching conditions.
+				// The ExternalSecret controller rejects the ClusterSecretStore reference
+				// with "namespace ... is not allowed to access ClusterSecretStore ..."
+				// (see getSecretStore / validateSecretStoreAccess) when the namespace
+				// labels don't satisfy the store conditions, and the error surfaces in
+				// DataSyncResults.Reason. Asserting on that message locks the failure
+				// reason to namespace mismatch instead of any unrelated sync error.
 				for i, result := range createdExternalSecret.Status.DataSyncResults {
 					if result.Status != "Failed" {
 						lastCheckError = fmt.Sprintf(
 							"DataSyncResult[%d] should have status 'Failed', got '%s'. Reason: '%s'", i, result.Status, result.Reason)
+						return false
+					}
+					if !strings.Contains(result.Reason, "is not allowed to access ClusterSecretStore") {
+						lastCheckError = fmt.Sprintf(
+							"DataSyncResult[%d] should fail because namespace doesn't match ClusterSecretStore conditions, got Reason: '%s'", i, result.Reason)
 						return false
 					}
 				}
@@ -161,14 +146,56 @@ var _ = Describe("Match Conditions E2E", func() {
 			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
 				func() string {
 					if lastCheckError != "" {
-						return fmt.Sprintf("ExternalSecret should consistently fail to sync because namespace doesn't match conditions, but: %s", lastCheckError)
+						return fmt.Sprintf("ExternalSecret should fail to sync because namespace doesn't match conditions, but: %s", lastCheckError)
 					}
-					return "ExternalSecret should consistently fail to sync because namespace doesn't match conditions"
+					return "ExternalSecret should fail to sync because namespace doesn't match conditions"
 				})
 
-			// Now update test namespace to match conditions
-			testNamespace.Labels = map[string]string{"environment": "test"}
-			Expect(k8sClient.Update(ctx, testNamespace)).To(Succeed())
+			// Now verify the Failed status persists consistently
+			Consistently(func() bool {
+				createdExternalSecret := &api.ExternalSecret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      externalSecret.Name,
+					Namespace: externalSecret.Namespace,
+				}, createdExternalSecret)
+				if err != nil {
+					return false
+				}
+
+				if len(createdExternalSecret.Status.DataSyncResults) == 0 {
+					return false
+				}
+				for _, result := range createdExternalSecret.Status.DataSyncResults {
+					if result.Status != "Failed" {
+						return false
+					}
+					if !strings.Contains(result.Reason, "is not allowed to access ClusterSecretStore") {
+						return false
+					}
+				}
+				return true
+			}).WithTimeout(time.Second*10).WithPolling(time.Second*2).Should(BeTrue(),
+				"ExternalSecret should consistently remain in Failed state while namespace doesn't match conditions")
+
+			// Now update test namespace to match conditions. Re-Get the latest
+			// object before mutating so concurrent label changes are not
+			// clobbered, and retry via Eventually on resourceVersion conflicts.
+			Eventually(func() bool {
+				ns := &corev1.Namespace{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: testNamespace.Name}, ns); err != nil {
+					return false
+				}
+				if ns.Labels == nil {
+					ns.Labels = map[string]string{}
+				}
+				ns.Labels["environment"] = "test"
+				if err := k8sClient.Update(ctx, ns); err != nil {
+					// ResourceVersion conflict (or transient error): retry with a fresh object.
+					return false
+				}
+				return true
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*2).Should(BeTrue(),
+				"namespace labels should eventually be updated to match ClusterSecretStore conditions")
 
 			// Wait for the ExternalSecret to sync successfully after namespace label update
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
@@ -213,13 +240,10 @@ var _ = Describe("Match Conditions E2E", func() {
 			DeferCleanup(func() {
 				// Handle complete cleanup to avoid race conditions with AfterEach
 
-				// 1. Wait for any ongoing controller operations to complete
-				time.Sleep(time.Second * 3)
-
-				// 2. Delete the ClusterExternalSecret to trigger controller cleanup
+				// 1. Delete the ClusterExternalSecret to trigger controller cleanup
 				Expect(k8sClient.Delete(ctx, clusterExternalSecret)).To(Succeed())
 
-				// 3. Wait for all ExternalSecrets to be cleaned up in both namespaces
+				// 2. Wait for all ExternalSecrets to be cleaned up in both namespaces
 				Eventually(func() bool {
 					externalSecretList := &api.ExternalSecretList{}
 					err := k8sClient.List(ctx, externalSecretList, client.InNamespace(testNamespace.Name))
@@ -238,25 +262,53 @@ var _ = Describe("Match Conditions E2E", func() {
 					return len(externalSecretList2.Items) == 0
 				}, time.Second*30, time.Second*2).Should(BeTrue(), "All ExternalSecrets should be cleaned up before namespace deletion")
 
-				// 4. Now safely delete both namespaces
+				// 3. Now safely delete both namespaces
 				Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
 				Expect(k8sClient.Delete(ctx, testNamespace2)).To(Succeed())
 			})
 
-			// Look for ExternalSecrets that would have been created by the ClusterExternalSecret
-			// These should be named after the ClusterExternalSecret and exist in matching namespaces
+			// Wait for the ClusterExternalSecret controller to provision child
+			// ExternalSecrets (named after the ClusterExternalSecret) in BOTH
+			// matching namespaces. Without this wait the subsequent assertions
+			// could run before the controller creates anything and pass vacuously.
+			Eventually(func() bool {
+				es1 := &api.ExternalSecret{}
+				err1 := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      clusterExternalSecret.Name,
+					Namespace: testNamespace.Name,
+				}, es1)
+				es2 := &api.ExternalSecret{}
+				err2 := k8sClient.Get(ctx, types.NamespacedName{
+					Name:      clusterExternalSecret.Name,
+					Namespace: testNamespace2.Name,
+				}, es2)
+				return err1 == nil && err2 == nil
+			}).WithTimeout(time.Second*60).WithPolling(time.Second*2).Should(BeTrue(),
+				"ClusterExternalSecret should provision child ExternalSecrets in both matching namespaces %s and %s",
+				testNamespace.Name, testNamespace2.Name)
+
+			// Explicitly assert the two child ExternalSecrets exist in the
+			// matching namespaces.
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: clusterExternalSecret.Name, Namespace: testNamespace.Name,
+			}, &api.ExternalSecret{})).To(Succeed(),
+				"child ExternalSecret should exist in matching namespace %s", testNamespace.Name)
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name: clusterExternalSecret.Name, Namespace: testNamespace2.Name,
+			}, &api.ExternalSecret{})).To(Succeed(),
+				"child ExternalSecret should exist in matching namespace %s", testNamespace2.Name)
+
+			// Exclusivity: no child ExternalSecret of this ClusterExternalSecret
+			// may exist in any non-matching namespace (cluster-wide check).
 			externalSecretList := &api.ExternalSecretList{}
 			Expect(k8sClient.List(ctx, externalSecretList)).To(Succeed())
 
-			// Check that ExternalSecrets were created in namespaces that match the regex pattern
 			for _, es := range externalSecretList.Items {
-				// Check if this ExternalSecret was created by our ClusterExternalSecret
-				// The ExternalSecret name should match the ClusterExternalSecret name
 				if es.Name == clusterExternalSecret.Name {
-					// Verify that the namespace matches the regex pattern
-					// This regex matches both "test-match-conditions-" and "test-match-conditions2-"
+					// The ExternalSecret name matches; its namespace MUST match
+					// the regex pattern. This regex matches both
+					// "test-match-conditions-" and "test-match-conditions2-".
 					matchesRegex := matchesRegexPattern.MatchString(es.Namespace)
-
 					Expect(matchesRegex).To(BeTrue(), "ExternalSecret %s found in namespace %s which doesn't match regex", es.Name, es.Namespace)
 				}
 			}

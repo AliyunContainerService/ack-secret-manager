@@ -3,6 +3,8 @@
 > 本目录包含 ACK Secret Manager 的完整使用示例，按功能分类组织，涵盖认证配置、CRD 资源、高级功能、模板处理和最佳实践。
 >
 > 所有示例采用注释驱动风格，前提条件、验证步骤、注意事项等均以 YAML 注释形式提供，可直接使用 `kubectl apply -f` 应用。
+>
+> **注意**：以下示例使用了多种命令行工具完成操作，包括 [aliyun CLI](https://github.com/aliyun/aliyun-cli)、[ack-ram-tool](https://github.com/AliyunContainerService/ack-ram-tool)、`kubectl`、`helm` 等。您也可以通过[阿里云控制台](https://home.console.aliyun.com/)图形化操作，或调用阿里云 OpenAPI 完成。使用前请确保各工具已安装并完成配置，例如 aliyun CLI 需执行 `aliyun configure` 配置凭证和地域，`kubectl` 需配置 kubeconfig 以连接集群。
 
 ## 示例列表
 

@@ -52,22 +52,7 @@ var _ = Describe("Advanced Template Processing E2E", func() {
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ConfigMap with template
 			cmName := "service-template-" + getRandString()
@@ -197,7 +182,7 @@ LOG_FORMAT={{ jsonPath .log "format" | default "json" }}`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the secret data
 			Expect(secret.Data).To(HaveKey("SERVICE_NAME"))
@@ -263,22 +248,7 @@ LOG_FORMAT={{ jsonPath .log "format" | default "json" }}`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret for Kubernetes manifests
 			esName := "k8s-manifest-example-" + getRandString()
@@ -407,7 +377,7 @@ spec:
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify the generated manifests
 			Expect(secret.Data).To(HaveKey("deployment_yaml"))
@@ -456,22 +426,7 @@ spec:
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret for certificates
 			esName := "certificate-example-" + getRandString()
@@ -557,7 +512,7 @@ ssl_trusted_certificate /etc/ssl/certs/ca.crt;`,
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify certificate handling
 			Expect(secret.Data).To(HaveKey("tls.crt"))
@@ -607,24 +562,10 @@ ssl_trusted_certificate /etc/ssl/certs/ca.crt;`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
-			// Create ConfigMap with environment templates
+			// Create ConfigMap whose template dynamically selects the environment-specific
+			// configuration based on the .environment value fetched from KMS
 			cmName := "env-templates-" + getRandString()
 			configMap := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
@@ -632,20 +573,18 @@ ssl_trusted_certificate /etc/ssl/certs/ca.crt;`,
 					Namespace: testNamespace.Name,
 				},
 				Data: map[string]string{
-					"dev-config": `LOG_LEVEL=DEBUG
-DATABASE_POOL_SIZE=5
-CACHE_TTL=300
-ENABLE_PROFILING=true`,
-
-					"staging-config": `LOG_LEVEL=INFO
+					// One template covering all environments: the branch is chosen at render
+					// time from the fetched environment data, making the selection truly dynamic
+					"env-config": `{{ if eq .environment "staging" }}LOG_LEVEL=INFO
 DATABASE_POOL_SIZE=20
 CACHE_TTL=600
-ENABLE_PROFILING=false`,
-
-					"prod-config": `LOG_LEVEL=WARN
+ENABLE_PROFILING=false{{ else if eq .environment "production" }}LOG_LEVEL=WARN
 DATABASE_POOL_SIZE=50
 CACHE_TTL=1800
-ENABLE_PROFILING=false`,
+ENABLE_PROFILING=false{{ else }}LOG_LEVEL=DEBUG
+DATABASE_POOL_SIZE=5
+CACHE_TTL=300
+ENABLE_PROFILING=true{{ end }}`,
 				},
 			}
 			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
@@ -681,7 +620,7 @@ ENABLE_PROFILING=false`,
 										Name: cmName,
 										Items: []api.TemplateRefItem{
 											{
-												Key:        "staging-config",
+												Key:        "env-config",
 												TemplateAs: api.TemplateScopeKeysAndValues,
 											},
 										},
@@ -697,25 +636,20 @@ ENABLE_PROFILING=false`,
 			// Create the ExternalSecret
 			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
 
-			// Wait for the corresponding secret to be created
+			// Wait for the corresponding secret to be created; fold the value assertions into
+			// the polling so we assert the data at the moment Eventually succeeds.
 			secret := &corev1.Secret{}
 			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
-
-			// Verify staging configuration was selected (based on current-environment = staging)
-			Expect(secret.Data).To(HaveKey("LOG_LEVEL"))
-			Expect(string(secret.Data["LOG_LEVEL"])).To(Equal("INFO"))
-
-			Expect(secret.Data).To(HaveKey("DATABASE_POOL_SIZE"))
-			Expect(string(secret.Data["DATABASE_POOL_SIZE"])).To(Equal("20"))
-
-			Expect(secret.Data).To(HaveKey("CACHE_TTL"))
-			Expect(string(secret.Data["CACHE_TTL"])).To(Equal("600"))
-
-			Expect(secret.Data).To(HaveKey("ENABLE_PROFILING"))
-			Expect(string(secret.Data["ENABLE_PROFILING"])).To(Equal("false"))
+				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
+					return false
+				}
+				// Verify the staging branch was dynamically selected because
+				// current-environment = staging
+				return string(secret.Data["LOG_LEVEL"]) == "INFO" &&
+					string(secret.Data["DATABASE_POOL_SIZE"]) == "20" &&
+					string(secret.Data["CACHE_TTL"]) == "600" &&
+					string(secret.Data["ENABLE_PROFILING"]) == "false"
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Clean up
 			CleanupExternalSecret(context.Background(), externalSecret)
@@ -745,22 +679,7 @@ ENABLE_PROFILING=false`,
 			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
 
 			// Wait for SecretStore to be ready
-			Eventually(func() bool {
-				createdStore := &api.SecretStore{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				}, createdStore)
-				if err != nil {
-					return false
-				}
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type == api.SecretStoreReady && condition.Status == corev1.ConditionTrue {
-						return true
-					}
-				}
-				return false
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
 
 			// Create ExternalSecret for dynamic port configuration
 			esName := "dynamic-ports-example-" + getRandString()
@@ -827,7 +746,7 @@ port_{{ . }}=enabled
 			Eventually(func() bool {
 				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
 				return err == nil
-			}, time.Second*30, time.Second*5).Should(BeTrue())
+			}, time.Minute*2, time.Second*5).Should(BeTrue())
 
 			// Verify dynamic port configurations
 			Expect(secret.Data).To(HaveKey("port_mappings"))

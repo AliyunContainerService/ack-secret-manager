@@ -180,9 +180,10 @@ When using `templateAs: KeysAndValues`, data goes through **two layers of parsin
 - Template output: `DB_HOST=db.example.com\nDB_PORT=5432`
 - After KeysAndValues parsing: `DB_HOST` → `"db.example.com"`, `DB_PORT` → `"5432"`
 
-**Key Requirements**:
-- Template output must be strict `key=value` format, no extra spaces at line start/end
+**Parsing Behavior**:
 - One key=value pair per line, separated by newlines
+- Leading/trailing whitespace on each line and around the key and value is trimmed automatically (e.g., `KEY1= value1` is parsed normally); empty lines are skipped
+- Lines without an `=` separator are ignored
 
 ## Template Usage Patterns
 
@@ -205,6 +206,8 @@ Reference templates from external resources for template reuse. Supports three r
 | ConfigMap | `templateFrom[].configMap` | Read template content from a ConfigMap key |
 | Secret | `templateFrom[].secret` | Read template content from a Secret key |
 | Literal | `templateFrom[].literal` | Inline template string |
+
+> **Note on `literal`**: the rendered result of a `templateFrom[].literal` entry is always written to a fixed key named `literal`; when multiple `literal` entries are configured, their results overwrite each other (only the rendered result of one is kept under the `literal` key). If you need multiple keys, use `templateFrom[].configMap`/`secret` with `templateAs: KeysAndValues` or inline `template.data` instead.
 
 **Template Scope (templateAs)**:
 
@@ -248,6 +251,30 @@ Invalid keys are automatically filtered and will not cause Secret creation failu
 
 > For more production scenario examples (microservice configuration, TLS certificates, multi-environment management, etc.), see [examples/template/template-04-advanced-scenarios.yaml](../examples/template/template-04-advanced-scenarios.yaml)
 
+### Behavior on Data Fetch Failure
+
+When template processing is configured, the controller handles data fetch failures with the following two-layer semantics (since v0.6.5):
+
+1. **Skipping the write (fail-closed) is the default protection and is independent of `cleanupSecretOnFailure`**: templates may reference or iterate over any synced key, so rendering with partial data could produce an incorrect Secret. The Secret write is therefore skipped on failure rounds and the previous Secret is retained.
+2. **Deletion is controlled separately by `cleanupSecretOnFailure`**: only when all data sources fail and `cleanupSecretOnFailure=true`, the deletion contract takes precedence over skipping the write and the controller deletes the cluster Secret; template-rendered static content is never written in that case.
+
+| Failure Scope | cleanupSecretOnFailure | Handling Behavior |
+| ------------- | ---------------------- | ----------------- |
+| Partial failure (some data sources succeeded) | Any | Secret write skipped entirely, previous Secret retained |
+| Total failure (all data sources failed) | `false` (default) | Secret write skipped, previous Secret retained |
+| Total failure (all data sources failed) | `true` | Cluster Secret deleted; template-rendered static content is never written |
+
+**Notes**:
+
+- Even if a template contains only static content and could render successfully on total failure, no template output is written during failure rounds unless the deletion condition above is met — failure visibility is carried by `status.dataSyncResults` and controller logs instead.
+- Partial failures never delete the Secret, regardless of `cleanupSecretOnFailure`.
+- Once all data sources recover, the next successful round renders and writes the template normally.
+- For the complete failure handling matrix (including ExternalSecrets without templates), see [Advanced Usage Guide - Sync Failure Handling Semantics](advanced_usage.md#sync-failure-handling-semantics)
+
+> A fatal template error (e.g. a template parse error) on a round where all data sources succeeded results in `template_processing_fatal` with zero writes. When data sources also failed in the same round, the data-source failure contracts keep precedence and the template error is reported as `template_processing_errors` instead.
+
+> **Zero-output guard (fail-closed)**: when all data sources succeed but the round produces 0 keys (e.g. a backend document referenced by `dataProcess[].extract` has been emptied to `{}`/empty string), the controller skips the Secret write, withholds cleanup deletion, retains the existing Secret, and reports a `zero_output_guard` entry in `status.dataSyncResults`. The decision is based on the pre-template data, so template static content cannot mask the zero-output signal; intentionally emptying the backend document no longer clears/deletes the Secret. On guard rounds, template metadata (Labels/Annotations) updates are deferred as well. A **post-template counterpart** covers the rendering stage: when all data sources succeeded and the source data was non-empty, but template rendering produces 0 data keys (Replace mode with every inline data template failing execution, or a Data-targeted `templateFrom` rendering zero valid keys), the write is skipped and deletion withheld as well, reporting a `template_zero_output_guard` entry; a metadata-only `templateFrom` never triggers it because the raw data is preserved. See [Advanced Usage Guide - Sync Failure Handling Semantics](advanced_usage.md#sync-failure-handling-semantics).
+
 ## Troubleshooting
 
 ### Q1: Template output is empty or unexpected
@@ -271,9 +298,10 @@ Invalid keys are automatically filtered and will not cause Secret creation failu
 **Symptom**: Template executes successfully, but Secret doesn't have expected keys
 
 **Possible Causes**:
-- Template output is not strict `key=value` format (e.g., `KEY1= value1` has extra spaces)
-- Extra spaces at line start/end
+- Template output is not in `key=value` format (e.g., a line without any `=` separator is ignored)
 - Missing newline separators
+
+> Note: leading/trailing whitespace on lines and around keys/values does not cause parsing failures — it is trimmed automatically.
 
 **Verification**: `kubectl describe externalsecret <name>` to check actual template output
 
@@ -297,6 +325,6 @@ Invalid keys are automatically filtered and will not cause Secret creation failu
 
 ### General Debugging Tips
 
-1. **Enable verbose logging**: `kubectl edit deployment ack-secret-manager`, add parameter `--v=4`
+1. **Check controller logs**: `kubectl logs -l app=ack-secret-manager --tail=100` to view template processing details and errors (the component does not provide an additional verbosity flag)
 2. **Step-by-step verification**: Don't write complex templates all at once; verify each step's output progressively
 3. **Reference test cases**: Check `test/e2e/template_test.go` and `test/e2e/advanced_template_test.go` for more correct usage examples

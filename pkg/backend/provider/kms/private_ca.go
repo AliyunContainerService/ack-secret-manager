@@ -681,6 +681,6 @@ var RegionIdAndCaMap = map[string]string{
 	"ap-southeast-7":        thaCa,
 	"cn-heyuan-acdr-1":      hyaCa,
 
-	// 预发
+	// pre-release environment
 	"pre-env": preEnvCa,
 }

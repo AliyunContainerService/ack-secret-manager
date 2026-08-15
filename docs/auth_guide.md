@@ -31,7 +31,7 @@ ack-secret-manager supports the following 5 authentication methods:
 > - **Environment Variables** method: Authentication parameters are injected through Helm values or helm --set, applied at the component level, ExternalSecret doesn't need to specify `secretStoreRef`
 > - **SecretStore** method: Configured through SecretStore/ClusterSecretStore CRD, ExternalSecret references via `secretStoreRef`
 > - **ServiceAccount RRSA** only supports SecretStore method (referenced via `serviceAccountRef`)
-> - **WorkerRole** automatically uses the node ECS's RAM Role, no configuration required, falls back when nothing else is configured
+> - **WorkerRole** automatically uses the node ECS's RAM Role, no configuration required, is used automatically when none of the above are configured
 
 ## Authentication Priority
 
@@ -53,13 +53,13 @@ Priority 5: WorkerRole (ECS RAM Role)
 | ---------- | -------------- | ---------------------- | ------------------------------------------------------------ | ------------------------------------------------------------ |
 | 1 (highest) | ServiceAccount RRSA | SecretStore | SecretStore configured with `serviceAccountRef` | Controller reads target ServiceAccount annotations, obtains credentials via OIDC dynamic token, highest security |
 | 2 | RRSA | Env Vars / SecretStore | `ramRoleARN` + `oidcProviderARN` configured | Uses component-level OIDC token for temporary credentials |
-| 3 | AK AssumeRole | Env Vars / SecretStore | `accessKey` + `accessKeySecret` + `ramRoleARN` configured | Uses AK to log in, then AssumeRole for temporary credentials |
+| 3 | AK AssumeRole | Env Vars / SecretStore | `accessKey` + `accessKeySecret` + `ramRoleARN` configured (`ramRoleSessionName` is optional) | Uses AK to log in, then AssumeRole for temporary credentials |
 | 4 | Pure AK | Env Vars / SecretStore | Only `accessKey` + `accessKeySecret` configured | Uses static AK/SK directly |
-| 5 (lowest) | WorkerRole | Default | Falls back automatically when none of the above are configured | Uses the node ECS instance's RAM Role |
+| 5 (lowest) | WorkerRole | Default | Is used automatically when none of the above are configured | Uses the node ECS instance's RAM Role |
 
 **Important Notes**:
 
-- The authentication chain tries each provider's **credential retrieval** in priority order; when the previous authentication method fails to retrieve credentials (e.g., OIDC token file does not exist), it falls back to the next
+- The authentication chain **selects an authentication tier** in priority order: it only moves to the next tier when the current tier's prerequisites are missing (the tier is not enabled); a credential retrieval failure (e.g., missing token file, STS error) does NOT fall back to the next tier — the chain stays on the failed tier and reports an error
 - **Once credentials are successfully retrieved, even if they lack permissions for the target API (e.g., KMS 403), the chain will NOT fall back to the next authentication method**
 - When multiple authentication fields are configured simultaneously (e.g., both `RRSA` and `AK`), only **one** method takes effect based on the priority table above, i.e., `RRSA` authentication will be used
 - ServiceAccount RRSA uses controller-driven dynamic tokens per referenced ServiceAccount, providing ServiceAccount-level fine-grained permission isolation, highest security
@@ -77,7 +77,7 @@ Each `DataSource` in an ExternalSecret determines its authentication path based 
 
 ## Namespace Rules
 
-By default, both `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` are set to `true`, **allowing cross-namespace references**.
+By default, both `command.enableCrossNamespaceSecretStore` and `command.enableCrossNamespaceAuthRef` are set to `false`, **disabling cross-namespace references by default** for security. To enable cross-namespace references, set the corresponding parameter to `true`.
 
 **When Using SecretStore**:
 
@@ -166,7 +166,7 @@ AK AssumeRole uses AccessKey + AssumeRole to obtain temporary credentials, more 
 5. **Create Secret**: containing `id`, `secret`, and `rolearn`
 6. **Configure authentication** (choose one):
    - **Method A (Environment Variables)**: Inject `ACCESS_KEY_ID`, `SECRET_ACCESS_KEY`, and `ALICLOUD_ROLE_ARN` via `envVarsFromSecret` in Helm values, ExternalSecret doesn't need `secretStoreRef`
-   - **Method B (SecretStore)**: Create SecretStore with `accessKey` + `accessKeySecret` + `ramRoleARN` + `ramRoleSessionName`, ExternalSecret references via `secretStoreRef`
+   - **Method B (SecretStore)**: Create SecretStore with `accessKey` + `accessKeySecret` + `ramRoleARN` (+ optional `ramRoleSessionName`; when omitted, the component default session name `ack-secret-manager` is used), ExternalSecret references via `secretStoreRef`
 
 ### 3.3 Complete Example
 

@@ -40,9 +40,15 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	err := r.Get(ctx, req.NamespacedName, secret)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			return ctrl.Result{}, nil
+			// The secret was deleted: reference matching only needs name/namespace,
+			// so construct a synthetic object and still trigger referencing stores.
+			log.Info("Secret not found, treating as a delete event for reference matching")
+			secret = &corev1.Secret{}
+			secret.Name = req.Name
+			secret.Namespace = req.Namespace
+		} else {
+			return ctrl.Result{}, err
 		}
-		return ctrl.Result{}, err
 	}
 
 	// Find all SecretStore and ClusterSecretStore objects that reference this secret
@@ -60,7 +66,7 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 
 	// Trigger reconcile for each referencing store
 	for _, store := range secretStoreList.Items {
-		if r.secretIsReferenced(secret, &store.Spec) {
+		if r.secretIsReferenced(secret, &store.Spec, store.Namespace) {
 			log.Info("Triggering reconcile for SecretStore", "store", store.Name, "namespace", store.Namespace)
 			err := r.triggerStoreReconcile(ctx, &store)
 			if err != nil {
@@ -82,20 +88,22 @@ func (r *SecretReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctr
 	return ctrl.Result{}, nil
 }
 
-// secretIsReferenced checks if a secret is referenced by the store spec
-func (r *SecretReconciler) secretIsReferenced(secret *corev1.Secret, spec *api.SecretStoreSpec) bool {
+// secretIsReferenced checks if a secret is referenced by the store spec.
+// storeNamespace is the namespace of the SecretStore owning the spec, used to
+// resolve references that omit the namespace field.
+func (r *SecretReconciler) secretIsReferenced(secret *corev1.Secret, spec *api.SecretStoreSpec, storeNamespace string) bool {
 	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
-		if r.checkSecret(secret, spec.KMS.KMS.AccessKey) ||
-			r.checkSecret(secret, spec.KMS.KMS.AccessKeySecret) {
+		if r.checkSecret(secret, spec.KMS.KMS.AccessKey, storeNamespace) ||
+			r.checkSecret(secret, spec.KMS.KMS.AccessKeySecret, storeNamespace) {
 			return true
 		}
 	}
 
 	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
-		if r.checkSecret(secret, spec.OOS.OOS.AccessKey) ||
-			r.checkSecret(secret, spec.OOS.OOS.AccessKeySecret) {
+		if r.checkSecret(secret, spec.OOS.OOS.AccessKey, storeNamespace) ||
+			r.checkSecret(secret, spec.OOS.OOS.AccessKeySecret, storeNamespace) {
 			return true
 		}
 	}
@@ -103,20 +111,22 @@ func (r *SecretReconciler) secretIsReferenced(secret *corev1.Secret, spec *api.S
 	return false
 }
 
-// serviceAccountIsReferencedByClusterStore checks if a service account is referenced by the cluster store spec
+// secretIsReferencedByClusterStore checks if a secret is referenced by the cluster store spec.
+// ClusterSecretStore is cluster-scoped, so references must specify the namespace;
+// an empty reference namespace resolves to "" and never matches a namespaced secret.
 func (r *SecretReconciler) secretIsReferencedByClusterStore(secret *corev1.Secret, spec *api.ClusterSecretStoreSpec) bool {
 	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
-		if r.checkSecret(secret, spec.KMS.KMS.AccessKey) ||
-			r.checkSecret(secret, spec.KMS.KMS.AccessKeySecret) {
+		if r.checkSecret(secret, spec.KMS.KMS.AccessKey, "") ||
+			r.checkSecret(secret, spec.KMS.KMS.AccessKeySecret, "") {
 			return true
 		}
 	}
 
 	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
-		if r.checkSecret(secret, spec.OOS.OOS.AccessKey) ||
-			r.checkSecret(secret, spec.OOS.OOS.AccessKeySecret) {
+		if r.checkSecret(secret, spec.OOS.OOS.AccessKey, "") ||
+			r.checkSecret(secret, spec.OOS.OOS.AccessKeySecret, "") {
 			return true
 		}
 	}
@@ -124,15 +134,20 @@ func (r *SecretReconciler) secretIsReferencedByClusterStore(secret *corev1.Secre
 	return false
 }
 
-// checkSecret checks if a secret reference matches the given secret
-func (r *SecretReconciler) checkSecret(secret *corev1.Secret, ref *api.SecretRef) bool {
+// checkSecret checks if a secret reference matches the given secret.
+// storeNamespace is used as the expected namespace when ref.Namespace is omitted,
+// mirroring the auth chain which defaults an empty reference namespace to the
+// store's own namespace.
+func (r *SecretReconciler) checkSecret(secret *corev1.Secret, ref *api.SecretRef, storeNamespace string) bool {
 	if ref == nil {
 		return false
 	}
 
-	// For SecretStore, if ref.Namespace is not specified, it defaults to the store's namespace
-	// But in practice, Secret always has a namespace specified when used with SecretStore
-	return secret.Name == ref.Name && secret.Namespace == ref.Namespace
+	expectedNamespace := ref.Namespace
+	if expectedNamespace == "" {
+		expectedNamespace = storeNamespace
+	}
+	return secret.Name == ref.Name && secret.Namespace == expectedNamespace
 }
 
 // triggerStoreReconcile triggers a reconcile for a SecretStore by updating its annotation

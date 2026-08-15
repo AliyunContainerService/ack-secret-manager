@@ -89,6 +89,7 @@ spec:
 # Scenario 3: Multi-Environment Configuration Management (templateFrom + Conditional Logic + KeysAndValues)
 # ============================================================================
 
+---
 # Step 1: Create environment template ConfigMap
 apiVersion: v1
 kind: ConfigMap

@@ -24,8 +24,8 @@ command:
   cleanupSecretOnFailure: false
   processClusterSecretStore: true
   processClusterExternalSecret: true
-  enableCrossNamespaceSecretStore: true
-  enableCrossNamespaceAuthRef: true
+  enableCrossNamespaceSecretStore: false
+  enableCrossNamespaceAuthRef: false
   aliuid:
   clusterId:
 # watchamespaces:
@@ -82,7 +82,7 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.6.3
+  tag: v0.6.6
   pullPolicy: IfNotPresent
 
 cleanupImage:

@@ -13,24 +13,16 @@ package e2e
 
 import (
 	"context"
-	"fmt"
-	"strings"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
+	appsv1 "k8s.io/api/apps/v1"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-)
-
-const (
-	// ackSecretManagerDeploymentName is the name of the ack-secret-manager Deployment.
-	ackSecretManagerDeploymentName = "ack-secret-manager"
-	// ackSecretManagerNamespace is the namespace where ack-secret-manager is deployed.
-	ackSecretManagerNamespace = "kube-system"
 )
 
 var _ = Describe("Cross-account Sync E2E", func() {
@@ -40,44 +32,20 @@ var _ = Describe("Cross-account Sync E2E", func() {
 	)
 
 	BeforeEach(func() {
+		// Cross-account resources are only created when CROSS_ACCOUNT_ID,
+		// CROSS_ACCOUNT_ACCESS_KEY_ID and CROSS_ACCOUNT_ACCESS_KEY_SECRET are configured
+		// (see ResourceManager.CreateRamRoleForCrossAccount / CreateRemoteKMSCredential,
+		// which skip gracefully otherwise). Without them both variables stay
+		// empty and every spec in this suite must be Skipped.
+		if CrossAccountKMSSecretName == "" || RAMRoleArnForCrossAccount == "" {
+			Skip("cross-account resources not configured (created by GlobalResourceManager.SetupTestResources; true cross-account mode requires CROSS_ACCOUNT_ID, CROSS_ACCOUNT_ACCESS_KEY_ID and CROSS_ACCOUNT_ACCESS_KEY_SECRET env vars)")
+		}
 		testNamespace = createTestNamespace(ctx, "test-crossacct-"+getRandString())
 	})
 
 	AfterEach(func() {
 		deleteTestNamespace(ctx, testNamespace)
 	})
-
-	// validateClusterSecretStoreReady is a helper to wait for ClusterSecretStore to become ready
-	validateClusterSecretStoreReady := func(store *api.ClusterSecretStore) {
-		var lastStoreError string
-		Eventually(func() bool {
-			createdStore := &api.ClusterSecretStore{}
-			err := k8sClient.Get(ctx, types.NamespacedName{
-				Name: store.Name,
-			}, createdStore)
-			if err != nil {
-				lastStoreError = fmt.Sprintf("Error getting ClusterSecretStore: %v", err)
-				return false
-			}
-			if len(createdStore.Status.Conditions) == 0 {
-				lastStoreError = "ClusterSecretStore has no status conditions"
-				return false
-			}
-			for _, condition := range createdStore.Status.Conditions {
-				if condition.Type != api.SecretStoreReady || condition.Status != corev1.ConditionTrue {
-					lastStoreError = fmt.Sprintf("SecretStoreReady condition type is %s, expected Ready, status is %s, expected True, reason: %s, message: %s", condition.Type, string(condition.Status), condition.Reason, condition.Message)
-					return false
-				}
-			}
-			return true
-		}).WithTimeout(time.Minute*2).WithPolling(time.Second*5).Should(BeTrue(),
-			func() string {
-				if lastStoreError != "" {
-					return fmt.Sprintf("ClusterSecretStore should eventually become ready, but: %s", lastStoreError)
-				}
-				return "ClusterSecretStore should eventually become ready"
-			})
-	}
 
 	// createCrossAccountExternalSecret creates an ExternalSecret targeting the cross-account KMS secret
 	createCrossAccountExternalSecret := func(namespace, storeName, storeKind, secretName string) *api.ExternalSecret {
@@ -104,6 +72,25 @@ var _ = Describe("Cross-account Sync E2E", func() {
 		}
 		Expect(k8sClient.Create(ctx, es)).To(Succeed())
 		return es
+	}
+
+	// crossAccountSecretPayload is the exact SecretData stored in the remote
+	// KMS secret by ResourceManager.CreateRemoteKMSCredential (see
+	// resource_manager_test.go). Asserting it proves the synced Secret carries
+	// the real cross-account payload, not just that a Secret object exists.
+	const crossAccountSecretPayload = "cross-account-test-secret-data"
+
+	// assertCrossAccountSecretContent verifies the synced Secret (named after
+	// the ExternalSecret) carries the expected payload under the data source key.
+	assertCrossAccountSecretContent := func(es *api.ExternalSecret, dataKey string) {
+		syncedSecret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Namespace: es.Namespace,
+			Name:      es.Name,
+		}, syncedSecret)).To(Succeed(), "synced Secret should exist for content validation")
+		Expect(syncedSecret.Data).To(HaveKey(dataKey), "synced Secret should contain the data source key")
+		Expect(string(syncedSecret.Data[dataKey])).To(Equal(crossAccountSecretPayload),
+			"synced Secret content should equal the remote KMS secret payload")
 	}
 
 	// Context 1: ServiceAccount RRSA + cross-account
@@ -133,7 +120,7 @@ var _ = Describe("Cross-account Sync E2E", func() {
 				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
 			})
 
-			validateClusterSecretStoreReady(clusterSecretStore)
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
 
 			By("creating ExternalSecret targeting cross-account KMS secret")
 			es := createCrossAccountExternalSecret(testNamespace.Name, clusterSecretStore.Name, ResourceClusterSecretStore, "crossacct-sa-secret")
@@ -143,6 +130,9 @@ var _ = Describe("Cross-account Sync E2E", func() {
 
 			By("waiting for the secret to be synced via SA RRSA + cross-account")
 			validateExternalSecretSucceededAndSecretCreated(ctx, es.Namespace, es.Name, time.Second*60)
+
+			By("verifying the synced Secret carries the cross-account payload")
+			assertCrossAccountSecretContent(es, "crossacct-sa-secret")
 		})
 	})
 
@@ -171,7 +161,7 @@ var _ = Describe("Cross-account Sync E2E", func() {
 				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
 			})
 
-			validateClusterSecretStoreReady(clusterSecretStore)
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
 
 			By("creating ExternalSecret targeting cross-account KMS secret")
 			es := createCrossAccountExternalSecret(testNamespace.Name, clusterSecretStore.Name, ResourceClusterSecretStore, "crossacct-oidc-secret")
@@ -181,6 +171,9 @@ var _ = Describe("Cross-account Sync E2E", func() {
 
 			By("waiting for the secret to be synced via OIDC + cross-account")
 			validateExternalSecretSucceededAndSecretCreated(ctx, es.Namespace, es.Name, time.Second*60)
+
+			By("verifying the synced Secret carries the cross-account payload")
+			assertCrossAccountSecretContent(es, "crossacct-oidc-secret")
 		})
 	})
 
@@ -189,17 +182,8 @@ var _ = Describe("Cross-account Sync E2E", func() {
 	Context("AK AssumeRole + cross-account sync", func() {
 		It("Should sync secret using AK AssumeRole auth with remoteRamRoleARN", func() {
 			By("creating Secret with AK/SK for role play")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "crossacct-ak-role-secret-" + getRandString(),
-					Namespace: testNamespace.Name,
-				},
-				Data: map[string][]byte{
-					"accessKeyId":     []byte(RAMUserAccessKeyIDForRolePlay),
-					"accessKeySecret": []byte(RAMUserAccessKeySecretForRolePlay),
-				},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			secret := createAKSecret(ctx, testNamespace.Name, "crossacct-ak-role-secret-"+getRandString(),
+				RAMUserAccessKeyIDForRolePlay, RAMUserAccessKeySecretForRolePlay)
 
 			By("creating ClusterSecretStore with AK AssumeRole + remoteRamRoleARN")
 			clusterSecretStore := &api.ClusterSecretStore{
@@ -232,7 +216,7 @@ var _ = Describe("Cross-account Sync E2E", func() {
 				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
 			})
 
-			validateClusterSecretStoreReady(clusterSecretStore)
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
 
 			By("creating ExternalSecret targeting cross-account KMS secret")
 			es := createCrossAccountExternalSecret(testNamespace.Name, clusterSecretStore.Name, ResourceClusterSecretStore, "crossacct-ak-role-secret")
@@ -242,26 +226,20 @@ var _ = Describe("Cross-account Sync E2E", func() {
 
 			By("waiting for the secret to be synced via AK AssumeRole + cross-account")
 			validateExternalSecretSucceededAndSecretCreated(ctx, es.Namespace, es.Name, time.Second*60)
+
+			By("verifying the synced Secret carries the cross-account payload")
+			assertCrossAccountSecretContent(es, "crossacct-ak-role-secret")
 		})
 	})
 
 	// Context 4: AK basic (no AssumeRole) + cross-account
-	// Auth chain: AK → direct KMS access (local account) → AssumeRole(RemoteRAMRoleARN) → final creds
+	// Auth chain: AK (basic creds, no local AssumeRole) -> AssumeRole(RemoteRAMRoleARN) -> final creds -> KMS access in the target account
 	// Note: AK basic + cross-account requires the AK user has sts:AssumeRole permission for the remote role
 	Context("AK basic + cross-account sync", func() {
 		It("Should sync secret using AK basic auth with remoteRamRoleARN", func() {
 			By("creating Secret with AK/SK for basic auth user")
-			secret := &corev1.Secret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "crossacct-ak-basic-secret-" + getRandString(),
-					Namespace: testNamespace.Name,
-				},
-				Data: map[string][]byte{
-					"accessKeyId":     []byte(RAMUserAccessKeyID),
-					"accessKeySecret": []byte(RAMUserAccessKeySecret),
-				},
-			}
-			Expect(k8sClient.Create(ctx, secret)).To(Succeed())
+			secret := createAKSecret(ctx, testNamespace.Name, "crossacct-ak-basic-secret-"+getRandString(),
+				RAMUserAccessKeyID, RAMUserAccessKeySecret)
 
 			By("creating ClusterSecretStore with AK basic + remoteRamRoleARN")
 			clusterSecretStore := &api.ClusterSecretStore{
@@ -293,7 +271,7 @@ var _ = Describe("Cross-account Sync E2E", func() {
 				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
 			})
 
-			validateClusterSecretStoreReady(clusterSecretStore)
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
 
 			By("creating ExternalSecret targeting cross-account KMS secret")
 			es := createCrossAccountExternalSecret(testNamespace.Name, clusterSecretStore.Name, ResourceClusterSecretStore, "crossacct-ak-basic-secret")
@@ -303,6 +281,9 @@ var _ = Describe("Cross-account Sync E2E", func() {
 
 			By("waiting for the secret to be synced via AK basic + cross-account")
 			validateExternalSecretSucceededAndSecretCreated(ctx, es.Namespace, es.Name, time.Second*60)
+
+			By("verifying the synced Secret carries the cross-account payload")
+			assertCrossAccountSecretContent(es, "crossacct-ak-basic-secret")
 		})
 	})
 
@@ -315,18 +296,41 @@ var _ = Describe("Cross-account Sync E2E", func() {
 		It("should sync cross-account secret using WorkerRole + remote role assumption", func() {
 			ctx := context.TODO()
 
-			if CrossAccountKMSSecretName == "" || RAMRoleArnForCrossAccount == "" {
-				Skip("cross-account resources not configured (CROSS_ACCOUNT_KMS_SECRET_NAME, RAM_ROLE_ARN_FOR_CROSS_ACCOUNT)")
+			if !workerRoleEnabledInDeployment(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName) {
+				Skip("WorkerRole authentication is disabled on the ack-secret-manager Deployment (--enable-worker-role=false); the WorkerRole auth provider is not part of the auth chain, so this test cannot validate it")
 			}
 
+			// The globally injected ENV RRSA vars are temporarily removed below so
+			// WorkerRole (priority 5) is genuinely exercised; the baseline is
+			// restored afterwards via DeferCleanup.
 			By("getting the current ack-secret-manager Deployment")
 			deployment, err := clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(
 				ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
 			Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment")
 
-			// Save original env vars for restoration after test
+			// Snapshot the FULL baseline (including the RRSA env vars injected by
+			// BeforeSuite) BEFORE removing them: after the test, restoreDeploymentEnv
+			// reinstates the complete baseline in a single rollout, and
+			// restoreRRSAEnvBaseline degrades to an idempotent no-op (needsUpdate=false).
 			originalEnv := make([]corev1.EnvVar, len(deployment.Spec.Template.Spec.Containers[0].Env))
 			copy(originalEnv, deployment.Spec.Template.Spec.Containers[0].Env)
+
+			// Register the restore BEFORE the mutation: removeRRSAEnvTemporarily may
+			// hard-fail mid-way (e.g. rollout timeout after a successful Update), and a
+			// DeferCleanup registered after it would never run, permanently stripping
+			// the RRSA env baseline. restoreRRSAEnvBaseline is idempotent (no-op when
+			// the baseline is unchanged), so early registration is safe.
+			DeferCleanup(func() {
+				By("restoring RRSA env baseline on the Deployment")
+				restoreRRSAEnvBaseline(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+			})
+			By("temporarily removing RRSA env vars so the auth chain falls through to WorkerRole")
+			removeRRSAEnvTemporarily(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+
+			// Re-fetch the Deployment: the env removal above changed the pod template.
+			deployment, err = clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(
+				ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
+			Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment after RRSA env removal")
 
 			// Check if ALICLOUD_REMOTE_ROLE_ARN is already set (from Helm values)
 			var hasRemoteRoleARN bool
@@ -339,30 +343,22 @@ var _ = Describe("Cross-account Sync E2E", func() {
 
 			if !hasRemoteRoleARN {
 				By("patching Deployment to add ALICLOUD_REMOTE_ROLE_ARN and ALICLOUD_REMOTE_ROLE_SESSION_NAME")
-				// Add remote role env vars to the container
-				newEnv := append(deployment.Spec.Template.Spec.Containers[0].Env,
-					corev1.EnvVar{Name: "ALICLOUD_REMOTE_ROLE_ARN", Value: RAMRoleArnForCrossAccount},
-					corev1.EnvVar{Name: "ALICLOUD_REMOTE_ROLE_SESSION_NAME", Value: "cross-account-e2e-test"},
-				)
-				deployment.Spec.Template.Spec.Containers[0].Env = newEnv
 
-				// Add restart annotation to force rolling restart
-				if deployment.Spec.Template.Annotations == nil {
-					deployment.Spec.Template.Annotations = make(map[string]string)
-				}
-				deployment.Spec.Template.Annotations["kubectl.kubernetes.io/restartedAt"] = time.Now().Format(time.RFC3339)
-
-				_, err = clientset.AppsV1().Deployments(ackSecretManagerNamespace).Update(
-					ctx, deployment, metav1.UpdateOptions{})
-				Expect(err).NotTo(HaveOccurred(), "failed to update Deployment with remote role env vars")
-
-				By("waiting for Deployment rollout to complete")
-				waitForDeploymentRollout(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
-
-				// Register cleanup to restore original Deployment
+				// Register cleanup BEFORE the mutation: a hard failure during Update or
+				// rollout must not leave the patched env vars without a restore.
+				// restoreDeploymentEnv reinstates the full baseline and is safe even
+				// if the Update below never happened.
 				DeferCleanup(func() {
 					By("restoring original Deployment env vars")
 					restoreDeploymentEnv(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName, originalEnv)
+				})
+
+				// Add remote role env vars to the container and roll out
+				updateDeploymentAndRollout(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName, func(dep *appsv1.Deployment) {
+					dep.Spec.Template.Spec.Containers[0].Env = append(dep.Spec.Template.Spec.Containers[0].Env,
+						corev1.EnvVar{Name: "ALICLOUD_REMOTE_ROLE_ARN", Value: RAMRoleArnForCrossAccount},
+						corev1.EnvVar{Name: "ALICLOUD_REMOTE_ROLE_SESSION_NAME", Value: "cross-account-e2e-test"},
+					)
 				})
 			} else {
 				By("ALICLOUD_REMOTE_ROLE_ARN already configured in Deployment, skipping patch")
@@ -371,10 +367,11 @@ var _ = Describe("Cross-account Sync E2E", func() {
 			By("creating ExternalSecret without SecretStoreRef (WorkerRole fallback + cross-account)")
 			es := &api.ExternalSecret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("wr-crossacct-secret-%s", strings.ToLower(ResourceClusterSecretStore)),
+					Name:      "wr-crossacct-secret-" + getRandString(),
 					Namespace: testNamespace.Name,
 				},
 				Spec: api.ExternalSecretSpec{
+					Provider: "kms",
 					Data: []api.DataSource{
 						{
 							Key:  CrossAccountKMSSecretName,

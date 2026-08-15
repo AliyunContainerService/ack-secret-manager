@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"reflect"
 	"regexp"
-	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -13,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -364,9 +364,13 @@ func (r *CommonReconciler) needRecreateClient(clientName string, generation int6
 
 // RecreateClient recreates the client for the SecretStore
 func (r *CommonReconciler) recreateClient(ctx context.Context, log logr.Logger, clientName string, kmsProvider, oosProvider backend.Provider, store StoreInterface) error {
-	// Clean up the old client if it exists
-	kmsProvider.Delete(clientName)
-	oosProvider.Delete(clientName)
+	// Clean up the old clients: the plain clientName client plus every
+	// endpoint-specific composite ("clientName#endpoint") variant created
+	// on-demand by the ExternalSecret controller. Composite variants are not
+	// re-created here; they are rebuilt on demand in later ExternalSecret
+	// reconciles with the refreshed store credentials.
+	kmsProvider.DeletePrefixed(clientName)
+	oosProvider.DeletePrefixed(clientName)
 
 	// Create kubernetes.Interface from rest.Config for dynamic token acquisition
 	var kubeClient kubernetes.Interface
@@ -385,15 +389,27 @@ func (r *CommonReconciler) recreateClient(ctx context.Context, log logr.Logger, 
 		KubeClient: kubeClient,
 	}
 
-	// Create the appropriate client based on provider type and store type
+	// Create the appropriate client based on provider type and store type.
+	// The branch decision uses the same inner-field check as validateStoreSpec
+	// (e.g. an empty `kms: {}` block must not select the KMS branch), so any
+	// configuration that passed validation is guaranteed to enter exactly one
+	// provider branch here.
 	spec := store.GetSpec()
-	if spec.GetKMS() != nil {
+	kmsConfigured := spec.GetKMS() != nil && spec.GetKMS().KMS != nil
+	oosConfigured := spec.GetOOS() != nil && spec.GetOOS().OOS != nil
+	if kmsConfigured {
+		if oosConfigured {
+			klog.Warningf("both KMS and OOS providers are configured for store %s/%s, KMS takes precedence",
+				store.GetNamespace(), store.GetName())
+		}
 		return r.createKMSClient(ctx, log, store, wrapperClient, clientName, kmsProvider)
-	} else if spec.GetOOS() != nil {
+	} else if oosConfigured {
 		return r.createOOSClient(ctx, log, store, wrapperClient, clientName, oosProvider)
 	}
 
-	return fmt.Errorf("no valid provider found")
+	// validateStoreSpec rejects specs without a configured provider before
+	// recreateClient is called, so reaching here indicates an unexpected state.
+	return fmt.Errorf("no valid provider found for store %s/%s", store.GetNamespace(), store.GetName())
 }
 
 // createKMSClient creates a KMS client
@@ -476,9 +492,11 @@ func (r *CommonReconciler) createOOSClient(ctx context.Context, log logr.Logger,
 	return nil
 }
 
-// SetCondition sets a condition in the store status
+// SetCondition sets a condition in the store status.
+// LastTransitionTime is only refreshed when the condition actually transitions
+// (Type/Status/Reason/Message changed); otherwise the original timestamp is preserved.
 func (r *CommonReconciler) setCondition(store StoreInterface, condition v1alpha1.SecretStoreStatusCondition) {
-	condition.LastTransitionTime = metav1.Now()
+	now := metav1.Now()
 	condition.ObservedGeneration = store.GetGeneration()
 
 	status := store.GetStatus()
@@ -487,18 +505,26 @@ func (r *CommonReconciler) setCondition(store StoreInterface, condition v1alpha1
 	// Check if condition already exists
 	for i, c := range conditions {
 		if c.Type == condition.Type {
-			// Update existing condition
+			if c.Status == condition.Status && c.Reason == condition.Reason && c.Message == condition.Message {
+				// Preserve the original transition time when nothing changed
+				condition.LastTransitionTime = c.LastTransitionTime
+			} else {
+				// Condition is transitioning, refresh the transition time
+				condition.LastTransitionTime = now
+			}
 			conditions[i] = condition
 			return
 		}
 	}
 
-	// Add new condition
+	// Add new condition with current time
+	condition.LastTransitionTime = now
 	conditions = append(conditions, condition)
 	status.SetConditions(conditions)
 }
 
-// StatusEqual compares two SecretStoreStatus objects
+// StatusEqual compares two SecretStoreStatus objects, ignoring LastTransitionTime
+// so that unchanged conditions do not trigger redundant status writes.
 func (r *CommonReconciler) statusEqual(old, new StoreStatusInterface) bool {
 	if old.GetCapabilities() != new.GetCapabilities() {
 		return false
@@ -511,9 +537,14 @@ func (r *CommonReconciler) statusEqual(old, new StoreStatusInterface) bool {
 		return false
 	}
 
-	// Compare conditions (assuming they are in the same order)
+	// Compare conditions (assuming they are in the same order),
+	// ignoring LastTransitionTime which is managed by setCondition
 	for i := range originConditions {
-		if !reflect.DeepEqual(originConditions[i], destConditions[i]) {
+		o := originConditions[i]
+		d := destConditions[i]
+		o.LastTransitionTime = metav1.Time{}
+		d.LastTransitionTime = metav1.Time{}
+		if !reflect.DeepEqual(o, d) {
 			return false
 		}
 	}
@@ -532,6 +563,13 @@ func (r *CommonReconciler) handleDeletion(log logr.Logger, finalizers []string, 
 		finalizerName = clusterSecretFinalizer
 	}
 
+	// Clean up the provider clients before removing the finalizer. ClientManager.DeletePrefixed
+	// is an idempotent, void operation with no failure path, so this best-effort
+	// cleanup guarantees that provider clients (plain and every composite
+	// "clientName#endpoint" variant) do not leak on the deletion path.
+	kmsProvider.DeletePrefixed(clientName)
+	oosProvider.DeletePrefixed(clientName)
+
 	if utils.Contains(finalizers, finalizerName) {
 		// Remove finalizer
 		log.Info("removing finalizer", "currentFinalizers", finalizers)
@@ -546,14 +584,13 @@ func (r *CommonReconciler) handleDeletion(log logr.Logger, finalizers []string, 
 		}
 	}
 
-	// Clean up the client when the resource is deleted
-	kmsProvider.Delete(clientName)
-	oosProvider.Delete(clientName)
 	return reconcile.Result{}, nil
 }
 
-// updateStatus updates the status of the store to indicate success
-func (r *CommonReconciler) updateStatus(logger logr.Logger, store StoreInterface, condition v1alpha1.SecretStoreStatusCondition) (bool, error) {
+// updateStatus updates the status of the store to indicate success.
+// Returns (true, nil) when the status was written, (false, nil) when the
+// status was already up-to-date (no write performed), and (false, err) on failure.
+func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger, store StoreInterface, condition v1alpha1.SecretStoreStatusCondition) (bool, error) {
 	var oldStatus StoreStatusInterface
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
@@ -589,70 +626,63 @@ func (r *CommonReconciler) updateStatus(logger logr.Logger, store StoreInterface
 			return false, fmt.Errorf("unknown store type: %T", store)
 		}
 
-		// Retry logic for handling resource version conflicts
-		maxRetries := 3
-		for i := 0; i < maxRetries; i++ {
-			// Get fresh copy of the object
-			var freshObj client.Object
-			switch store.(type) {
-			case *SecretStoreWrapper:
-				freshObj = &v1alpha1.SecretStore{}
-			case *ClusterSecretStoreWrapper:
-				freshObj = &v1alpha1.ClusterSecretStore{}
-			}
+		// Get a fresh copy of the object to avoid resource version conflicts
+		var freshObj client.Object
+		switch store.(type) {
+		case *SecretStoreWrapper:
+			freshObj = &v1alpha1.SecretStore{}
+		case *ClusterSecretStoreWrapper:
+			freshObj = &v1alpha1.ClusterSecretStore{}
+		}
 
-			if err := r.Get(context.Background(), objKey, freshObj); err != nil {
-				logger.Error(err, "failed to get fresh object for status update")
-				return false, err
-			}
-
-			// Update the status on the fresh object
-			switch t := freshObj.(type) {
-			case *v1alpha1.SecretStore:
-				modifiedStore := store.(*SecretStoreWrapper).SecretStore
-				t.Status = *modifiedStore.Status.DeepCopy()
-			case *v1alpha1.ClusterSecretStore:
-				modifiedStore := store.(*ClusterSecretStoreWrapper).ClusterSecretStore
-				t.Status = *modifiedStore.Status.DeepCopy()
-			}
-
-			// Attempt to update the status subresource
-			err := r.Status().Update(context.Background(), freshObj)
-			if err == nil {
-				logger.Info("successfully updated store status subresource")
-				return true, nil
-			}
-
-			// If it's a conflict error, retry after getting the latest version
-			if errors.IsConflict(err) {
-				if i < maxRetries-1 {
-					logger.V(2).Info("conflict when updating status, retrying", "attempt", i+1, "error", err)
-					time.Sleep(100 * time.Millisecond) // Brief pause before retry
-					continue
-				}
-			}
-
-			logger.Error(err, "failed to update store status after retries")
+		if err := r.Get(ctx, objKey, freshObj); err != nil {
+			logger.Error(err, "failed to get fresh object for status update")
 			return false, err
 		}
+
+		// Update the status on the fresh object
+		switch t := freshObj.(type) {
+		case *v1alpha1.SecretStore:
+			modifiedStore := store.(*SecretStoreWrapper).SecretStore
+			t.Status = *modifiedStore.Status.DeepCopy()
+		case *v1alpha1.ClusterSecretStore:
+			modifiedStore := store.(*ClusterSecretStoreWrapper).ClusterSecretStore
+			t.Status = *modifiedStore.Status.DeepCopy()
+		}
+
+		// Attempt to update the status subresource. On conflict errors we return
+		// the error and let the workqueue retry with exponential backoff instead
+		// of blocking the reconcile goroutine with a synchronous sleep.
+		err := r.Status().Update(ctx, freshObj)
+		if err == nil {
+			logger.Info("successfully updated store status subresource")
+			return true, nil
+		}
+
+		if errors.IsConflict(err) {
+			logger.V(2).Info("conflict when updating status, will be retried by workqueue backoff", "error", err)
+		} else {
+			logger.Error(err, "failed to update store status")
+		}
+		return false, err
 	}
 
 	return false, nil
 }
 
 // updateStatusWithReady updates the status to indicate the store is ready
-func (r *CommonReconciler) updateStatusWithReady(logger logr.Logger, store StoreInterface) (bool, error) {
+func (r *CommonReconciler) updateStatusWithReady(ctx context.Context, logger logr.Logger, store StoreInterface) (bool, error) {
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:   v1alpha1.SecretStoreReady,
 		Status: corev1.ConditionTrue,
 		Reason: v1alpha1.ReasonStoreValid,
 	}
 
-	return r.updateStatus(logger, store, condition)
+	return r.updateStatus(ctx, logger, store, condition)
 }
 
 // updateStatusWithError updates the status with an error condition
-func (r *CommonReconciler) updateStatusWithError(logger logr.Logger, store StoreInterface, reason, message string) error {
+func (r *CommonReconciler) updateStatusWithError(ctx context.Context, logger logr.Logger, store StoreInterface, reason, message string) error {
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:    v1alpha1.SecretStoreReady,
 		Status:  corev1.ConditionFalse,
@@ -660,13 +690,13 @@ func (r *CommonReconciler) updateStatusWithError(logger logr.Logger, store Store
 		Message: message,
 	}
 
-	_, err := r.updateStatus(logger, store, condition)
+	_, err := r.updateStatus(ctx, logger, store, condition)
 	return err
 }
 
 // updateStatusWithReadyAndGeneration updates the status to indicate the store is ready
 // with specified capabilities and records the observed generation
-func (r *CommonReconciler) updateStatusWithReadyAndGeneration(logger logr.Logger, store StoreInterface, capabilities v1alpha1.SecretStoreCapabilities) error {
+func (r *CommonReconciler) updateStatusWithReadyAndGeneration(ctx context.Context, logger logr.Logger, store StoreInterface, capabilities v1alpha1.SecretStoreCapabilities) error {
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:               v1alpha1.SecretStoreReady,
 		Status:             corev1.ConditionTrue,
@@ -675,6 +705,6 @@ func (r *CommonReconciler) updateStatusWithReadyAndGeneration(logger logr.Logger
 	}
 
 	store.GetStatus().SetCapabilities(capabilities)
-	_, err := r.updateStatus(logger, store, condition)
+	_, err := r.updateStatus(ctx, logger, store, condition)
 	return err
 }

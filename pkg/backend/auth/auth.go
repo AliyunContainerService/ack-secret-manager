@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sync"
 	"time"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
@@ -22,12 +23,13 @@ import (
 )
 
 const (
-	RamRoleARNAuthType  = "ram_role_arn"
-	AKAuthType          = "access_key"
-	EcsRamRoleAuthType  = "ecs_ram_role"
-	OidcAuthType        = "oidc_role_arn"
-	oidcRoleSessionName = "ack-secret-manager"
-	oidcTokenFilePath   = "/var/run/secrets/tokens/ack-secret-manager"
+	RamRoleARNAuthType     = "ram_role_arn"
+	AKAuthType             = "access_key"
+	EcsRamRoleAuthType     = "ecs_ram_role"
+	OidcAuthType           = "oidc_role_arn"
+	oidcRoleSessionName    = "ack-secret-manager"
+	defaultRoleSessionName = "ack-secret-manager"
+	oidcTokenFilePath      = "/var/run/secrets/tokens/ack-secret-manager"
 )
 
 // TokenOIDCProvider implements OIDC provider based on dynamic token
@@ -38,6 +40,9 @@ type TokenOIDCProvider struct {
 	roleArn         string
 	oidcProviderArn string
 	refreshPeriod   time.Duration
+
+	// mu serializes reads and updates of token/credential/expireTime/tokenExpireTime
+	mu sync.Mutex
 
 	// Fields for dynamic token refresh
 	getTokenFunc    func() (string, error)
@@ -88,9 +93,16 @@ func (p *TokenOIDCProvider) Credentials(context.Context) (*provider.Credentials,
 	}, nil
 }
 
-// GetCredential gets credential from STS service using OIDC token
+// GetCredential gets credential from STS service using OIDC token.
+// All reads and updates of the cached token/credential state are serialized
+// by p.mu: the freshness check is re-evaluated after acquiring the lock, so
+// concurrent callers never observe partially updated state and only one
+// refresh runs at a time.
 func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
-	// Define refresh threshold: refresh when 10% of validity period remains
+	p.mu.Lock()
+	defer p.mu.Unlock()
+
+	// Define refresh threshold: refresh when 20% of validity period remains
 	// This ensures that we refresh credentials proportionally to their validity duration
 	const refreshPercentage = 0.2
 
@@ -123,7 +135,8 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 			// if token refresh fails, use existing credential if still valid
 			if p.credential != nil && time.Now().Before(p.expireTime) {
 				klog.Warningf("Failed to refresh OIDC token, using existing credential: %v", err)
-				// update last token time to avoid frequent refresh attempts
+				// The cached credential is still valid: keep serving it as-is;
+				// token refresh will be retried on the next GetCredential call.
 				return p.credential, nil
 			}
 			return nil, fmt.Errorf("failed to refresh OIDC token: %v", err)
@@ -145,6 +158,13 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 	// create STS client
 	cfg := &openapi.Config{
 		Endpoint: tea.String(p.stsEndpoint),
+		// Bound the worst-case blocking time of the STS network call below.
+		// Without explicit timeouts a degraded STS endpoint could block this
+		// refresh indefinitely while holding p.mu, serializing every
+		// concurrent GetCredential caller of the same provider forever.
+		// Units are milliseconds (10s connect / 30s read).
+		ConnectTimeout: tea.Int(10 * 1000),
+		ReadTimeout:    tea.Int(30 * 1000),
 	}
 	stsClient, err := sts.NewClient(cfg)
 	if err != nil {
@@ -204,9 +224,13 @@ func getTokenExpireTime(token string) (time.Time, error) {
 }
 
 type AuthConfig struct {
-	ClientName              string
-	RoleArn                 string
-	OidcArn                 string
+	ClientName string
+	RoleArn    string
+	OidcArn    string
+	// OidcArnFromDefault reports whether OidcArn was auto-generated from
+	// cluster-id/uid; an auto-derived OidcArn combined with a complete AK
+	// pair leaves AK+AssumeRole in charge (see oidcTierAllowed).
+	OidcArnFromDefault      bool
 	AccessKey               string
 	AccessSecretKey         string
 	RoleSessionName         string
@@ -221,26 +245,68 @@ type AuthConfig struct {
 	TokenAudiences          []string
 }
 
+// NormalizeSessionNames fills the default role session name into
+// RoleSessionName and RemoteRoleSessionName when they are empty, so that the
+// AK+AssumeRole and cross-account tiers of the authentication chain are not
+// silently skipped just because a session name was omitted. It never
+// overrides explicitly configured values.
+func (a *AuthConfig) NormalizeSessionNames() {
+	if a.RoleSessionName == "" {
+		a.RoleSessionName = defaultRoleSessionName
+	}
+	if a.RemoteRoleSessionName == "" {
+		a.RemoteRoleSessionName = defaultRoleSessionName
+	}
+}
+
 func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backendp.Manager) (credential.Credential, error) {
 	providers := make([]provider.CredentialsProvider, 0)
 	var semaphoreProvider *provider.SemaphoreProvider
 
+	// Normalize session names at the entry so missing session names do not
+	// cause the AK+AssumeRole / cross-account tiers to be skipped.
+	// The authentication chain order below is unchanged.
+	a.NormalizeSessionNames()
+
+	// Fail-closed precondition, evaluated BEFORE the OIDC block: when an
+	// explicit serviceAccountRef is configured but the OIDC prerequisites
+	// are missing (OidcArn empty -- e.g. cluster-id/uid could not be
+	// resolved -- or RoleArn empty), the OIDC block below would be skipped
+	// entirely and the chain would silently fall back to lower-priority
+	// authentication methods. With an explicitly configured serviceAccountRef,
+	// SA RRSA failures are fail-closed: the ExternalSecret fails instead of
+	// silently degrading to other authentication methods.
+	if a.ServiceAccountName != "" && (a.OidcArn == "" || a.RoleArn == "") {
+		return nil, fmt.Errorf("ServiceAccount %s/%s is explicitly configured but OIDC prerequisites are missing (oidcProviderArn=%q, roleArn=%q; cluster-id/uid may be unavailable)",
+			a.ServiceAccountNamespace, a.ServiceAccountName, a.OidcArn, a.RoleArn)
+	}
+
 	// Authentication chain order: ServiceAccount RRSA -> OIDC/RRSA -> RAM Role (AK+AssumeRole) -> AccessKey -> ECS Role (WorkerRole)
 
-	// Priority 1: OIDC/RRSA authentication (ServiceAccount dynamic token or file-based token)
-	// createOIDCProvider automatically chooses:
-	//   - Dynamic token from K8s API when ServiceAccountRef is configured (highest priority)
-	//   - File-based token from environment variables otherwise
-	if a.OidcArn != "" && a.RoleArn != "" {
+	// Priority 1: OIDC/RRSA (SA dynamic token preferred over file-based token).
+	// With an auto-derived OidcArn plus a complete AK pair, AK+AssumeRole
+	// takes precedence (0.6.2 contract); explicit config is unaffected.
+	// See oidcTierAllowed.
+	oidcAllowed := a.oidcTierAllowed()
+	if !oidcAllowed && a.OidcArnFromDefault && a.AccessKey != "" && a.AccessSecretKey != "" && a.RoleArn != "" && a.ServiceAccountName == "" {
+		klog.Infof("auto-derived oidcProviderARN with complete AccessKey: AK AssumeRole takes precedence over file-based RRSA. To use RRSA instead, explicitly configure oidcProviderARN, configure serviceAccountRef, or remove the AccessKey fields.")
+	}
+	if oidcAllowed {
 		oidcProvider, err := a.createOIDCProvider(region)
 		if err != nil {
-			klog.Errorf("Failed to create OIDC provider: %v", err)
+			// When serviceAccountRef is explicitly configured, SA RRSA failures
+			// are fail-closed: return the error instead of swallowing it and
+			// falling back to lower-priority authentication methods.
+			if a.ServiceAccountName != "" {
+				return nil, fmt.Errorf("failed to create OIDC provider for ServiceAccount %s/%s: %v", a.ServiceAccountNamespace, a.ServiceAccountName, err)
+			}
+			klog.Errorf("OIDC authentication is unavailable: %v; using alternative authentication", err)
 		} else if oidcProvider != nil {
 			providers = append(providers, oidcProvider)
 			if a.ServiceAccountName != "" && a.ServiceAccountNamespace != "" {
-				klog.Infof("Added ServiceAccount RRSA provider for %s/%s (dynamic token)", a.ServiceAccountNamespace, a.ServiceAccountName)
+				klog.Infof("OIDC/RRSA authentication registered for %s/%s", a.ServiceAccountNamespace, a.ServiceAccountName)
 			} else {
-				klog.Infof("Added file-based OIDC/RRSA provider")
+				klog.Infof("OIDC/RRSA authentication registered")
 			}
 		}
 	}
@@ -297,6 +363,34 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	return cred, nil
 }
 
+// oidcTierAllowed reports whether the OIDC/RRSA tier (Priority 1) may enter
+// the authentication chain, per the explicit-intent rules restoring the
+// 0.6.2 contract. Decision order:
+//  1. OidcArn or RoleArn empty -> false (prerequisites missing).
+//  2. ServiceAccountName configured -> true (SA RRSA uses dynamic tokens).
+//  3. OidcArn explicitly configured (!OidcArnFromDefault) -> true, fail-closed.
+//  4. Incomplete AK pair -> true (dropping the tier would silently degrade).
+//  5. Auto-derived OidcArn + complete AK pair -> false (AK AssumeRole
+//     precedes auto-derived file-based RRSA); RRSA here requires an explicit
+//     oidcProviderARN (rule 3) or serviceAccountRef (rule 2).
+func (a *AuthConfig) oidcTierAllowed() bool {
+	if a.OidcArn == "" || a.RoleArn == "" {
+		return false
+	}
+	if a.ServiceAccountName != "" {
+		return true
+	}
+	if !a.OidcArnFromDefault {
+		return true
+	}
+	if a.AccessKey == "" || a.AccessSecretKey == "" {
+		return true
+	}
+	// restore 0.6.2 contract: AK AssumeRole takes precedence over
+	// auto-derived file-based RRSA
+	return false
+}
+
 // createOIDCProvider creates an OIDC provider with either dynamic token or file-based token
 func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProvider, error) {
 	// Always try to get fresh dynamic token when ServiceAccount info is configured
@@ -304,11 +398,11 @@ func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProv
 		dynamicToken, err := a.getIdentityToken()
 		if err != nil {
 			// When ServiceAccountRef is explicitly used, if dynamic token acquisition fails, return error directly
-			return nil, fmt.Errorf("failed to get dynamic token for ServiceAccount %s/%s: %v", a.ServiceAccountNamespace, a.ServiceAccountName, err)
+			return nil, fmt.Errorf("failed to obtain ServiceAccount identity token for %s/%s: %v", a.ServiceAccountNamespace, a.ServiceAccountName, err)
 		}
 
 		if dynamicToken == "" {
-			return nil, fmt.Errorf("dynamic token is empty for ServiceAccount %s/%s", a.ServiceAccountNamespace, a.ServiceAccountName)
+			return nil, fmt.Errorf("ServiceAccount identity token is empty for %s/%s", a.ServiceAccountNamespace, a.ServiceAccountName)
 		}
 
 		// Use TokenOIDCProvider to avoid creating temporary files
