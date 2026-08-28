@@ -2,6 +2,25 @@ apiVersion: v1
 entries:
   ack-secret-manager:
   - apiVersion: v1
+    appVersion: 0.6.7
+    created: "2026-08-28T11:30:06.22142661Z"
+    description: Provides external secret definitions for importing secret managed
+      in Alibaba Cloud KMS secret-manager
+    digest: b1269bba76286af3d712e3ac8cae2abfd53c801eba7335008356af969383f3d4
+    home: https://github.com/AliyunContainerService/ack-secret-manager
+    keywords:
+    - secret-manager
+    - secrets
+    - namespace:kube-system
+    - releaseName:ack-secret-manager
+    - arch:amd64,arm64
+    name: ack-secret-manager
+    sources:
+    - https://github.com/AliyunContainerService/ack-secret-manager
+    urls:
+    - https://aliyuncontainerservice.github.io/ack-secret-manager/ack-secret-manager-0.6.7.tgz
+    version: 0.6.7
+  - apiVersion: v1
     appVersion: 0.6.6
     created: "2026-08-15T04:04:17.447324645Z"
     description: Provides external secret definitions for importing secret managed
@@ -20,4 +39,4 @@ entries:
     urls:
     - https://aliyuncontainerservice.github.io/ack-secret-manager/ack-secret-manager-0.6.6.tgz
     version: 0.6.6
-generated: "2026-08-15T04:04:17.446282656Z"
+generated: "2026-08-28T11:30:06.220240443Z"
