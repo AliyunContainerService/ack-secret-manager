@@ -33,6 +33,8 @@ ack-secret-manager involves 4 types of CRDs, divided into two categories:
 
 **Design Philosophy**: Separation of permissions and data for enhanced flexibility.
 
+> **Scope restriction note**: When `--watch-namespaces` (`command.watchNamespaces`) or `--exclude-namespaces` (`command.excludeNamespaces`) is configured, or `processClusterSecretStore`/`processClusterExternalSecret` is explicitly set to `false`, the cluster-scoped controllers are disabled and ClusterSecretStore / ClusterExternalSecret resources are no longer processed (see the README Upgrade Notes).
+
 ### SecretStore vs ClusterSecretStore
 
 | Feature | SecretStore | ClusterSecretStore |
@@ -54,11 +56,18 @@ Both require users to manually create the resources themselves. The key differen
 | **Configuration Consistency** | May be inconsistent across multiple ExternalSecrets | Unified management by ClusterExternalSecret ensures consistency |
 | **Use Cases** | Few namespaces | Many/dynamic namespaces |
 
+### Automatic Synchronization Between Resources
+
+- After you update the authentication information in the credential Secret or ServiceAccount referenced by a SecretStore/ClusterSecretStore, the controller automatically refreshes the corresponding Store — no manual action is required.
+- When a SecretStore/ClusterSecretStore rebuilds its backend client, all ExternalSecrets referencing it are automatically triggered to resync. You can observe the number of client rebuilds via the SecretStore/ClusterSecretStore's `status.clientGeneration`; it is a monotonically increasing client-rebuild counter (incremented on every successful rebuild) and is used for event-driven synchronization freshness determination — referencing ExternalSecrets detect store changes through it and resync immediately.
+
 ## Cross-Namespace Control Mechanisms
 
 To enhance security and flexibility, ack-secret-manager provides multiple cross-namespace control mechanisms:
 
-> **Breaking Change (v0.6.4)**: For security hardening, both `enableCrossNamespaceSecretStore` and `enableCrossNamespaceAuthRef` default values changed from `true` to `false`. If your deployment uses cross-namespace references, you must explicitly set these parameters to `true` in `values.yaml` when upgrading, otherwise cross-namespace references will be rejected.
+> **Breaking Changes**:
+>
+> 1. **v0.6.4**: For security hardening, both `enableCrossNamespaceSecretStore` and `enableCrossNamespaceAuthRef` default values changed from `true` to `false`. If your deployment uses cross-namespace references, you must explicitly set these parameters to `true` in `values.yaml` when upgrading, otherwise cross-namespace references will be rejected.
 
 ### ExternalSecret Referencing SecretStore Control
 
@@ -108,7 +117,7 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
   2. `namespaces`: Explicitly lists allowed namespace names
   3. `namespaceRegexes`: Uses regex patterns to match allowed namespace names
 
-> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+> **Note**: A regex in `namespaceRegexes` uses substring matching. An invalid regex or labelSelector rejects all namespaces.
 
 ### ClusterSecretStore Access Control
 
@@ -118,7 +127,7 @@ To enhance security and flexibility, ack-secret-manager provides multiple cross-
   2. `namespaces`: Explicitly lists allowed namespace names
   3. `namespaceRegexes`: Uses regex patterns to match allowed namespace names
 
-> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+> **Note**: A regex in `namespaceRegexes` uses substring matching. An invalid regex or labelSelector rejects all namespaces.
 
 ## Recommended Usage
 
@@ -176,7 +185,7 @@ Control which namespaces can use this ClusterSecretStore via `spec.conditions`, 
 2. **namespaceSelector**: Use label selectors to match namespaces
 3. **namespaceRegexes**: Use regex patterns to match namespace names
 
-> **Note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+> **Note**: A regex in `namespaceRegexes` uses substring matching. An invalid regex or labelSelector rejects all namespaces.
 
 ### Configuration Notes
 
@@ -331,7 +340,7 @@ See [examples/crd/crd-05-cluster-external-secret.yaml](../examples/crd/crd-05-cl
 
 | CRD Field | Description | Required | Default Behavior |
 | --------- | ----------- | -------- | ---------------- |
-| accessKey | Alibaba Cloud AccessKey authentication config | No | When not set, another enabled (prerequisites met) authentication method is selected by priority (RRSA → WorkerRole) |
+| accessKey | Alibaba Cloud AccessKey authentication config | No | When not set, another enabled (prerequisites met) authentication method is selected by priority (RRSA → AK AssumeRole → WorkerRole) |
 | accessKeySecret | Alibaba Cloud AccessKey authentication config | No | Used together with accessKey |
 | ramRoleARN | RAM Role ARN for RRSA or AK AssumeRole authentication | No | When not set, role-based authentication is not used |
 | ramRoleSessionName | Role session name for STS AssumeRole | No | When not set, uses component default session name |
@@ -361,6 +370,12 @@ Alibaba Cloud AccessKey is the most important identity credential for users to a
 | namespace | ServiceAccount namespace | No | For SecretStore, defaults to same namespace (cross-namespace reference controlled by `command.enableCrossNamespaceAuthRef`); required for ClusterSecretStore |
 | audiences | Audience array for the aud field in ServiceAccount token | No | When not set, defaults to `["sts.aliyuncs.com"]` |
 
+**status**
+
+| CRD Field | Description |
+| --------- | ----------- |
+| clientGeneration | Monotonically increasing client-rebuild counter: incremented on every successful rebuild of the backend client; used for event-driven synchronization freshness determination (referencing ExternalSecrets detect store changes through it and resync immediately). ClusterSecretStore has the same field |
+
 ### ClusterSecretStore
 
 ClusterSecretStore is a cluster-level SecretStore resource that can be referenced by ExternalSecrets in any namespace in the cluster. In addition to all the features of SecretStore, it also adds access control configuration to restrict which namespaces can access this resource.
@@ -383,7 +398,7 @@ ClusterSecretStore is a cluster-level SecretStore resource that can be reference
 
 > The authentication fields under KMS/OOS (KMSAuth/OOSAuth) are the same as SecretStore, please refer to the SecretStore parameter description above.
 >
-> **Regex matching note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+> **Regex matching note**: A regex in `namespaceRegexes` uses substring. An invalid regex or labelSelector rejects all namespaces.
 
 ### ExternalSecret
 
@@ -476,7 +491,7 @@ ClusterSecretStore is a cluster-level SecretStore resource that can be reference
 | versionStage | Target credential version stage (e.g., `ACSCurrent`, `ACSPrevious`) | No | When not set, fetches the latest version (`ACSCurrent`) |
 | versionId | Target credential version ID; not required when provider is `oos` | No | When not set, fetches the latest version |
 | jmesPath | When target credential is JSON/YAML format, extract specific fields via JMESPath expression | No | When not set, syncs the entire credential content |
-| secretStoreRef | SecretStore reference for this credential; each `data[]` entry specifies its own SecretStore via this field | No | When not set, this data source uses environment-variable or WorkerRole authentication (see the Authentication Guide) |
+| secretStoreRef | SecretStore reference for this credential; each `data[]` entry specifies its own SecretStore via this field | No | When not set, this data source uses environment-variable authentication; WorkerRole authentication requires explicit enablement (`--enable-worker-role=true` / `command.enableWorkerRole=true`), and when no usable authentication tier exists the sync fails fail-closed (error: "no usable authentication tier") (see the Authentication Guide). When set, environment-variable credentials do not participate in authentication for this data source at all (see [Authentication Guide - Mutual Exclusion Between Environment Variables and SecretStore](auth_guide.md#mutual-exclusion-between-environment-variables-and-secretstore)) |
 | kmsEndpoint | KMS Endpoint address for this credential, can override global configuration | No | When not set, uses global `command.kmsEndpoint` → default `kms-vpc.{region}.aliyuncs.com` |
 
 **dataProcess (Data sources requiring special processing)**
@@ -540,4 +555,4 @@ The externalSecretMetadata field allows you to automatically add additional meta
 | namespaces | Explicitly lists allowed namespace names | No |
 | namespaceRegexes | Uses regex patterns to match allowed namespace names | No |
 
-> **Regex matching note**: A regex in `namespaceRegexes` must match the entire namespace name (e.g., to match namespaces with the `prod-` prefix, use `prod-.*` rather than `prod-`). An invalid regex or labelSelector rejects all namespaces.
+> **Regex matching note**: A regex in `namespaceRegexes` uses substring. An invalid regex or labelSelector rejects all namespaces.

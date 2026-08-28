@@ -1,13 +1,9 @@
 // Copyright © 2025 Alibaba Cloud. All rights reserved.
 
 // sync_timestamp_refresh_test.go covers the post-Secret-write forced status
-// refresh: when an actual Secret write succeeds, status.dataSyncResults must
-// be rewritten (bypassing the semantic-fingerprint debounce) so that
-// SynchronizationTime advances together with the data -- both when the user
-// changed spec.data on an all-success round and when a backend value changed
-// between polls. Unchanged polling rounds keep the original debounce and do
-// NOT rewrite the status. Reuses the shared chain-level harness (fake
-// provider + fake client) from helpers_test.go.
+// refresh: an actual Secret write must advance SynchronizationTime (bypassing
+// the semantic-fingerprint debounce), while unchanged polling rounds keep the
+// original debounce and do NOT rewrite the status.
 
 package externalsecret
 
@@ -35,12 +31,10 @@ func succeededTimestamp(t *testing.T, es *api.ExternalSecret) metav1.Time {
 	return metav1.Time{}
 }
 
-// TestSyncTimestampAdvancesWhenSpecDataChangedAllSucceed simulates the user
-// editing spec.data: the existing Secret carries a key from the OLD spec,
-// the current spec fetches a different key, and every source succeeds. The
-// round's fingerprint (single empty-key Succeeded entry) is identical to the
-// persisted one, so the pre-write debounced status write is skipped -- the
-// forced post-write refresh must still advance SynchronizationTime.
+// TestSyncTimestampAdvancesWhenSpecDataChangedAllSucceed simulates a spec.data
+// edit whose round fingerprint is identical to the persisted one, so the
+// pre-write debounced status write is skipped -- the forced post-write refresh
+// must still advance SynchronizationTime.
 func TestSyncTimestampAdvancesWhenSpecDataChangedAllSucceed(t *testing.T) {
 	staleTime := metav1.Time{Time: time.Now().Add(-24 * time.Hour)}
 	es := &api.ExternalSecret{
@@ -85,8 +79,8 @@ func TestSyncTimestampAdvancesWhenSpecDataChangedAllSucceed(t *testing.T) {
 }
 
 // TestSyncTimestampAdvancesWhenBackendValueChanges covers the second trigger:
-// the spec is untouched but the backend credential value changed, so the
-// DeepEqual write decision fires and the timestamp must advance as well.
+// unchanged spec but a changed backend value fires the DeepEqual write
+// decision, so the timestamp must advance as well.
 func TestSyncTimestampAdvancesWhenBackendValueChanges(t *testing.T) {
 	staleTime := metav1.Time{Time: time.Now().Add(-24 * time.Hour)}
 	es := &api.ExternalSecret{
@@ -128,9 +122,8 @@ func TestSyncTimestampAdvancesWhenBackendValueChanges(t *testing.T) {
 }
 
 // TestSyncTimestampRetainedWhenNothingChanged guards the debounce: an
-// unchanged polling round (Secret data equal AND fingerprint identical) must
-// NOT rewrite the status -- the persisted SynchronizationTime stays frozen,
-// preserving the original write-reduction behavior.
+// unchanged polling round must NOT rewrite the status, preserving the
+// persisted SynchronizationTime.
 func TestSyncTimestampRetainedWhenNothingChanged(t *testing.T) {
 	fixedTime := metav1.Time{Time: time.Now().Add(-24 * time.Hour)}
 	es := &api.ExternalSecret{

@@ -36,8 +36,8 @@ func (m *Manager) Register(clientName string, client backendin.SecretClient) {
 	}
 	if oosClient.oosClient != nil {
 		m.OosClientMap.Store(clientName, client)
+		klog.Infof("register or update client, clientName %v", clientName)
 	}
-	klog.Infof("register or update client, clientName %v", clientName)
 }
 
 func (m *Manager) Delete(clientName string) {
@@ -50,11 +50,9 @@ func (m *Manager) Delete(clientName string) {
 	klog.Infof("delete client, clientName %v", clientName)
 }
 
-// DeletePrefixed implements the backend.ClientManager contract (see the
-// interface doc for the non-atomicity caveat): removes the plain clientName
-// client plus all composite "clientName#endpoint" variants. The OOS endpoint
-// itself is ignored, but custom-endpoint clients are still registered under
-// composite keys, so every variant must be retired here.
+// DeletePrefixed implements the backend.ClientManager contract (non-atomic,
+// see interface doc): removes the plain clientName client plus all composite
+// "clientName#endpoint" variants, even though the OOS endpoint is ignored.
 func (m *Manager) DeletePrefixed(clientName string) {
 	compositePrefix := clientName + "#"
 	var staleKeys []string

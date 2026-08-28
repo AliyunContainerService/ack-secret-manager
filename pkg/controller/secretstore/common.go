@@ -28,17 +28,6 @@ const (
 	clusterSecretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
 )
 
-// WrappedClient wraps both controller-runtime client and kubernetes client
-type WrappedClient struct {
-	client.Client
-	KubeClient kubernetes.Interface
-}
-
-// GetKubeClient returns the kubernetes client interface
-func (w *WrappedClient) GetKubeClient() kubernetes.Interface {
-	return w.KubeClient
-}
-
 // StoreInterface defines the common interface for both SecretStore and ClusterSecretStore
 type StoreInterface interface {
 	client.Object
@@ -68,6 +57,8 @@ type StoreStatusInterface interface {
 	GetCapabilities() v1alpha1.SecretStoreCapabilities
 	SetCapabilities(v1alpha1.SecretStoreCapabilities)
 	SetConditions(conditions []v1alpha1.SecretStoreStatusCondition)
+	GetClientGeneration() int64
+	SetClientGeneration(int64)
 }
 
 // SecretStoreWrapper wraps SecretStore to implement StoreInterface
@@ -205,6 +196,14 @@ func (w *SecretStoreStatusWrapper) SetConditions(conditions []v1alpha1.SecretSto
 	w.Conditions = conditions
 }
 
+func (w *SecretStoreStatusWrapper) GetClientGeneration() int64 {
+	return w.ClientGeneration
+}
+
+func (w *SecretStoreStatusWrapper) SetClientGeneration(generation int64) {
+	w.ClientGeneration = generation
+}
+
 // ClusterSecretStoreStatusWrapper wraps ClusterSecretStoreStatus to implement StoreStatusInterface
 type ClusterSecretStoreStatusWrapper struct {
 	*v1alpha1.ClusterSecretStoreStatus
@@ -226,6 +225,14 @@ func (w *ClusterSecretStoreStatusWrapper) SetConditions(conditions []v1alpha1.Se
 	w.Conditions = conditions
 }
 
+func (w *ClusterSecretStoreStatusWrapper) GetClientGeneration() int64 {
+	return w.ClientGeneration
+}
+
+func (w *ClusterSecretStoreStatusWrapper) SetClientGeneration(generation int64) {
+	w.ClientGeneration = generation
+}
+
 // CommonReconciler contains common logic for both SecretStore and ClusterSecretStore controllers
 type CommonReconciler struct {
 	client.Client
@@ -235,11 +242,10 @@ type CommonReconciler struct {
 
 // validateStoreSpec validates the common part of store spec
 func (r *CommonReconciler) validateStoreSpec(kms, oos interface{}, storeType string) error {
-	// Cast to the correct types
 	kmsProvider, kmsOk := kms.(*v1alpha1.KMSProvider)
 	oosProvider, oosOk := oos.(*v1alpha1.OOSProvider)
 
-	// Validate provider count (must be exactly one)
+	// Exactly one provider must be configured
 	providerCount := 0
 	if kmsOk && kmsProvider != nil && kmsProvider.KMS != nil {
 		providerCount++
@@ -257,17 +263,15 @@ func (r *CommonReconciler) validateStoreSpec(kms, oos interface{}, storeType str
 	return nil
 }
 
-// ValidateSecretStoreSpec validates the SecretStore spec
+// validateSecretStoreSpec validates the SecretStore spec
 func (r *CommonReconciler) validateSecretStoreSpec(store StoreInterface) error {
 	spec := store.GetSpec()
 	if err := r.validateStoreSpec(spec.GetKMS(), spec.GetOOS(), "SecretStore"); err != nil {
 		return err
 	}
 
-	// Check cross namespace reference restrictions
+	// Cross-namespace references must stay in the store's namespace when disabled
 	if !r.EnableCrossNamespaceAuthRef {
-		// For SecretStore, if cross namespace references are disabled,
-		// ensure ServiceAccountRef, AccessKey and AccessKeySecret are in the same namespace
 		serviceAccountRef := spec.GetServiceAccountRef()
 		if serviceAccountRef != nil && serviceAccountRef.Namespace != "" && serviceAccountRef.Namespace != store.GetNamespace() {
 			return fmt.Errorf("cross namespace ServiceAccountRef is disabled, cannot reference ServiceAccount in namespace %s from SecretStore in namespace %s", serviceAccountRef.Namespace, store.GetNamespace())
@@ -287,7 +291,7 @@ func (r *CommonReconciler) validateSecretStoreSpec(store StoreInterface) error {
 	return nil
 }
 
-// ValidateClusterSecretStoreSpec validates the ClusterSecretStore spec
+// validateClusterSecretStoreSpec validates the ClusterSecretStore spec
 func (r *CommonReconciler) validateClusterSecretStoreSpec(store StoreInterface) error {
 	spec := store.GetSpec()
 	if err := r.validateStoreSpec(spec.GetKMS(), spec.GetOOS(), "ClusterSecretStore"); err != nil {
@@ -310,9 +314,7 @@ func (r *CommonReconciler) validateClusterSecretStoreSpec(store StoreInterface) 
 	}
 
 	conditions := spec.GetConditions()
-	// Validate conditions if any
 	for i, condition := range conditions {
-		// Validate namespace selector if present
 		if condition.NamespaceSelector != nil {
 			_, err := metav1.LabelSelectorAsSelector(condition.NamespaceSelector)
 			if err != nil {
@@ -320,7 +322,6 @@ func (r *CommonReconciler) validateClusterSecretStoreSpec(store StoreInterface) 
 			}
 		}
 
-		// Validate namespace regexes if present
 		for j, regex := range condition.NamespaceRegexes {
 			_, err := regexp.Compile(regex)
 			if err != nil {
@@ -332,47 +333,69 @@ func (r *CommonReconciler) validateClusterSecretStoreSpec(store StoreInterface) 
 	return nil
 }
 
-// NeedRecreateClient checks if we need to recreate the client
-func (r *CommonReconciler) needRecreateClient(clientName string, generation int64, conditions []v1alpha1.SecretStoreStatusCondition, kmsProvider, oosProvider backend.Provider) bool {
-	// Check if client exists
+// storeConfiguresKMS reports whether the store spec configures KMS by its
+// inner auth block (an empty `kms: {}` block does not count), matching the
+// branch decision in validateStoreSpec and recreateClient.
+func storeConfiguresKMS(spec StoreSpecInterface) bool {
+	return spec.GetKMS() != nil && spec.GetKMS().KMS != nil
+}
+
+// storeConfiguresOOS reports whether the store spec configures OOS by its
+// inner auth block (an empty `oos: {}` block does not count), matching the
+// branch decision in validateStoreSpec and recreateClient.
+func storeConfiguresOOS(spec StoreSpecInterface) bool {
+	return spec.GetOOS() != nil && spec.GetOOS().OOS != nil
+}
+
+// needRecreateClient checks whether the client must be recreated. The client
+// registry is selected by the provider actually configured in the store spec
+// (OOS clients live in OosClientMap, never KmsClientMap), so an OOS store
+// with a registered client is not forced into a needless rebuild.
+func (r *CommonReconciler) needRecreateClient(store StoreInterface, clientName string, generation int64, conditions []v1alpha1.SecretStoreStatusCondition, kmsProvider, oosProvider backend.Provider) bool {
+	spec := store.GetSpec()
 	var clientExists bool
-	if kmsProvider != nil {
-		client, _ := kmsProvider.GetClient(clientName)
-		clientExists = client != nil
-	} else if oosProvider != nil {
-		client, _ := oosProvider.GetClient(clientName)
-		clientExists = client != nil
+	switch {
+	case storeConfiguresKMS(spec):
+		if kmsProvider != nil {
+			client, _ := kmsProvider.GetClient(clientName)
+			clientExists = client != nil
+		}
+	case storeConfiguresOOS(spec):
+		if oosProvider != nil {
+			client, _ := oosProvider.GetClient(clientName)
+			clientExists = client != nil
+		}
 	}
 
-	// If client doesn't exist, we definitely need to create it
 	if !clientExists {
 		return true
 	}
 
-	// Check if generation has changed (primary indicator of spec changes)
-	if len(conditions) > 0 && generation != conditions[0].ObservedGeneration {
+	// No Ready condition yet: initial reconcile. The condition is located by
+	// Type == SecretStoreReady so additional condition types can never break
+	// the observed-generation comparison.
+	observed, found := utils.ReadyConditionObservedGeneration(conditions)
+	if !found {
 		return true
 	}
 
-	// If no conditions exist, this is initial reconcile, so recreate
-	if len(conditions) == 0 {
+	// Generation change indicates a spec change
+	if generation != observed {
 		return true
 	}
 
 	return false
 }
 
-// RecreateClient recreates the client for the SecretStore
+// recreateClient recreates the client for the store
 func (r *CommonReconciler) recreateClient(ctx context.Context, log logr.Logger, clientName string, kmsProvider, oosProvider backend.Provider, store StoreInterface) error {
-	// Clean up the old clients: the plain clientName client plus every
-	// endpoint-specific composite ("clientName#endpoint") variant created
-	// on-demand by the ExternalSecret controller. Composite variants are not
-	// re-created here; they are rebuilt on demand in later ExternalSecret
-	// reconciles with the refreshed store credentials.
+	// Clean up the plain clientName client plus every composite
+	// ("clientName#endpoint") variant; composite variants are rebuilt on
+	// demand in later ExternalSecret reconciles.
 	kmsProvider.DeletePrefixed(clientName)
 	oosProvider.DeletePrefixed(clientName)
 
-	// Create kubernetes.Interface from rest.Config for dynamic token acquisition
+	// kubeClient from rest.Config enables dynamic token acquisition
 	var kubeClient kubernetes.Interface
 	var err error
 	if r.RestConfig != nil {
@@ -383,20 +406,18 @@ func (r *CommonReconciler) recreateClient(ctx context.Context, log logr.Logger, 
 		}
 	}
 
-	// Create a wrapper client that includes both controller-runtime client and kubernetes client
-	wrapperClient := &WrappedClient{
+	// Create a wrapper combining both clients
+	wrapperClient := &backend.WrappedClient{
 		Client:     r.Client,
 		KubeClient: kubeClient,
 	}
 
-	// Create the appropriate client based on provider type and store type.
 	// The branch decision uses the same inner-field check as validateStoreSpec
-	// (e.g. an empty `kms: {}` block must not select the KMS branch), so any
-	// configuration that passed validation is guaranteed to enter exactly one
-	// provider branch here.
+	// (an empty `kms: {}` block must not select the KMS branch), so any
+	// validated configuration enters exactly one provider branch.
 	spec := store.GetSpec()
-	kmsConfigured := spec.GetKMS() != nil && spec.GetKMS().KMS != nil
-	oosConfigured := spec.GetOOS() != nil && spec.GetOOS().OOS != nil
+	kmsConfigured := storeConfiguresKMS(spec)
+	oosConfigured := storeConfiguresOOS(spec)
 	if kmsConfigured {
 		if oosConfigured {
 			klog.Warningf("both KMS and OOS providers are configured for store %s/%s, KMS takes precedence",
@@ -407,22 +428,20 @@ func (r *CommonReconciler) recreateClient(ctx context.Context, log logr.Logger, 
 		return r.createOOSClient(ctx, log, store, wrapperClient, clientName, oosProvider)
 	}
 
-	// validateStoreSpec rejects specs without a configured provider before
-	// recreateClient is called, so reaching here indicates an unexpected state.
+	// validateStoreSpec rejects provider-less specs before this point
 	return fmt.Errorf("no valid provider found for store %s/%s", store.GetNamespace(), store.GetName())
 }
 
 // createKMSClient creates a KMS client
-func (r *CommonReconciler) createKMSClient(ctx context.Context, log logr.Logger, store StoreInterface, wrapperClient *WrappedClient, clientName string, kmsProvider backend.Provider) error {
+func (r *CommonReconciler) createKMSClient(ctx context.Context, log logr.Logger, store StoreInterface, wrapperClient *backend.WrappedClient, clientName string, kmsProvider backend.Provider) error {
 	var secretClient backend.SecretClient
 	var err error
 
-	// Handle different store types
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
 		secretClient, err = kmsProvider.NewClient(ctx, s.SecretStore, wrapperClient, "")
 	case *ClusterSecretStoreWrapper:
-		// Create a temporary SecretStore for compatibility with existing provider code
+		// Temporary SecretStore for compatibility with the provider interface
 		tempStore := &v1alpha1.SecretStore{
 			TypeMeta:   s.TypeMeta,
 			ObjectMeta: s.ObjectMeta,
@@ -453,16 +472,15 @@ func (r *CommonReconciler) createKMSClient(ctx context.Context, log logr.Logger,
 }
 
 // createOOSClient creates an OOS client
-func (r *CommonReconciler) createOOSClient(ctx context.Context, log logr.Logger, store StoreInterface, wrapperClient *WrappedClient, clientName string, oosProvider backend.Provider) error {
+func (r *CommonReconciler) createOOSClient(ctx context.Context, log logr.Logger, store StoreInterface, wrapperClient *backend.WrappedClient, clientName string, oosProvider backend.Provider) error {
 	var secretClient backend.SecretClient
 	var err error
 
-	// Handle different store types
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
 		secretClient, err = oosProvider.NewClient(ctx, s.SecretStore, wrapperClient, "")
 	case *ClusterSecretStoreWrapper:
-		// Create a temporary SecretStore for compatibility with existing provider code
+		// Temporary SecretStore for compatibility with the provider interface
 		tempStore := &v1alpha1.SecretStore{
 			TypeMeta:   s.TypeMeta,
 			ObjectMeta: s.ObjectMeta,
@@ -492,9 +510,8 @@ func (r *CommonReconciler) createOOSClient(ctx context.Context, log logr.Logger,
 	return nil
 }
 
-// SetCondition sets a condition in the store status.
-// LastTransitionTime is only refreshed when the condition actually transitions
-// (Type/Status/Reason/Message changed); otherwise the original timestamp is preserved.
+// setCondition sets a condition in the store status; LastTransitionTime is
+// only refreshed when the condition actually transitions.
 func (r *CommonReconciler) setCondition(store StoreInterface, condition v1alpha1.SecretStoreStatusCondition) {
 	now := metav1.Now()
 	condition.ObservedGeneration = store.GetGeneration()
@@ -502,14 +519,12 @@ func (r *CommonReconciler) setCondition(store StoreInterface, condition v1alpha1
 	status := store.GetStatus()
 	conditions := status.GetConditions()
 
-	// Check if condition already exists
 	for i, c := range conditions {
 		if c.Type == condition.Type {
 			if c.Status == condition.Status && c.Reason == condition.Reason && c.Message == condition.Message {
-				// Preserve the original transition time when nothing changed
+				// Not transitioning: preserve the original timestamp
 				condition.LastTransitionTime = c.LastTransitionTime
 			} else {
-				// Condition is transitioning, refresh the transition time
 				condition.LastTransitionTime = now
 			}
 			conditions[i] = condition
@@ -517,16 +532,22 @@ func (r *CommonReconciler) setCondition(store StoreInterface, condition v1alpha1
 		}
 	}
 
-	// Add new condition with current time
 	condition.LastTransitionTime = now
 	conditions = append(conditions, condition)
 	status.SetConditions(conditions)
 }
 
-// StatusEqual compares two SecretStoreStatus objects, ignoring LastTransitionTime
-// so that unchanged conditions do not trigger redundant status writes.
+// statusEqual compares two store statuses, ignoring LastTransitionTime so
+// unchanged conditions do not trigger redundant status writes.
 func (r *CommonReconciler) statusEqual(old, new StoreStatusInterface) bool {
 	if old.GetCapabilities() != new.GetCapabilities() {
+		return false
+	}
+
+	// ClientGeneration changes must always surface: it is the signal the
+	// ExternalSecret reverse watch uses to detect client rebuilds on the
+	// trigger-annotation path where metadata.generation stays unchanged.
+	if old.GetClientGeneration() != new.GetClientGeneration() {
 		return false
 	}
 
@@ -537,8 +558,7 @@ func (r *CommonReconciler) statusEqual(old, new StoreStatusInterface) bool {
 		return false
 	}
 
-	// Compare conditions (assuming they are in the same order),
-	// ignoring LastTransitionTime which is managed by setCondition
+	// Conditions are compared in order, ignoring LastTransitionTime
 	for i := range originConditions {
 		o := originConditions[i]
 		d := destConditions[i]
@@ -552,7 +572,7 @@ func (r *CommonReconciler) statusEqual(old, new StoreStatusInterface) bool {
 	return true
 }
 
-// HandleDeletion handles the cleanup when SecretStore is marked for deletion
+// handleDeletion handles the cleanup when the store is marked for deletion
 func (r *CommonReconciler) handleDeletion(log logr.Logger, finalizers []string, secretStore client.Object, clientName string, kmsProvider, oosProvider backend.Provider, updateFunc func(client.Object) error) (reconcile.Result, error) {
 	log.Info("Store is marked to be deleted")
 	var finalizerName string
@@ -563,19 +583,16 @@ func (r *CommonReconciler) handleDeletion(log logr.Logger, finalizers []string, 
 		finalizerName = clusterSecretFinalizer
 	}
 
-	// Clean up the provider clients before removing the finalizer. ClientManager.DeletePrefixed
-	// is an idempotent, void operation with no failure path, so this best-effort
-	// cleanup guarantees that provider clients (plain and every composite
-	// "clientName#endpoint" variant) do not leak on the deletion path.
+	// Clean up provider clients (plain and all composite variants) before
+	// removing the finalizer; DeletePrefixed is idempotent with no failure
+	// path, so clients cannot leak on the deletion path.
 	kmsProvider.DeletePrefixed(clientName)
 	oosProvider.DeletePrefixed(clientName)
 
 	if utils.Contains(finalizers, finalizerName) {
-		// Remove finalizer
 		log.Info("removing finalizer", "currentFinalizers", finalizers)
 		newFinalizers := utils.Remove(finalizers, finalizerName)
 
-		// Update the object with new finalizers
 		secretStore.SetFinalizers(newFinalizers)
 		err := updateFunc(secretStore)
 		if err != nil {
@@ -587,10 +604,16 @@ func (r *CommonReconciler) handleDeletion(log logr.Logger, finalizers []string, 
 	return reconcile.Result{}, nil
 }
 
-// updateStatus updates the status of the store to indicate success.
-// Returns (true, nil) when the status was written, (false, nil) when the
-// status was already up-to-date (no write performed), and (false, err) on failure.
-func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger, store StoreInterface, condition v1alpha1.SecretStoreStatusCondition) (bool, error) {
+// updateStatus updates the store status. Returns (true, nil) when the status
+// was written, (false, nil) when already up-to-date, and (false, err) on failure.
+// bumpClientGeneration marks a successful client recreation in this round.
+// Invariant: the bump happens AFTER the old-status snapshot, callers persist
+// the status write BEFORE clearing the trigger annotation (surfacing clearing
+// failures as errors), and a failed write discards the in-memory bump. Hence
+// a cleared annotation always implies the bump was persisted, the signal can
+// never be lost on the annotation path, and every persisted recreation maps
+// to exactly one increment.
+func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger, store StoreInterface, condition v1alpha1.SecretStoreStatusCondition, bumpClientGeneration bool) (bool, error) {
 	var oldStatus StoreStatusInterface
 	switch s := store.(type) {
 	case *SecretStoreWrapper:
@@ -601,15 +624,21 @@ func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger,
 		oldStatus = &ClusterSecretStoreStatusWrapper{ClusterSecretStoreStatus: old}
 	}
 
+	if bumpClientGeneration {
+		status := store.GetStatus()
+		status.SetClientGeneration(status.GetClientGeneration() + 1)
+		logger.Info("bumped store status clientGeneration after successful client recreation",
+			"clientGeneration", status.GetClientGeneration())
+	}
+
 	r.setCondition(store, condition)
 
-	// Compare status
 	statusEqual := r.statusEqual(oldStatus, store.GetStatus())
-	// If there were no conditions before, force update to initialize status
+	// Force update when there were no conditions yet (status initialization)
 	shouldUpdate := !statusEqual || len(oldStatus.GetConditions()) == 0
 
 	if shouldUpdate {
-		// Update the actual Kubernetes object status, not the wrapper
+		// Update the real object's status, not the wrapper
 		var objKey client.ObjectKey
 
 		switch s := store.(type) {
@@ -626,7 +655,7 @@ func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger,
 			return false, fmt.Errorf("unknown store type: %T", store)
 		}
 
-		// Get a fresh copy of the object to avoid resource version conflicts
+		// Fresh copy to avoid resource version conflicts
 		var freshObj client.Object
 		switch store.(type) {
 		case *SecretStoreWrapper:
@@ -640,7 +669,6 @@ func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger,
 			return false, err
 		}
 
-		// Update the status on the fresh object
 		switch t := freshObj.(type) {
 		case *v1alpha1.SecretStore:
 			modifiedStore := store.(*SecretStoreWrapper).SecretStore
@@ -650,9 +678,8 @@ func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger,
 			t.Status = *modifiedStore.Status.DeepCopy()
 		}
 
-		// Attempt to update the status subresource. On conflict errors we return
-		// the error and let the workqueue retry with exponential backoff instead
-		// of blocking the reconcile goroutine with a synchronous sleep.
+		// On conflict errors, let the workqueue retry with backoff instead of
+		// blocking the reconcile goroutine.
 		err := r.Status().Update(ctx, freshObj)
 		if err == nil {
 			logger.Info("successfully updated store status subresource")
@@ -660,7 +687,7 @@ func (r *CommonReconciler) updateStatus(ctx context.Context, logger logr.Logger,
 		}
 
 		if errors.IsConflict(err) {
-			logger.V(2).Info("conflict when updating status, will be retried by workqueue backoff", "error", err)
+			logger.Info("conflict when updating status, will be retried by workqueue backoff", "error", err)
 		} else {
 			logger.Error(err, "failed to update store status")
 		}
@@ -678,7 +705,7 @@ func (r *CommonReconciler) updateStatusWithReady(ctx context.Context, logger log
 		Reason: v1alpha1.ReasonStoreValid,
 	}
 
-	return r.updateStatus(ctx, logger, store, condition)
+	return r.updateStatus(ctx, logger, store, condition, false)
 }
 
 // updateStatusWithError updates the status with an error condition
@@ -690,13 +717,16 @@ func (r *CommonReconciler) updateStatusWithError(ctx context.Context, logger log
 		Message: message,
 	}
 
-	_, err := r.updateStatus(ctx, logger, store, condition)
+	_, err := r.updateStatus(ctx, logger, store, condition, false)
 	return err
 }
 
-// updateStatusWithReadyAndGeneration updates the status to indicate the store is ready
-// with specified capabilities and records the observed generation
-func (r *CommonReconciler) updateStatusWithReadyAndGeneration(ctx context.Context, logger logr.Logger, store StoreInterface, capabilities v1alpha1.SecretStoreCapabilities) error {
+// updateStatusWithReadyAndGeneration updates the status to indicate the store
+// is ready with the given capabilities, recording the observed generation.
+// clientRecreated marks rounds that successfully rebuilt the backend client:
+// status.clientGeneration is bumped so the ExternalSecret reverse watch
+// observes the rebuild (see updateStatus).
+func (r *CommonReconciler) updateStatusWithReadyAndGeneration(ctx context.Context, logger logr.Logger, store StoreInterface, capabilities v1alpha1.SecretStoreCapabilities, clientRecreated bool) error {
 	condition := v1alpha1.SecretStoreStatusCondition{
 		Type:               v1alpha1.SecretStoreReady,
 		Status:             corev1.ConditionTrue,
@@ -705,6 +735,6 @@ func (r *CommonReconciler) updateStatusWithReadyAndGeneration(ctx context.Contex
 	}
 
 	store.GetStatus().SetCapabilities(capabilities)
-	_, err := r.updateStatus(ctx, logger, store, condition)
+	_, err := r.updateStatus(ctx, logger, store, condition, clientRecreated)
 	return err
 }

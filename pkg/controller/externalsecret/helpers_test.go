@@ -1,21 +1,19 @@
 // Copyright © 2025 Alibaba Cloud. All rights reserved.
 
 // helpers_test.go holds the shared test fixtures of the externalsecret
-// package: the fake backend.SecretClient / backend.Provider pair driving the
-// chain-level syncIfNeedUpdate tests, the reconciler builders that swap the
-// process-global provider registry under save/restore semantics, and small
-// lookup utilities reused across the test files.
+// package: the fake SecretClient/Provider pair, the reconciler builders, and
+// small lookup utilities.
 //
-// NOTE: the reconciler builders mutate the process-global provider registry.
-// Every test using them must stay SERIAL; t.Parallel() is forbidden in this
-// package, and each builder restores the previous registry entry via
-// t.Cleanup.
+// NOTE: the reconciler builders mutate the process-global provider registry;
+// tests must stay SERIAL (t.Parallel() forbidden) and each builder restores
+// the previous registry entry via t.Cleanup.
 
 package externalsecret
 
 import (
 	"context"
 	"fmt"
+	"sync"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -33,11 +31,29 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 )
 
+// serialTestGuard fails fast if two tests enter the shared reconciler setup
+// concurrently. The builders mutate the process-global provider registry, so
+// the package MUST run serially (t.Parallel() forbidden). A package-level
+// TryLock turns an accidental t.Parallel() into an immediate, clearly worded
+// failure instead of a flaky registry race.
+var serialTestGuard sync.Mutex
+
+// guardSerialTest acquires the package-wide serial guard for the duration of
+// the calling test and releases it on cleanup. A failed TryLock means another
+// test is already inside the shared setup -- i.e. something ran in parallel.
+func guardSerialTest(t *testing.T) {
+	t.Helper()
+	if !serialTestGuard.TryLock() {
+		t.Fatalf("externalsecret tests must run serially: concurrent reconciler setup detected " +
+			"(the shared provider registry is process-global; do NOT call t.Parallel() in this package)")
+	}
+	t.Cleanup(serialTestGuard.Unlock)
+}
+
 // fakeSecretClient is a backend.SecretClient whose responses are keyed by
 // data.Key / extract.Key, letting each spec entry succeed or fail
-// independently. failByName (optional, checked first) keys failures by
-// data.Name so duplicate data.Key entries with different names can take
-// mixed outcomes, which failByKey alone cannot express.
+// independently. failByName (checked first) keys failures by data.Name so
+// duplicate data.Key entries with different names can take mixed outcomes.
 type fakeSecretClient struct {
 	dataByKey    map[string]map[string][]byte // spec.data success payloads by data.Key
 	extractByKey map[string]map[string][]byte // dataProcess success payloads by extract.Key
@@ -93,12 +109,12 @@ func (p *fakeProvider) GetClusterId() string                                { re
 func (p *fakeProvider) GetUid() string                                      { return "" }
 
 // newTestReconciler builds a reconciler on a fake client seeded with the
-// given objects and registers a fake "kms" provider serving the given
-// client; t.Cleanup restores the previous global registry entry (or removes
-// the slot when it was empty). Mutates the process-global provider registry:
-// tests must stay SERIAL and never call t.Parallel().
+// given objects and registers a fake "kms" provider; t.Cleanup restores the
+// previous global registry entry. Mutates the process-global provider
+// registry: tests must stay SERIAL.
 func newTestReconciler(t *testing.T, cleanup bool, sc *fakeSecretClient, objs ...client.Object) *ExternalSecretReconciler {
 	t.Helper()
+	guardSerialTest(t)
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -109,6 +125,7 @@ func newTestReconciler(t *testing.T, cleanup bool, sc *fakeSecretClient, objs ..
 	cl := fake.NewClientBuilder().
 		WithScheme(scheme).
 		WithStatusSubresource(&api.ExternalSecret{}).
+		WithIndex(&api.ExternalSecret{}, storeRefIndexField, storeRefIndexKeys).
 		WithObjects(objs...).
 		Build()
 	prev := backend.GetProviderByName(backend.ProviderKMSName)
@@ -126,8 +143,11 @@ func newTestReconciler(t *testing.T, cleanup bool, sc *fakeSecretClient, objs ..
 		Log:                    logr.Discard(),
 		Ctx:                    context.Background(),
 		CleanUpSecretOnFailure: cleanup,
-		KmsLimiter:             KmsLimiter{SecretPullLimiter: rate.NewLimiter(1000, 100)},
-		OosLimiter:             OosLimiter{SecretPullLimiter: rate.NewLimiter(1000, 100)},
+		KmsLimiter:             ProviderLimiter{SecretPullLimiter: rate.NewLimiter(1000, 100)},
+		OosLimiter:             ProviderLimiter{SecretPullLimiter: rate.NewLimiter(1000, 100)},
+		// Production default (--process-cluster-secret-store=true); tests for
+		// the degraded mode flip this explicitly.
+		ProcessClusterSecretStore: true,
 	}
 }
 
@@ -192,6 +212,7 @@ func (p *cleanupRecordingProvider) GetUid() string       { return "" }
 // SERIAL and never call t.Parallel().
 func newCleanupReconciler(t *testing.T, provider *cleanupRecordingProvider, objs ...client.Object) *ExternalSecretReconciler {
 	t.Helper()
+	guardSerialTest(t)
 	scheme := runtime.NewScheme()
 	if err := clientgoscheme.AddToScheme(scheme); err != nil {
 		t.Fatalf("add core scheme: %v", err)
@@ -199,7 +220,9 @@ func newCleanupReconciler(t *testing.T, provider *cleanupRecordingProvider, objs
 	if err := api.AddToScheme(scheme); err != nil {
 		t.Fatalf("add api scheme: %v", err)
 	}
-	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objs...).Build()
+	cl := fake.NewClientBuilder().WithScheme(scheme).
+		WithStatusSubresource(&api.ExternalSecret{}).
+		WithObjects(objs...).Build()
 	prev := backend.GetProviderByName(backend.ProviderKMSName)
 	backend.RegisterProvider(backend.ProviderKMSName, provider)
 	t.Cleanup(func() {

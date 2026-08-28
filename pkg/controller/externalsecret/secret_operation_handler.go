@@ -16,14 +16,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
-// SimpleSecretOperationHandler Simple Secret operation handler
+// SimpleSecretOperationHandler handles the Secret write flow for an ExternalSecret
 type SimpleSecretOperationHandler struct {
 	Client                 client.Client
 	CleanUpSecretOnFailure bool
 	Log                    logr.Logger
 }
 
-// NewSimpleSecretOperationHandler Create new Secret operation handler
+// NewSimpleSecretOperationHandler creates a new Secret operation handler
 func NewSimpleSecretOperationHandler(client client.Client, cleanUpSecretOnFailure bool, log logr.Logger) *SimpleSecretOperationHandler {
 	return &SimpleSecretOperationHandler{
 		Client:                 client,
@@ -32,7 +32,7 @@ func NewSimpleSecretOperationHandler(client client.Client, cleanUpSecretOnFailur
 	}
 }
 
-// HandleSecretOperation Handle complete Secret operation flow
+// HandleSecretOperation runs the complete Secret operation flow
 func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 	ctx context.Context,
 	externalSec *api.ExternalSecret,
@@ -40,19 +40,16 @@ func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 	currentData map[string][]byte,
 	metadataTargets map[string]map[string]string, // TemplateFrom metadata targets
 ) error {
-	// Determine final secret name
 	secretName := externalSec.Name
 	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Name != "" {
 		secretName = externalSec.Spec.Target.Name
 	}
 
-	// If CleanUpSecretOnFailure is enabled and secretData is empty,
-	// handle deletion based on CleanUpSecretOnFailure flag
+	// CleanUpSecretOnFailure: an empty dataset means total provider failure
 	if h.CleanUpSecretOnFailure && len(secretData) == 0 {
 		return h.handleProviderDeletion(ctx, externalSec, secretName)
 	}
 
-	// Get current secret status
 	currentSecret := &corev1.Secret{}
 	err := h.Client.Get(ctx, types.NamespacedName{
 		Namespace: externalSec.Namespace,
@@ -64,11 +61,9 @@ func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 		return fmt.Errorf("failed to get current secret: %w", err)
 	}
 
-	// Process template metadata
 	labels := make(map[string]string)
 	annotations := make(map[string]string)
 
-	// Copy existing labels and annotations
 	if secretExists {
 		for k, v := range currentSecret.Labels {
 			labels[k] = v
@@ -78,7 +73,7 @@ func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 		}
 	}
 
-	// Apply template-processed metadata from TemplateFrom
+	// Overlay TemplateFrom-processed metadata
 	if metadataTargets != nil {
 		if annTargets, exists := metadataTargets["annotations"]; exists {
 			for k, v := range annTargets {
@@ -123,10 +118,8 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 	err := h.Client.Create(ctx, secret)
 	if err != nil {
 		if errors.IsAlreadyExists(err) {
-			// The Secret appeared after the existence check: re-fetch and update the
-			// live object (optimistic lock). If the cached client still returns
-			// NotFound (cache lag), this round fails and controller-runtime backoff
-			// converges.
+			// Secret appeared after the existence check: re-fetch and update
+			// (optimistic lock); on cache-lag NotFound the backoff converges.
 			existing := &corev1.Secret{}
 			if getErr := h.Client.Get(ctx, types.NamespacedName{
 				Namespace: externalSec.Namespace,
@@ -136,7 +129,6 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 			}
 			return h.updateSecretWithoutOwner(ctx, existing, secretData, labels, annotations)
 		}
-		// Check if it's a namespace termination error
 		if strings.Contains(err.Error(), "unable to create new content in namespace") &&
 			strings.Contains(err.Error(), "because it is being terminated") {
 			h.Log.Info("Skipping secret creation as namespace is terminating",
@@ -157,10 +149,9 @@ func (h *SimpleSecretOperationHandler) updateSecretWithoutOwner(
 	secretData map[string][]byte,
 	labels, annotations map[string]string,
 ) error {
-	// Create a deepcopy to avoid modifying the original object (prevents data races)
+	// DeepCopy avoids modifying the cached object (prevents data races)
 	updatedSecret := currentSecret.DeepCopy()
 
-	// Update data, labels, and annotations
 	updatedSecret.Data = secretData
 	updatedSecret.Labels = labels
 	updatedSecret.Annotations = annotations
@@ -175,11 +166,9 @@ func (h *SimpleSecretOperationHandler) updateSecretWithoutOwner(
 	return nil
 }
 
-// handleProviderDeletion deletes the target Secret when provider data is
-// unavailable. It is ONLY invoked on the total-failure path with
-// CleanUpSecretOnFailure=true (HandleSecretOperation routes an empty dataset
-// here) -- NOT when the ExternalSecret itself is being deleted, and not from
-// any other round type.
+// handleProviderDeletion deletes the target Secret on the total-failure path
+// with CleanUpSecretOnFailure=true -- NOT when the ExternalSecret itself is
+// being deleted, and not from any other round type.
 func (h *SimpleSecretOperationHandler) handleProviderDeletion(
 	ctx context.Context,
 	externalSec *api.ExternalSecret,
@@ -207,7 +196,7 @@ func (h *SimpleSecretOperationHandler) handleProviderDeletion(
 	return nil
 }
 
-// getSecretType Get secret type
+// getSecretType returns the Secret type from spec, defaulting to Opaque
 func (h *SimpleSecretOperationHandler) getSecretType(externalSec *api.ExternalSecret) corev1.SecretType {
 	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Template != nil && externalSec.Spec.Target.Template.Type != "" {
 		return externalSec.Spec.Target.Template.Type

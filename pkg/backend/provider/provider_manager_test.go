@@ -275,10 +275,27 @@ func TestConcurrentRegisterRamProvider(t *testing.T) {
 	}
 }
 
-// Nil guards must not panic.
+// Nil guards must not panic and must leave the registry untouched.
 func TestNilManagerGuards(t *testing.T) {
-	RegisterRamProvider("client-a", &fakeStopper{}, nil)
+	p1 := &fakeStopper{}
+	RegisterRamProvider("client-a", p1, nil)
 	StopProvider("client-a", nil)
-	RegisterRamProvider("client-a", &fakeStopper{}, &Manager{})
-	StopProvider("client-a", &Manager{})
+	if p1.stopped() != 0 {
+		t.Fatalf("nil manager guard must not stop the provider, got %d", p1.stopped())
+	}
+
+	// Zero-value Manager (nil RamLock) must trip the same guard.
+	m := &Manager{}
+	p2 := &fakeStopper{}
+	RegisterRamProvider("client-a", p2, m)
+	StopProvider("client-a", m)
+	if p2.stopped() != 0 {
+		t.Fatalf("uninitialized manager guard must not stop the provider, got %d", p2.stopped())
+	}
+	// The guard returns before touching the registry: no entry may leak in.
+	// RamLock is nil here, so getRamProvider cannot be used; a direct read is
+	// safe because this test is serial.
+	if len(m.RamProvider) != 0 {
+		t.Fatalf("uninitialized manager registry must stay empty, got %d entries", len(m.RamProvider))
+	}
 }

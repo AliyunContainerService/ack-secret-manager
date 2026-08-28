@@ -2,31 +2,24 @@ package secret
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
 )
-
-func newTestScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add corev1 to scheme: %v", err)
-	}
-	if err := api.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add api to scheme: %v", err)
-	}
-	return scheme
-}
 
 // kmsStoreSpec returns a SecretStoreSpec whose KMS accessKey reference omits
 // the namespace field (defaults to the store's own namespace in the auth chain).
@@ -121,7 +114,7 @@ func TestCheckSecret(t *testing.T) {
 // a SecretStore omits the namespace of its credential secret reference and the
 // referenced secret changes in the store's own namespace.
 func TestReconcile_OmittedNamespaceMatchesSameNamespaceSecret(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -258,7 +251,7 @@ func TestSecretIsReferenced_OOSProvider(t *testing.T) {
 // TestReconcile_OOSProviderStoreTriggered covers the reconcile path for a
 // SecretStore that uses the OOS provider instead of KMS.
 func TestReconcile_OOSProviderStoreTriggered(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-oos", Namespace: "ns1"},
@@ -304,7 +297,7 @@ func TestReconcile_OOSProviderStoreTriggered(t *testing.T) {
 // TestReconcile_DeletedSecretTriggersStoreReconcile covers the delete path:
 // the secret no longer exists, but stores referencing it must still be triggered.
 func TestReconcile_DeletedSecretTriggersStoreReconcile(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -322,7 +315,7 @@ func TestReconcile_DeletedSecretTriggersStoreReconcile(t *testing.T) {
 	}
 	// No secret object: it has been deleted.
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore).Build()
-	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "cred"},
@@ -351,7 +344,7 @@ func TestReconcile_DeletedSecretTriggersStoreReconcile(t *testing.T) {
 // TestReconcile_DeletedUnreferencedSecretTriggersNothing ensures a deleted secret
 // that no store references does not trigger any store.
 func TestReconcile_DeletedUnreferencedSecretTriggersNothing(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -373,5 +366,209 @@ func TestReconcile_DeletedUnreferencedSecretTriggersNothing(t *testing.T) {
 	}
 	if _, ok := updated.Annotations[secretstore.TriggerReconcileAnnotation]; ok {
 		t.Errorf("store-a unexpectedly triggered, annotations = %v", updated.Annotations)
+	}
+}
+
+// TestReconcile_PatchFailureReturnsErrorForRetry verifies that a transient
+// patch failure (e.g. an API server conflict) is returned from Reconcile so
+// controller-runtime requeues the item with exponential backoff instead of
+// silently dropping the trigger.
+func TestReconcile_PatchFailureReturnsErrorForRetry(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("cred"),
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: "ns1"},
+		Data:       map[string][]byte{"accessKeyId": []byte("ak")},
+	}
+
+	patchErr := fmt.Errorf("simulated transient patch failure (e.g. conflict)")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, secret).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				return patchErr
+			},
+		}).
+		Build()
+	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "cred"},
+	})
+	if err == nil {
+		t.Fatalf("Reconcile() error = nil, want the patch error so the workqueue retries with backoff")
+	}
+	if err != patchErr {
+		t.Errorf("Reconcile() error = %v, want %v", err, patchErr)
+	}
+}
+
+// TestReconcile_PatchFailureOnDeletedStoreSkipsWithoutError verifies that a
+// NotFound patch failure (the store was deleted between List and Patch) does
+// not fail Reconcile: there is nothing left to trigger, so retrying would be
+// an infinite loop against a deleted object.
+func TestReconcile_PatchFailureOnDeletedStoreSkipsWithoutError(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("cred"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-store"},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					AccessKey: &api.SecretRef{Name: "cred", Namespace: "ns1", Key: "accessKeyId"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: "ns1"},
+		Data:       map[string][]byte{"accessKeyId": []byte("ak")},
+	}
+
+	// Simulate the stores being deleted between List and Patch: every patch
+	// fails with NotFound.
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, secret).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				return errors.NewNotFound(schema.GroupResource{Group: "alibabacloud.com", Resource: "secretstores"}, obj.GetName())
+			},
+		}).
+		Build()
+	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "cred"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for a deleted store", err)
+	}
+}
+
+// TestReconcile_ClusterSecretStoreSkippedWhenDisabled verifies the
+// --process-cluster-secret-store=false path: the ClusterSecretStore
+// controller is disabled, so this reconciler must not patch trigger
+// annotations onto ClusterSecretStores (nobody would clear them), while the
+// SecretStore path keeps working.
+func TestReconcile_ClusterSecretStoreSkippedWhenDisabled(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("cred"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-store"},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					AccessKey: &api.SecretRef{Name: "cred", Namespace: "ns1", Key: "accessKeyId"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: "ns1"},
+		Data:       map[string][]byte{"accessKeyId": []byte("ak")},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, secret).Build()
+	// ProcessClusterSecretStore left false: the flag is disabled.
+	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "cred"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &api.SecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: "store-a"}, updated); err != nil {
+		t.Fatalf("failed to get store-a: %v", err)
+	}
+	if _, ok := updated.Annotations[secretstore.TriggerReconcileAnnotation]; !ok {
+		t.Errorf("store-a missing trigger annotation, annotations = %v", updated.Annotations)
+	}
+
+	updatedCluster := &api.ClusterSecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "cluster-store"}, updatedCluster); err != nil {
+		t.Fatalf("failed to get cluster-store: %v", err)
+	}
+	if _, ok := updatedCluster.Annotations[secretstore.TriggerReconcileAnnotation]; ok {
+		t.Errorf("cluster-store unexpectedly triggered while ClusterSecretStore processing is disabled, annotations = %v", updatedCluster.Annotations)
+	}
+}
+
+// TestReconcile_SkipsStoreWithPendingTriggerAnnotation verifies the retry-
+// amplification guard: a store that already carries a non-empty trigger
+// annotation has a pending rebuild guaranteed, so the reconciler must not
+// re-patch a fresh value (which would force another full rebuild+fan-out on
+// every whole-loop retry).
+func TestReconcile_SkipsStoreWithPendingTriggerAnnotation(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "store-a", Namespace: "ns1",
+			Annotations: map[string]string{secretstore.TriggerReconcileAnnotation: "pending-value"},
+		},
+		Spec: kmsStoreSpec("cred"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "cluster-store",
+			Annotations: map[string]string{secretstore.TriggerReconcileAnnotation: "pending-value"},
+		},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					AccessKey: &api.SecretRef{Name: "cred", Namespace: "ns1", Key: "accessKeyId"},
+				},
+			},
+		},
+	}
+	secret := &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: "cred", Namespace: "ns1"},
+		Data:       map[string][]byte{"accessKeyId": []byte("ak")},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, secret).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				t.Fatalf("Patch must not be called for stores that already carry a pending trigger annotation")
+				return nil
+			},
+		}).
+		Build()
+	r := &SecretReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "cred"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &api.SecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: "store-a"}, updated); err != nil {
+		t.Fatalf("failed to get store-a: %v", err)
+	}
+	if got := updated.Annotations[secretstore.TriggerReconcileAnnotation]; got != "pending-value" {
+		t.Errorf("store-a trigger annotation = %q, want the untouched pending-value", got)
+	}
+
+	updatedCluster := &api.ClusterSecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "cluster-store"}, updatedCluster); err != nil {
+		t.Fatalf("failed to get cluster-store: %v", err)
+	}
+	if got := updatedCluster.Annotations[secretstore.TriggerReconcileAnnotation]; got != "pending-value" {
+		t.Errorf("cluster-store trigger annotation = %q, want the untouched pending-value", got)
 	}
 }

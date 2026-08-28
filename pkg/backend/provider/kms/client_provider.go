@@ -89,15 +89,11 @@ func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, k
 		return nil, err
 	}
 
-	// Key alignment: a custom endpoint yields a composite cache key
-	// ("clientName#endpoint") in the ExternalSecret controller, so the RAM
-	// provider registry must use the same composite key. Otherwise the
-	// composite client's RegisterRamProvider would replace (and stop) the
-	// plain client's refresh provider under the bare clientName, and
-	// Delete(compositeKey) would never stop the composite refresh routine.
-	if endpoint != "" {
-		authConfig.ClientName = fmt.Sprintf("%s#%s", authConfig.ClientName, endpoint)
-	}
+	// Key alignment: a custom endpoint yields the composite cache key
+	// ("clientName#endpoint") in the controller, so the RAM provider registry
+	// must use the same key, or the composite client would replace the plain
+	// client's refresh provider and Delete(compositeKey) would never stop it.
+	authConfig.ClientName = backend.CompositeClientKey(authConfig.ClientName, endpoint)
 
 	return p.newClientWithAuth(authConfig.ClientName, authConfig, endpoint)
 }
@@ -109,9 +105,7 @@ func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error)
 	authEnvs := commonp.BuildAuthConfigFromEnv()
 
 	// Key alignment with the composite cache key; see NewClient.
-	if endpoint != "" {
-		authEnvs.ClientName = fmt.Sprintf("%s#%s", authEnvs.ClientName, endpoint)
-	}
+	authEnvs.ClientName = backend.CompositeClientKey(authEnvs.ClientName, endpoint)
 
 	return p.newClientWithAuth(authEnvs.ClientName, authEnvs, endpoint)
 }
@@ -130,11 +124,8 @@ func (p *Provider) newClientWithAuth(clientName string, auth auth.AuthConfig, cu
 		return nil, fmt.Errorf("cred is empty")
 	}
 
-	// Use custom endpoint if provided, otherwise use provider's default.
-	// All endpoints are validated to prevent SSRF attacks (CWE-918).
-	// Custom endpoints come from user-controlled ExternalSecret CR fields;
-	// the default endpoint comes from the --kms-endpoint CLI flag which
-	// could be misconfigured by a cluster admin.
+	// All endpoints are validated against SSRF (CWE-918): custom endpoints
+	// come from user-controlled CR fields, the default from a CLI flag.
 	endpoint := customEndpoint
 	if endpoint == "" {
 		endpoint = p.GetEndpoint()

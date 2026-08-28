@@ -1,3 +1,10 @@
+// partial_failure_contract_test.go contains the partial-failure contract
+// truth table tests: shouldSkipSecretWrite, status result merging, and
+// failed-key collection contracts.
+//
+// Related coverage lives in sibling files for discoverability:
+//   - duplicate-key-specific coverage: duplicate_key_coverage_test.go
+//   - JMESPath fallback-key coverage: final_key_fallback_test.go
 package externalsecret
 
 import (
@@ -6,9 +13,14 @@ import (
 	"testing"
 	"time"
 
-	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+
+	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
+
+// ---------------------------------------------------------------------------
+// Section 1: contract truth table
+// ---------------------------------------------------------------------------
 
 // TestShouldSkipSecretWriteTruthTable covers the skip-guard truth table
 // documented on shouldSkipSecretWrite (partial_failure.go), including
@@ -234,21 +246,137 @@ func TestBuildDataSyncResults(t *testing.T) {
 	}
 }
 
-// TestCollectFailedKeys verifies deterministic ordering of failed keys.
+// TestCollectFailedKeys verifies deterministic ordering and cross-map
+// deduplication of failed keys.
 func TestCollectFailedKeys(t *testing.T) {
-	keys := collectFailedKeys(
-		map[string]error{"zeta": fmt.Errorf("e1"), "alpha": fmt.Errorf("e2")},
-		map[string]error{"mid": fmt.Errorf("e3")},
-	)
-	expected := []string{"alpha", "mid", "zeta"}
-	if len(keys) != len(expected) {
-		t.Fatalf("expected %v, got %v", expected, keys)
+	t.Run("sorted keys without conflict", func(t *testing.T) {
+		keys := collectFailedKeys(
+			map[string]error{"zeta": fmt.Errorf("e1"), "alpha": fmt.Errorf("e2")},
+			map[string]error{"mid": fmt.Errorf("e3")},
+		)
+		expected := []string{"alpha", "mid", "zeta"}
+		assertKeysEqual(t, expected, keys)
+	})
+
+	t.Run("cross-map duplicate key appears once", func(t *testing.T) {
+		keys := collectFailedKeys(
+			map[string]error{"shared": fmt.Errorf("data err"), "alpha": fmt.Errorf("e2")},
+			map[string]error{"shared": fmt.Errorf("extract err"), "zeta": fmt.Errorf("e3")},
+		)
+		expected := []string{"alpha", "shared", "zeta"}
+		assertKeysEqual(t, expected, keys)
+	})
+
+	t.Run("empty maps yield empty result", func(t *testing.T) {
+		keys := collectFailedKeys(map[string]error{}, nil)
+		if len(keys) != 0 {
+			t.Fatalf("expected empty result, got %v", keys)
+		}
+	})
+
+	t.Run("nil error values are skipped (aligned with collectFailedErrors)", func(t *testing.T) {
+		keys := collectFailedKeys(
+			map[string]error{"data-nil": nil, "data-ok": fmt.Errorf("e1")},
+			map[string]error{"extract-nil": nil, "extract-ok": fmt.Errorf("e2")},
+		)
+		expected := []string{"data-ok", "extract-ok"}
+		assertKeysEqual(t, expected, keys)
+	})
+}
+
+func assertKeysEqual(t *testing.T, expected, got []string) {
+	t.Helper()
+	if len(got) != len(expected) {
+		t.Fatalf("expected %v, got %v", expected, got)
 	}
 	for i := range expected {
-		if keys[i] != expected[i] {
-			t.Fatalf("expected %v, got %v", expected, keys)
+		if got[i] != expected[i] {
+			t.Fatalf("expected %v, got %v", expected, got)
 		}
 	}
+}
+
+// TestCollectFailedErrors verifies the merge contract of collectFailedErrors:
+// disjoint maps merge verbatim, cross-map key collisions retain both errors
+// instead of silently overwriting, and nil error values never panic.
+func TestCollectFailedErrors(t *testing.T) {
+	t.Run("disjoint maps merge verbatim", func(t *testing.T) {
+		errs := collectFailedErrors(
+			map[string]error{"data-key": fmt.Errorf("kms error")},
+			map[string]error{"extract-key": fmt.Errorf("oos error")},
+		)
+		if len(errs) != 2 {
+			t.Fatalf("expected 2 entries, got %v", errs)
+		}
+		if errs["data-key"] != "kms error" {
+			t.Errorf("expected verbatim data error, got %q", errs["data-key"])
+		}
+		if errs["extract-key"] != "oos error" {
+			t.Errorf("expected verbatim extract error, got %q", errs["extract-key"])
+		}
+	})
+
+	t.Run("cross-map key collision retains both errors", func(t *testing.T) {
+		errs := collectFailedErrors(
+			map[string]error{"shared": fmt.Errorf("kms error")},
+			map[string]error{"shared": fmt.Errorf("oos error")},
+		)
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 entry, got %v", errs)
+		}
+		expected := "data: kms error; extract: oos error"
+		if errs["shared"] != expected {
+			t.Errorf("expected %q, got %q", expected, errs["shared"])
+		}
+	})
+
+	t.Run("empty and single-map inputs", func(t *testing.T) {
+		if got := collectFailedErrors(nil, nil); len(got) != 0 {
+			t.Errorf("expected empty result for nil maps, got %v", got)
+		}
+		if got := collectFailedErrors(map[string]error{}, map[string]error{}); len(got) != 0 {
+			t.Errorf("expected empty result for empty maps, got %v", got)
+		}
+		got := collectFailedErrors(map[string]error{"only-data": fmt.Errorf("e1")}, nil)
+		if len(got) != 1 || got["only-data"] != "e1" {
+			t.Errorf("expected single data error, got %v", got)
+		}
+		got = collectFailedErrors(nil, map[string]error{"only-extract": fmt.Errorf("e2")})
+		if len(got) != 1 || got["only-extract"] != "e2" {
+			t.Errorf("expected single extract error, got %v", got)
+		}
+	})
+
+	t.Run("nil error values are skipped without panic", func(t *testing.T) {
+		errs := collectFailedErrors(
+			map[string]error{"data-nil": nil, "data-ok": fmt.Errorf("e1")},
+			map[string]error{"extract-nil": nil, "extract-ok": fmt.Errorf("e2")},
+		)
+		if len(errs) != 2 {
+			t.Fatalf("expected 2 entries (nil values skipped), got %v", errs)
+		}
+		if errs["data-ok"] != "e1" {
+			t.Errorf("expected data error preserved, got %q", errs["data-ok"])
+		}
+		if errs["extract-ok"] != "e2" {
+			t.Errorf("expected extract error preserved, got %q", errs["extract-ok"])
+		}
+	})
+
+	t.Run("data-side nil with extract-side error yields verbatim extract error", func(t *testing.T) {
+		errs := collectFailedErrors(
+			map[string]error{"shared": nil},
+			map[string]error{"shared": fmt.Errorf("oos error")},
+		)
+		if len(errs) != 1 {
+			t.Fatalf("expected 1 entry, got %v", errs)
+		}
+		// The nil data-side error is skipped before collision handling, so no
+		// "data: ...; extract: ..." prefix form appears.
+		if errs["shared"] != "oos error" {
+			t.Errorf("expected verbatim extract error, got %q", errs["shared"])
+		}
+	})
 }
 
 // TestMergeWithFailedKeys verifies the partial-failure merge strategy:

@@ -16,11 +16,8 @@ func isValidJSON(data []byte) bool {
 }
 
 // ResolveTargetKey returns the target key for a non-jmesPath data entry:
-// spec.data[].name when set, otherwise falling back to spec.data[].key.
-// This matches the documented contract that omitting name defaults to the
-// key value, and is the single key-derivation implementation shared by the
-// success path (getExternalSecret) and the failure path
-// (collectFailedEntryTargetKeys).
+// spec.data[].name when set, otherwise spec.data[].key. Single
+// key-derivation implementation shared by the success and failure paths.
 func ResolveTargetKey(data *v1alpha1.DataSource) string {
 	if data.Name != "" {
 		return data.Name
@@ -32,14 +29,14 @@ func ResolveTargetKey(data *v1alpha1.DataSource) string {
 func ProcessExternalSecretData(data *v1alpha1.DataSource, externalData []byte) (map[string][]byte, error) {
 	secretDatas := make(map[string][]byte)
 
-	// Process JMESPath expressions if present
 	if len(data.JMESPath) > 0 {
 		klog.Infof("parse jmes format, key %v", data.Key)
 		jsonDataMap, err := utils.GetJsonSecrets(data.JMESPath, string(externalData), data.Key)
 		if err != nil {
-			klog.Errorf("parse jmes format error %v, key %v, jmes %v", err, data.Key, data.JMESPath)
+			// Single log point for the parse failure plus its consequence:
+			// the entry falls through to the raw-data fallback below.
+			klog.Errorf("parse jmes format error %v, key %v, jmes %v; falling back to raw data", err, data.Key, data.JMESPath)
 		} else if len(jsonDataMap) > 0 {
-			// Use parsed k-value in target secret
 			for k, v := range jsonDataMap {
 				secretDatas[k] = []byte(v)
 			}
@@ -47,22 +44,20 @@ func ProcessExternalSecretData(data *v1alpha1.DataSource, externalData []byte) (
 		}
 	}
 
-	// Use the default name if no JMESPath processing was done.
-	// When name is omitted, fall back to the data key so the produced
-	// Secret entry never carries an empty key (rejected by the API server).
+	// Fallback key: name, or data.Key when name is omitted, so the Secret
+	// entry never carries an empty key (rejected by the API server).
 	secretDatas[ResolveTargetKey(data)] = externalData
 	return secretDatas, nil
 }
 
-// ProcessExtractedExternalSecretData processes extracted secret data from YAML/JSON
-// Preserves the original format: JSON input -> JSON output, YAML input -> YAML output
+// ProcessExtractedExternalSecretData processes extracted secret data from
+// YAML/JSON, preserving the original format (JSON in -> JSON out).
 func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData []byte) (map[string][]byte, error) {
 	secretDatas := make(map[string][]byte)
 
 	tempKV := make(map[string]interface{})
 
-	// Detect format by checking if it's valid JSON first
-	// JSON is stricter, so we validate it before attempting YAML parsing
+	// JSON is stricter, so validate it before attempting YAML
 	isJSON := isValidJSON(externalData)
 
 	var err error
@@ -77,7 +72,7 @@ func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData
 		return nil, err
 	}
 
-	// Serialize using the same format as input
+	// Serialize in the input format
 	kv := make(map[string]string)
 	for k, v := range tempKV {
 		if isJSON {
@@ -87,10 +82,9 @@ func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData
 		}
 	}
 
-	// Apply key replacement rules if any. A rule that fails to compile is a
-	// configuration error: fail closed and propagate the error instead of
-	// continuing, because a nil rewrite result would silently drop every
-	// extracted key.
+	// Apply key replacement rules. A rule that fails to compile is a
+	// configuration error: fail closed instead of continuing, because a nil
+	// rewrite result would silently drop every extracted key.
 	if len(data.ReplaceKey) != 0 {
 		for _, rule := range data.ReplaceKey {
 			var err error
@@ -102,7 +96,6 @@ func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData
 		}
 	}
 
-	// Convert to final result map
 	for k, v := range kv {
 		secretDatas[k] = []byte(v)
 	}

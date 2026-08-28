@@ -749,10 +749,19 @@ func TestIsNamespaceAllowedForClusterExternalSecret(t *testing.T) {
 			want: true,
 		},
 		{
-			name: "condition regex is anchored (no substring match)",
+			name: "condition regex matches as substring",
 			conditions: []v1alpha1.ClusterExternalSecretCondition{
-				// "team-a" must not match namespace "team-a-ns" as a substring.
+				// "team-a" matches namespace "team-a-ns" as a substring,
+				// consistent with upstream ESO regexp.MatchString semantics.
 				{NamespaceRegexes: []string{"team-a"}},
+			},
+			want: true,
+		},
+		{
+			name: "condition regex with anchor denies non-matching",
+			conditions: []v1alpha1.ClusterExternalSecretCondition{
+				// User-supplied ^...$ is respected.
+				{NamespaceRegexes: []string{"^team-a$"}},
 			},
 			want: false,
 		},
@@ -839,6 +848,7 @@ func TestIsNamespaceAllowedForClusterSecretStore(t *testing.T) {
 
 	tests := []struct {
 		name       string
+		namespace  string // empty means the default namespaceName
 		conditions []v1alpha1.ClusterSecretStoreCondition
 		getClient  func(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error
 		want       bool
@@ -914,6 +924,35 @@ func TestIsNamespaceAllowedForClusterSecretStore(t *testing.T) {
 			want:      true,
 		},
 		{
+			name: "condition regex matches as substring (CSS)",
+			// "team-a" matches namespace "team-a-ns" as a substring,
+			// consistent with upstream ESO regexp.MatchString semantics.
+			conditions: []v1alpha1.ClusterSecretStoreCondition{
+				{NamespaceRegexes: []string{"team-a"}},
+			},
+			getClient: fakeNamespaceGetter(nsLabels, false),
+			want:      true,
+		},
+		{
+			name:      "condition regex exact match allowed",
+			namespace: "team-a",
+			conditions: []v1alpha1.ClusterSecretStoreCondition{
+				{NamespaceRegexes: []string{"team-a"}},
+			},
+			getClient: fakeNamespaceGetter(nsLabels, false),
+			want:      true,
+		},
+		{
+			name:      "condition regex with anchor denies suffix",
+			namespace: "evil-team-a",
+			conditions: []v1alpha1.ClusterSecretStoreCondition{
+				// User-supplied ^...$ is respected.
+				{NamespaceRegexes: []string{"^team-a$"}},
+			},
+			getClient: fakeNamespaceGetter(nsLabels, false),
+			want:      false,
+		},
+		{
 			name: "get namespace failure is denied (fail-closed)",
 			conditions: []v1alpha1.ClusterSecretStoreCondition{
 				{Namespaces: []string{namespaceName}},
@@ -925,11 +964,15 @@ func TestIsNamespaceAllowedForClusterSecretStore(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			ns := tt.namespace
+			if ns == "" {
+				ns = namespaceName
+			}
 			css := &v1alpha1.ClusterSecretStore{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-css"},
 				Spec:       v1alpha1.ClusterSecretStoreSpec{Conditions: tt.conditions},
 			}
-			if got := IsNamespaceAllowedForClusterSecretStore(css, namespaceName, tt.getClient); got != tt.want {
+			if got := IsNamespaceAllowedForClusterSecretStore(css, ns, tt.getClient); got != tt.want {
 				t.Errorf("IsNamespaceAllowedForClusterSecretStore() = %v, want %v", got, tt.want)
 			}
 		})

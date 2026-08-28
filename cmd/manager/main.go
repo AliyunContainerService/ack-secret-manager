@@ -21,13 +21,14 @@ import (
 	"fmt"
 	"os"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 
-	"github.com/operator-framework/operator-lib/leader"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	klog "k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
@@ -89,7 +90,7 @@ func main() {
 	flag.StringVar(&selectedBackend, "backend", "alicloud-kms", "Selected backend. Only alicloud-kms supported")
 	flag.DurationVar(&rotationInterval, "polling-interval", 120*time.Second, "How often the controller will sync existing secret from kms")
 	flag.BoolVar(&disablePolling, "disable-polling", false, "Disable auto polling external secret from kms.")
-	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 120*time.Second, "Polling interval to check token expiration time.")
+	flag.DurationVar(&tokenRotationPeriod, "token-rotation-period", 0, "Deprecated: this flag is ignored and kept only for compatibility with old manifests.")
 	flag.DurationVar(&reconcilePeriod, "reconcile-period", 5*time.Second, "How often the controller will re-queue externalsecret events")
 	flag.IntVar(&reconcileCount, "reconcile-count", 1, "The max concurrency reconcile work at the same time")
 	flag.StringVar(&region, "region", "", "Region id, change it according to where you want to pull the secret from")
@@ -97,10 +98,10 @@ func main() {
 	flag.StringVar(&uid, "uid", "", "RAM User ID for the deployment cluster")
 	flag.StringVar(&watchNamespaces, "watch-namespaces", "", "Comma separated list of namespaces that ack-secret-manager watch. By default all namespaces are watched.")
 	flag.StringVar(&excludeNamespaces, "exclude-namespaces", "", "Comma separated list of namespaces that that ack-secret-manager will not watch. By default all namespaces are watched.")
-	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
-	flag.IntVar(&maxConcurrentKmsSecretPulls, "max-concurrent-kms-secret-pulls", 10, "used to control how many kms secrets are pulled at the same time.")
-	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control how many oos secrets are pulled at the same time.")
-	flag.BoolVar(&enableWorkerRole, "enable-worker-role", true, "Cluster type")
+	flag.IntVar(&maxConcurrentSecretPulls, "max-concurrent-secret-pulls", 10, "deprecated: use max-concurrent-kms-secret-pulls instead; only takes effect when max-concurrent-kms-secret-pulls is not set.")
+	flag.IntVar(&maxConcurrentKmsSecretPulls, "max-concurrent-kms-secret-pulls", 10, "used to control the maximum number of kms secret pulls per second (rate limit).")
+	flag.IntVar(&maxConcurrentOosSecretPulls, "max-concurrent-oos-secret-pulls", 10, "used to control the maximum number of oos secret pulls per second (rate limit).")
+	flag.BoolVar(&enableWorkerRole, "enable-worker-role", false, "Enable WorkerRole (ECS RAM Role) authentication as the last tier of the auth chain. Set to true for ACK clusters where the node RAM role has KMS access.")
 	flag.StringVar(&kmsEndpoint, "kms-endpoint", "", "KMS endpoint")
 	flag.BoolVar(&cleanUpSecretOnFailure, "cleanup-secret-on-failure", false, "delete the corresponding cluster Secret when all data sources fail to sync (no data available), including ExternalSecrets with templates; on partial failures the Secret is never deleted and is handled by the merge/fail-closed strategy instead.")
 	flag.BoolVar(&processClusterSecretStore, "process-cluster-secret-store", true, "Enable processing of ClusterSecretStore resources")
@@ -111,22 +112,22 @@ func main() {
 	flag.Parse()
 
 	backend.EnableWorkerRole = enableWorkerRole
-
-	// Set the cross namespace auth ref flag for backend providers
 	common.EnableCrossNamespaceAuthRef = enableCrossNamespaceAuthRef
 
 	finalMaxConcurrentSecretPulls := maxConcurrentKmsSecretPulls
 
+	deprecatedPullsSet, kmsPullsSet := false, false
 	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "max-concurrent-secret-pulls" {
-			finalMaxConcurrentSecretPulls = maxConcurrentSecretPulls
+		switch f.Name {
+		case "max-concurrent-secret-pulls":
+			deprecatedPullsSet = true
+		case "max-concurrent-kms-secret-pulls":
+			kmsPullsSet = true
 		}
 	})
-	flag.Visit(func(f *flag.Flag) {
-		if f.Name == "max-concurrent-kms-secret-pulls" {
-			finalMaxConcurrentSecretPulls = maxConcurrentKmsSecretPulls
-		}
-	})
+	if deprecatedPullsSet && !kmsPullsSet {
+		finalMaxConcurrentSecretPulls = maxConcurrentSecretPulls
+	}
 
 	maxConcurrentKmsSecretPulls = finalMaxConcurrentSecretPulls
 
@@ -137,14 +138,6 @@ func main() {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	// Become the leader before proceeding
-	// Using leader-for-life selection to avoid split brain
-	err := leader.Become(ctx, "ack-secret-manager-lock")
-	if err != nil {
-		log.Error(err, "")
-		os.Exit(1)
-	}
-
 	opts := &backend.ProviderOptions{
 		Region:           region,
 		KmsEndpoint:      kmsEndpoint,
@@ -154,25 +147,114 @@ func main() {
 		Uid:              uid,
 	}
 	for providerName, f := range backend.SupportProvider {
-		log.Info("new provider ", providerName)
+		log.Info("new provider", "provider", providerName)
 		f(opts)
 	}
 
-	err = backend.NewProviderClientByENV()
-	if err != nil {
-		log.Error(err, "")
-	}
 	var syncPeriod = 10 * time.Hour
 	if disablePolling {
 		syncPeriod = 365 * 24 * time.Hour
 	}
 
-	// Create a new Cmd to provide shared dependencies and start components
+	// Parse the namespace scope flags BEFORE creating the manager: the include
+	// whitelist feeds cache.Options.DefaultNamespaces, fixed at NewManager time.
+	nsSlice := func(ns string) []string {
+		parts := strings.Split(strings.Trim(strings.TrimSpace(ns), "\""), ",")
+		out := make([]string, 0, len(parts))
+		for _, p := range parts {
+			// Trim every element so whitespace variants cannot bypass the
+			// same-name conflict fail-fast; drop entries from trailing commas.
+			if p = strings.TrimSpace(p); p != "" {
+				out = append(out, p)
+			}
+		}
+		return out
+	}
+
+	watchNs := make(map[string]bool)
+	if len(watchNamespaces) > 0 {
+		parsedWatch := nsSlice(watchNamespaces)
+		if len(parsedWatch) == 0 {
+			// Fail-open is preserved, but the silent no-op must not go
+			// unnoticed: the operator keeps running cluster-wide while the
+			// configurator believes a scope is active.
+			log.Info("WARNING: --watch-namespaces input contains no usable namespace after parsing; the flag is ignored and the scope stays cluster-wide",
+				"input", watchNamespaces)
+		}
+		for _, ns := range parsedWatch {
+			watchNs[ns] = true
+		}
+	}
+	// Fail-fast on conflicts: a namespace listed in BOTH flags would let the
+	// exclude entry silently overwrite the include entry and degrade the
+	// whitelist into a near-cluster-wide watch, so refuse to start.
+	var conflictingNs []string
+	if len(excludeNamespaces) > 0 {
+		parsedExclude := nsSlice(excludeNamespaces)
+		if len(parsedExclude) == 0 {
+			// Same silent no-op hazard as --watch-namespaces above.
+			log.Info("WARNING: --exclude-namespaces input contains no usable namespace after parsing; the flag is ignored and the scope stays cluster-wide",
+				"input", excludeNamespaces)
+		}
+		for _, ns := range parsedExclude {
+			if watchNs[ns] {
+				conflictingNs = append(conflictingNs, ns)
+			}
+			watchNs[ns] = false
+		}
+	}
+	if len(conflictingNs) > 0 {
+		sort.Strings(conflictingNs)
+		log.Error(fmt.Errorf("namespace(s) %s are listed in both --watch-namespaces and --exclude-namespaces",
+			strings.Join(conflictingNs, ", ")), "conflicting namespace configuration, refusing to start")
+		os.Exit(1)
+	}
+
+	// Community-convention namespace scoping: once any namespace scope is
+	// configured, the cluster-scoped controllers are auto-disabled (overrides
+	// explicit flags; original values disclosed in the log) -- a
+	// namespace-scoped operator must not provision cluster-wide resources.
+	if scoped := len(watchNs) > 0; scoped && (processClusterSecretStore || processClusterExternalSecret) {
+		log.Info("namespace scope configured via watch/exclude namespaces: cluster-scoped controllers auto-disabled; explicitly configured flag values have been overridden",
+			"processClusterSecretStore", processClusterSecretStore,
+			"processClusterExternalSecret", processClusterExternalSecret)
+		processClusterSecretStore = false
+		processClusterExternalSecret = false
+	}
+
+	// Include whitelist narrows the manager cache via DefaultNamespaces;
+	// exclude entries are enforced at the predicate level, and the fail-fast
+	// above guarantees both sets are disjoint.
+	cacheOptions := cache.Options{
+		SyncPeriod: &syncPeriod,
+	}
+	var whitelisted []string
+	for ns, included := range watchNs {
+		if included {
+			whitelisted = append(whitelisted, ns)
+		}
+	}
+	if len(whitelisted) > 0 {
+		sort.Strings(whitelisted)
+		cacheOptions.DefaultNamespaces = make(map[string]cache.Config, len(whitelisted))
+		for _, ns := range whitelisted {
+			cacheOptions.DefaultNamespaces[ns] = cache.Config{}
+		}
+		log.Info("manager cache restricted to the watched namespace whitelist",
+			"namespaces", strings.Join(whitelisted, ", "))
+	}
+
+	if os.Getenv("POD_NAMESPACE") == "" {
+		klog.Warningf("POD_NAMESPACE is not set: leader election namespace falls back to the in-cluster ServiceAccount namespace file; running out-of-cluster will fail manager startup")
+	}
+
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
-		Scheme: scheme,
-		Cache: cache.Options{
-			SyncPeriod: &syncPeriod,
-		},
+		Scheme:                        scheme,
+		Cache:                         cacheOptions,
+		LeaderElection:                true,
+		LeaderElectionID:              "ack-secret-manager-lock",
+		LeaderElectionNamespace:       os.Getenv("POD_NAMESPACE"),
+		LeaderElectionReleaseOnCancel: true,
 	})
 	if err != nil {
 		log.Error(err, "unable to start manager")
@@ -183,25 +265,8 @@ func main() {
 
 	// Setup Scheme for all resources
 	if err := apis.AddToScheme(mgr.GetScheme()); err != nil {
-		log.Error(err, "")
+		log.Error(err, "failed to add apis to scheme")
 		os.Exit(1)
-	}
-
-	nsSlice := func(ns string) []string {
-		trimmed := strings.Trim(strings.TrimSpace(ns), "\"")
-		return strings.Split(trimmed, ",")
-	}
-
-	watchNs := make(map[string]bool)
-	if len(watchNamespaces) > 0 {
-		for _, ns := range nsSlice(watchNamespaces) {
-			watchNs[ns] = true
-		}
-	}
-	if len(excludeNamespaces) > 0 {
-		for _, ns := range nsSlice(excludeNamespaces) {
-			watchNs[ns] = false
-		}
 	}
 
 	esReconciler := externalsecret.ExternalSecretReconciler{
@@ -215,6 +280,9 @@ func main() {
 		WatchNamespaces:        watchNs,
 		RotationInterval:       rotationInterval,
 		EnableCrossNamespace:   enableCrossNamespaceSecretStore,
+		// Drives the freshness-guard degraded mode and the CSS-disabled status
+		// notice when the CSS controller is not registered.
+		ProcessClusterSecretStore: processClusterSecretStore,
 	}
 
 	esReconciler.KmsLimiter.SecretPullLimiter = rate.NewLimiter(rate.Limit(maxConcurrentKmsSecretPulls), 1)
@@ -284,11 +352,12 @@ func main() {
 		log.Info("ClusterExternalSecret controller disabled")
 	}
 
-	// Setup SecretRef controller to watch for secret data changes
+	// Watches Secret data changes to trigger re-sync
 	secretRefReconciler := &secret.SecretReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Log:    ctrl.Log.WithName("controllers").WithName("SecretRef"),
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		Log:                       ctrl.Log.WithName("controllers").WithName("SecretRef"),
+		ProcessClusterSecretStore: processClusterSecretStore,
 	}
 	if err = secretRefReconciler.SetupWithManager(mgr, reconcileCount); err != nil {
 		log.Error(err, "unable to create controller", "controller", "SecretRef")
@@ -296,11 +365,12 @@ func main() {
 	}
 	log.Info("SecretRef controller started")
 
-	// Setup ServiceAccountRef controller to watch for SA annotation changes
+	// Watches ServiceAccount annotation changes to rebuild auth clients
 	serviceAccountRefReconciler := &serviceaccount.ServiceAccountReconciler{
-		Client: mgr.GetClient(),
-		Scheme: mgr.GetScheme(),
-		Log:    ctrl.Log.WithName("controllers").WithName("ServiceAccountRef"),
+		Client:                    mgr.GetClient(),
+		Scheme:                    mgr.GetScheme(),
+		Log:                       ctrl.Log.WithName("controllers").WithName("ServiceAccountRef"),
+		ProcessClusterSecretStore: processClusterSecretStore,
 	}
 	if err = serviceAccountRefReconciler.SetupWithManager(mgr, reconcileCount); err != nil {
 		log.Error(err, "unable to create controller", "controller", "ServiceAccountRef")

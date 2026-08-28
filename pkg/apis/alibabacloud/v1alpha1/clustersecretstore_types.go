@@ -61,6 +61,13 @@ type ClusterSecretStoreStatus struct {
 	Conditions []SecretStoreStatusCondition `json:"conditions,omitempty"`
 	// +optional
 	Capabilities SecretStoreCapabilities `json:"capabilities,omitempty"`
+	// ClientGeneration is a monotonic counter bumped every time the Store
+	// controller successfully rebuilds the backend client and persists the
+	// status. Consumers (the ExternalSecret reverse-watch predicates and the
+	// client-freshness guard) use it to detect client rebuilds even when
+	// metadata.generation is unchanged (e.g. trigger-annotation rotations).
+	// +optional
+	ClientGeneration int64 `json:"clientGeneration,omitempty"`
 }
 
 //+kubebuilder:object:root=true

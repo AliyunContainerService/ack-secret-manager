@@ -1,6 +1,6 @@
 # ACK Secret Manager Advanced Usage Guide
 
-> This document describes the advanced features of ack-secret-manager, including JSON/YAML credential parsing, cross-account sync, kmsEndpoint configuration, credential rotation, multi-data source support, and sync failure handling semantics.
+> This document describes the advanced features of ack-secret-manager, including JSON/YAML credential parsing, cross-account sync, kmsEndpoint configuration, credential rotation, multi-data source support, sync failure handling semantics, and namespace scope restrictions.
 
 ## Table of Contents
 
@@ -10,6 +10,7 @@
 - [Credential Rotation](#credential-rotation)
 - [Multi-Data Source Support](#multi-data-source-support)
 - [Sync Failure Handling Semantics](#sync-failure-handling-semantics)
+- [Namespace Scope](#namespace-scope)
 
 ## JSON/YAML Credential Parsing
 
@@ -278,5 +279,34 @@ Transient errors are retried in a unified manner before being reported as failur
 - Sync failures are recorded in `status.dataSyncResults` (key, status, reason). Failures do not change the polling frequency, nor do they speed up or slow down subsequent sync polling.
 - When a sync round produces no data at all and the write is skipped, `status.dataSyncResults` shows an entry with Status `Failed` whose key is a synthetic identifier (not a backend secret key); the Reason explains why the write was skipped.
 - For retryable transient errors (5xx / 429 / request timeout / connection reset), the failure result may take several seconds (roughly 3–10 seconds) to surface in `status`; this is expected behavior of the retry mechanism.
-- When automatic polling is disabled (`--disable-polling` / `command.disablePolling`), a single sync failure is not retried automatically; sync is only attempted again when the spec of that ExternalSecret changes. Transient retries within a single sync are unaffected by this.
+- When automatic polling is disabled (`--disable-polling` / `command.disablePolling`), a single sync failure is not retried automatically and no periodic re-pull takes place; sync is still attempted again on events: when the spec of that ExternalSecret changes, or when a SecretStore/ClusterSecretStore it references changes (spec modification, credential-rotation trigger, or deletion). Transient retries within a single sync are unaffected by this.
 - `status.dataSyncResults` is updated when the sync result semantics (per-key status/reason, or the overall success state) change, and the sync timestamp is forcibly refreshed after the controller actually writes to (or deletes) the target Secret. `synchronizationTime` reflects when the currently reported result was recorded and is **not** refreshed on every sync polling round: on steady-state polling rounds where the fetched data is unchanged and no Secret write occurs, it keeps the time of the last successful synchronization — do not use it as a liveness heartbeat.
+
+## Namespace Scope
+
+### Feature Description
+
+Restrict the namespace scope of credential synchronization via the `command.watchNamespaces` (allowlist) and `command.excludeNamespaces` (blocklist) parameters. `env.WATCH_NAMESPACE` has been deprecated and is no longer injected into the container environment (the variable has had no effect since early versions).
+
+### Parameter Description
+
+| Parameter | Level | Description |
+| --------- | ----- | ----------- |
+| `command.watchNamespaces` | Cache-level hard limit | The operator only watches the listed namespaces (covering ExternalSecrets, SecretStores, and the Secret/ServiceAccount resources that trigger resynchronization); events from namespaces outside the list are invisible |
+| `command.excludeNamespaces` | Event-level exclusion | ExternalSecret events in the listed namespaces are not processed and are never synced; except during deletion, no status is written or refreshed for them |
+
+### Key Behavior
+
+- Listing the same namespace in both parameters causes the operator to fail to start
+- When either parameter is configured, the ClusterSecretStore and ClusterExternalSecret controllers are automatically disabled
+- When both parameters are empty, behavior is exactly the same as before (cluster-wide watching)
+
+### Usage Notes
+
+1. Delete existing ClusterExternalSecrets before enabling the scope restriction and make sure that all child ExternalSecrets provisioned by them have been fully deleted before enabling it (the child ExternalSecrets are cleaned up automatically when the ClusterExternalSecret is deleted)
+2. Do not delete ClusterExternalSecret/ClusterSecretStore resources in the cluster while the scope restriction is in effect (their controllers are not running, and unhandled finalizers will cause deletions to hang); if one is deleted and hangs in Terminating, remove its finalizer to complete the deletion, e.g. `kubectl patch clustersecretstore <name> --type=merge -p '{"metadata":{"finalizers":[]}}'` (replace the resource kind accordingly)
+3. Keep the allowlist within dozens of namespaces (an independent watch is established per namespace for each resource type)
+4. In allowlist mode, the target namespaces of cross-namespace references must also be included in the allowlist
+5. Before enabling the allowlist, delete existing ExternalSecrets in namespaces outside the allowlist, or manually remove their finalizers — namespaces outside the allowlist are completely invisible to the operator, so no one will remove those finalizers and direct deletions will hang in Terminating forever; if such a deletion has already hung, remove the finalizer, e.g. `kubectl patch externalsecret <name> -n <namespace> --type=merge -p '{"metadata":{"finalizers":[]}}'` (replace the resource kind accordingly)
+6. Configuration changes to an existing ClusterSecretStore made while cluster-scoped controllers are disabled do not take effect: ExternalSecrets referencing it continue to sync normally with the configuration and credentials from before the change; new configuration and credential changes only take effect after the component is restarted
+7. Removing a finalizer to force-delete an ExternalSecret does not automatically delete the Secrets it generated — verify and clean them up manually

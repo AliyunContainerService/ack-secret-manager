@@ -30,35 +30,44 @@ const (
 	oidcRoleSessionName    = "ack-secret-manager"
 	defaultRoleSessionName = "ack-secret-manager"
 	oidcTokenFilePath      = "/var/run/secrets/tokens/ack-secret-manager"
+
+	// oidcProviderCreationErrPrefix is the unified error prefix for OIDC
+	// provider creation failures, identical for the KMS and OOS client
+	// paths (both flow through GetAuthCred); E2E contracts match on it.
+	oidcProviderCreationErrPrefix = "failed to create OIDC provider"
 )
 
-// TokenOIDCProvider implements OIDC provider based on dynamic token
+// TokenOIDCProvider implements an OIDC provider based on dynamic token
 type TokenOIDCProvider struct {
 	stsEndpoint     string
 	sessionName     string
 	token           string
 	roleArn         string
 	oidcProviderArn string
-	refreshPeriod   time.Duration
 
-	// mu serializes reads and updates of token/credential/expireTime/tokenExpireTime
+	// mu serializes all reads/updates of the token/credential state below
 	mu sync.Mutex
 
-	// Fields for dynamic token refresh
 	getTokenFunc    func() (string, error)
-	tokenExpireTime time.Time // When the current token expires
+	tokenExpireTime time.Time
+	// tokenIssuedAt is zero until the first successful refresh; while
+	// unknown the refresh window falls back to the remaining-time formula.
+	tokenIssuedAt time.Time
 
-	// Cached credential and expiration time
 	credential credential.Credential
 	expireTime time.Time
+	// credentialIssuedAt is zero until the first successful refresh.
+	credentialIssuedAt time.Time
 }
 
-// NewTokenOIDCProvider creates a new OIDC provider based on token
-func NewTokenOIDCProvider(stsEndpoint, sessionName, token, roleArn, oidcProviderArn string, refreshPeriod time.Duration) *TokenOIDCProvider {
-	// Estimate token expiration time, default 1 hour
+// NewTokenOIDCProvider creates a token-based OIDC provider
+func NewTokenOIDCProvider(stsEndpoint, sessionName, token, roleArn, oidcProviderArn string) *TokenOIDCProvider {
+	// Default 1 hour when the token expiration cannot be parsed
 	tokenExpireTime := time.Now().Add(1 * time.Hour)
 	if exp, err := getTokenExpireTime(token); err == nil {
 		tokenExpireTime = exp
+	} else {
+		klog.Warningf("failed to parse OIDC token expiration time, falling back to default 1h refresh window: %v", err)
 	}
 
 	return &TokenOIDCProvider{
@@ -67,20 +76,17 @@ func NewTokenOIDCProvider(stsEndpoint, sessionName, token, roleArn, oidcProvider
 		token:           token,
 		roleArn:         roleArn,
 		oidcProviderArn: oidcProviderArn,
-		refreshPeriod:   refreshPeriod,
 		tokenExpireTime: tokenExpireTime,
 	}
 }
 
-// Credentials implements the provider.CredentialsProvider interface
+// Credentials implements provider.CredentialsProvider
 func (p *TokenOIDCProvider) Credentials(context.Context) (*provider.Credentials, error) {
 	cred, err := p.GetCredential()
 	if err != nil {
 		return nil, err
 	}
 
-	// Convert credentials.Credential to *provider.Credentials
-	// Using recommended way to get credential values instead of deprecated methods
 	credentialInfo, err := cred.GetCredential()
 	if err != nil {
 		return nil, fmt.Errorf("failed to get credential info: %v", err)
@@ -93,50 +99,68 @@ func (p *TokenOIDCProvider) Credentials(context.Context) (*provider.Credentials,
 	}, nil
 }
 
-// GetCredential gets credential from STS service using OIDC token.
-// All reads and updates of the cached token/credential state are serialized
-// by p.mu: the freshness check is re-evaluated after acquiring the lock, so
-// concurrent callers never observe partially updated state and only one
-// refresh runs at a time.
+// refreshPercentage is the fraction of the TOTAL validity window at whose
+// end a proactive refresh is triggered.
+const refreshPercentage = 0.2
+
+// refreshWindow computes how far before expire a refresh should start. With
+// a known issuedAt the window is refreshPercentage of the TOTAL validity
+// duration, so refresh triggers once remaining validity enters the last 20%
+// (the remaining-time-only formula degenerates and would refresh only after
+// expiration); with unknown issuedAt the legacy remaining-time window is
+// kept. Lower bound: whenever the computed window is <= 0 - the item is
+// already expired or its validity is so short that the percentage truncates
+// to zero - the minimal positive window is returned, which means "refresh
+// immediately".
+func refreshWindow(expire, issuedAt, now time.Time) time.Duration {
+	remaining := expire.Sub(now)
+	if remaining <= 0 {
+		return time.Nanosecond // already expired: refresh immediately
+	}
+	if issuedAt.IsZero() {
+		window := time.Duration(float64(remaining) * refreshPercentage)
+		if window <= 0 {
+			window = time.Nanosecond
+		}
+		return window
+	}
+	total := expire.Sub(issuedAt)
+	if total <= 0 {
+		return time.Nanosecond
+	}
+	window := time.Duration(float64(total) * refreshPercentage)
+	if window <= 0 {
+		window = time.Nanosecond
+	}
+	return window
+}
+
+// GetCredential gets a credential from STS using the OIDC token. All cached
+// state access is serialized by p.mu, and freshness is re-checked under the
+// lock, so only one refresh runs at a time.
 func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 
-	// Define refresh threshold: refresh when 20% of validity period remains
-	// This ensures that we refresh credentials proportionally to their validity duration
-	const refreshPercentage = 0.2
+	now := time.Now()
 
-	// check if token refresh function is available
-	tokenRemaining := time.Until(p.tokenExpireTime)
-	tokenRefreshAmount := time.Duration(float64(tokenRemaining) * refreshPercentage)
-	// If token is already expired, refresh immediately
-	if tokenRefreshAmount <= 0 {
-		tokenRefreshAmount = time.Nanosecond // Use minimal positive duration to calculate refresh amount
-	}
-	needTokenRefresh := p.getTokenFunc != nil && time.Now().After(p.tokenExpireTime.Add(-tokenRefreshAmount))
+	// Refresh once remaining validity enters the last 20% of the total window
+	tokenRefreshAmount := refreshWindow(p.tokenExpireTime, p.tokenIssuedAt, now)
+	needTokenRefresh := p.getTokenFunc != nil && now.After(p.tokenExpireTime.Add(-tokenRefreshAmount))
 
-	// check if need to refresh credential
-	credRemaining := time.Until(p.expireTime)
-	credRefreshAmount := time.Duration(float64(credRemaining) * refreshPercentage)
-	// If credential is already expired, refresh immediately
-	if credRefreshAmount <= 0 {
-		credRefreshAmount = time.Nanosecond // Use minimal positive duration to calculate refresh amount
-	}
-	needCredentialRefresh := p.credential == nil || time.Now().After(p.expireTime.Add(-credRefreshAmount))
+	credRefreshAmount := refreshWindow(p.expireTime, p.credentialIssuedAt, now)
+	needCredentialRefresh := p.credential == nil || now.After(p.expireTime.Add(-credRefreshAmount))
 
 	if !needTokenRefresh && !needCredentialRefresh {
 		return p.credential, nil
 	}
 
-	// refresh OIDC token if needed
 	if needTokenRefresh {
 		newToken, err := p.getTokenFunc()
 		if err != nil {
-			// if token refresh fails, use existing credential if still valid
+			// On refresh failure keep serving the still-valid cached credential
 			if p.credential != nil && time.Now().Before(p.expireTime) {
 				klog.Warningf("Failed to refresh OIDC token, using existing credential: %v", err)
-				// The cached credential is still valid: keep serving it as-is;
-				// token refresh will be retried on the next GetCredential call.
 				return p.credential, nil
 			}
 			return nil, fmt.Errorf("failed to refresh OIDC token: %v", err)
@@ -144,25 +168,23 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 
 		p.token = newToken
 
-		// update token expiration time
 		if exp, err := getTokenExpireTime(newToken); err == nil {
 			p.tokenExpireTime = exp
 		} else {
-			// if failed to parse token expiration, use default 1 hour
 			p.tokenExpireTime = time.Now().Add(1 * time.Hour)
+			klog.Warningf("failed to parse refreshed OIDC token expiration time, falling back to default 1h refresh window: %v", err)
 		}
+		// Baseline for total-validity refresh windows
+		p.tokenIssuedAt = time.Now()
 
 		klog.Infof("Successfully refreshed OIDC token")
 	}
 
-	// create STS client
 	cfg := &openapi.Config{
 		Endpoint: tea.String(p.stsEndpoint),
-		// Bound the worst-case blocking time of the STS network call below.
-		// Without explicit timeouts a degraded STS endpoint could block this
-		// refresh indefinitely while holding p.mu, serializing every
-		// concurrent GetCredential caller of the same provider forever.
-		// Units are milliseconds (10s connect / 30s read).
+		// Explicit timeouts: a degraded STS endpoint must not block this
+		// refresh (and every concurrent GetCredential caller) forever under
+		// p.mu. Units are milliseconds.
 		ConnectTimeout: tea.Int(10 * 1000),
 		ReadTimeout:    tea.Int(30 * 1000),
 	}
@@ -171,7 +193,6 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 		return nil, fmt.Errorf("failed to create STS client: %v", err)
 	}
 
-	// call AssumeRoleWithOIDC API
 	response, err := stsClient.AssumeRoleWithOIDC(&sts.AssumeRoleWithOIDCRequest{
 		RoleArn:         tea.String(p.roleArn),
 		OIDCProviderArn: tea.String(p.oidcProviderArn),
@@ -182,7 +203,6 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 		return nil, fmt.Errorf("failed to assume role with oidc: %v", err)
 	}
 
-	// create sts credential object
 	config := &credential.Config{
 		Type:            tea.String("sts"),
 		AccessKeyId:     response.Body.Credentials.AccessKeyId,
@@ -195,26 +215,27 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 		return nil, fmt.Errorf("failed to create sts credential: %v", err)
 	}
 
-	// update cached credential and expiration time
-	p.credential = cred
+	// Replace the cached credential only after the expiration parses, so a
+	// parse failure never pairs a new credential with the stale expireTime.
 	expireTime, err := time.Parse(time.RFC3339, tea.StringValue(response.Body.Credentials.Expiration))
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse credential expiration time: %v", err)
 	}
+	p.credential = cred
 	p.expireTime = expireTime
+	p.credentialIssuedAt = time.Now()
 
 	return cred, nil
 }
 
 // getTokenExpireTime extracts the expiration time from a JWT token
 func getTokenExpireTime(token string) (time.Time, error) {
-	// Parse the token without verifying the signature
+	// Signature is intentionally not verified
 	parsedToken, _, err := new(jwt.Parser).ParseUnverified(token, jwt.MapClaims{})
 	if err != nil {
 		return time.Time{}, fmt.Errorf("failed to parse JWT token: %v", err)
 	}
 
-	// Get expiration time directly using the library's method
 	expirationTime, err := parsedToken.Claims.GetExpirationTime()
 	if err != nil || expirationTime == nil {
 		return time.Time{}, fmt.Errorf("failed to get expiration time form token: %v", err)
@@ -227,9 +248,8 @@ type AuthConfig struct {
 	ClientName string
 	RoleArn    string
 	OidcArn    string
-	// OidcArnFromDefault reports whether OidcArn was auto-generated from
-	// cluster-id/uid; an auto-derived OidcArn combined with a complete AK
-	// pair leaves AK+AssumeRole in charge (see oidcTierAllowed).
+	// OidcArnFromDefault reports whether OidcArn was auto-derived from
+	// cluster-id/uid (see oidcTierAllowed).
 	OidcArnFromDefault      bool
 	AccessKey               string
 	AccessSecretKey         string
@@ -245,11 +265,9 @@ type AuthConfig struct {
 	TokenAudiences          []string
 }
 
-// NormalizeSessionNames fills the default role session name into
-// RoleSessionName and RemoteRoleSessionName when they are empty, so that the
-// AK+AssumeRole and cross-account tiers of the authentication chain are not
-// silently skipped just because a session name was omitted. It never
-// overrides explicitly configured values.
+// NormalizeSessionNames fills the default role session name into empty
+// RoleSessionName / RemoteRoleSessionName so the AK+AssumeRole and
+// cross-account tiers are not silently skipped; explicit values are kept.
 func (a *AuthConfig) NormalizeSessionNames() {
 	if a.RoleSessionName == "" {
 		a.RoleSessionName = defaultRoleSessionName
@@ -259,34 +277,44 @@ func (a *AuthConfig) NormalizeSessionNames() {
 	}
 }
 
+// emptyAuthChainErrorMessage builds the actionable fail-closed message for
+// an auth chain that assembled zero providers. The wording is tailored to
+// the error source: the ENV client (clientName == backend.EnvClient) is
+// configured via environment variables, every other clientName belongs to a
+// SecretStore/ClusterSecretStore whose auth fields are empty. Both point at
+// the authentication guide instead of only naming the disabled WorkerRole.
+func emptyAuthChainErrorMessage(clientName string) string {
+	const docHint = "see docs/auth_guide.md for configuration details"
+	if clientName == backend.EnvClient {
+		return fmt.Sprintf("no usable authentication tier in the ENV auth chain: "+
+			"configure ENV credentials (ACCESS_KEY_ID/SECRET_ACCESS_KEY), ENV RRSA variables (ALICLOUD_ROLE_ARN/ALICLOUD_OIDC_PROVIDER_ARN), "+
+			"or pass --enable-worker-role=true explicitly to use the cluster WorkerRole on a supporting cluster; %s", docHint)
+	}
+	return fmt.Sprintf("no usable authentication tier configured for client %q: "+
+		"set authentication fields in the SecretStore/ClusterSecretStore (accessKey/accessKeySecret, serviceAccountRef or oidcProviderArn), "+
+		"or pass --enable-worker-role=true explicitly to use the cluster WorkerRole on a supporting cluster; %s", clientName, docHint)
+}
+
 func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backendp.Manager) (credential.Credential, error) {
 	providers := make([]provider.CredentialsProvider, 0)
 	var semaphoreProvider *provider.SemaphoreProvider
 
-	// Normalize session names at the entry so missing session names do not
-	// cause the AK+AssumeRole / cross-account tiers to be skipped.
-	// The authentication chain order below is unchanged.
 	a.NormalizeSessionNames()
 
-	// Fail-closed precondition, evaluated BEFORE the OIDC block: when an
-	// explicit serviceAccountRef is configured but the OIDC prerequisites
-	// are missing (OidcArn empty -- e.g. cluster-id/uid could not be
-	// resolved -- or RoleArn empty), the OIDC block below would be skipped
-	// entirely and the chain would silently fall back to lower-priority
-	// authentication methods. With an explicitly configured serviceAccountRef,
-	// SA RRSA failures are fail-closed: the ExternalSecret fails instead of
-	// silently degrading to other authentication methods.
+	// Fail-closed precondition BEFORE the OIDC block: with an explicit
+	// serviceAccountRef but missing OIDC prerequisites, silently falling
+	// back to lower-priority authentication is forbidden - the ExternalSecret
+	// must fail instead of degrading.
 	if a.ServiceAccountName != "" && (a.OidcArn == "" || a.RoleArn == "") {
 		return nil, fmt.Errorf("ServiceAccount %s/%s is explicitly configured but OIDC prerequisites are missing (oidcProviderArn=%q, roleArn=%q; cluster-id/uid may be unavailable)",
 			a.ServiceAccountNamespace, a.ServiceAccountName, a.OidcArn, a.RoleArn)
 	}
 
-	// Authentication chain order: ServiceAccount RRSA -> OIDC/RRSA -> RAM Role (AK+AssumeRole) -> AccessKey -> ECS Role (WorkerRole)
+	// Authentication chain: ServiceAccount RRSA -> OIDC/RRSA -> RAM Role (AK+AssumeRole) -> AccessKey -> ECS Role (WorkerRole)
 
-	// Priority 1: OIDC/RRSA (SA dynamic token preferred over file-based token).
-	// With an auto-derived OidcArn plus a complete AK pair, AK+AssumeRole
-	// takes precedence (0.6.2 contract); explicit config is unaffected.
-	// See oidcTierAllowed.
+	// Priority 1: OIDC/RRSA. With an auto-derived OidcArn plus a complete AK
+	// pair, AK+AssumeRole takes precedence (0.6.2 contract); explicit config
+	// is unaffected. See oidcTierAllowed.
 	oidcAllowed := a.oidcTierAllowed()
 	if !oidcAllowed && a.OidcArnFromDefault && a.AccessKey != "" && a.AccessSecretKey != "" && a.RoleArn != "" && a.ServiceAccountName == "" {
 		klog.Infof("auto-derived oidcProviderARN with complete AccessKey: AK AssumeRole takes precedence over file-based RRSA. To use RRSA instead, explicitly configure oidcProviderARN, configure serviceAccountRef, or remove the AccessKey fields.")
@@ -294,14 +322,14 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	if oidcAllowed {
 		oidcProvider, err := a.createOIDCProvider(region)
 		if err != nil {
-			// When serviceAccountRef is explicitly configured, SA RRSA failures
-			// are fail-closed: return the error instead of swallowing it and
-			// falling back to lower-priority authentication methods.
-			if a.ServiceAccountName != "" {
-				return nil, fmt.Errorf("failed to create OIDC provider for ServiceAccount %s/%s: %v", a.ServiceAccountNamespace, a.ServiceAccountName, err)
-			}
-			klog.Errorf("OIDC authentication is unavailable: %v; using alternative authentication", err)
-		} else if oidcProvider != nil {
+			// Every error path of createOIDCProvider carries an explicit
+			// serviceAccountRef, so this is fail-closed with no fallback.
+			// The prefix is the stable error contract asserted by unit and
+			// e2e tests; both the KMS and OOS client paths surface this
+			// identical message through GetAuthCred.
+			return nil, fmt.Errorf("%s for ServiceAccount %s/%s: %v", oidcProviderCreationErrPrefix, a.ServiceAccountNamespace, a.ServiceAccountName, err)
+		}
+		if oidcProvider != nil {
 			providers = append(providers, oidcProvider)
 			if a.ServiceAccountName != "" && a.ServiceAccountNamespace != "" {
 				klog.Infof("OIDC/RRSA authentication registered for %s/%s", a.ServiceAccountNamespace, a.ServiceAccountName)
@@ -334,7 +362,7 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 		}))
 	} else {
 		if len(providers) == 0 {
-			return nil, errors.New("please set auth config when EnableWorkerRole is false")
+			return nil, errors.New(emptyAuthChainErrorMessage(a.ClientName))
 		}
 	}
 
@@ -363,16 +391,14 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	return cred, nil
 }
 
-// oidcTierAllowed reports whether the OIDC/RRSA tier (Priority 1) may enter
-// the authentication chain, per the explicit-intent rules restoring the
-// 0.6.2 contract. Decision order:
+// oidcTierAllowed reports whether the OIDC/RRSA tier may enter the chain
+// (explicit-intent rules restoring the 0.6.2 contract). Decision order:
 //  1. OidcArn or RoleArn empty -> false (prerequisites missing).
-//  2. ServiceAccountName configured -> true (SA RRSA uses dynamic tokens).
-//  3. OidcArn explicitly configured (!OidcArnFromDefault) -> true, fail-closed.
+//  2. ServiceAccountName configured -> true (SA RRSA, dynamic tokens).
+//  3. OidcArn explicitly configured -> true, fail-closed.
 //  4. Incomplete AK pair -> true (dropping the tier would silently degrade).
-//  5. Auto-derived OidcArn + complete AK pair -> false (AK AssumeRole
-//     precedes auto-derived file-based RRSA); RRSA here requires an explicit
-//     oidcProviderARN (rule 3) or serviceAccountRef (rule 2).
+//  5. Auto-derived OidcArn + complete AK pair -> false: AK AssumeRole
+//     precedes auto-derived file-based RRSA.
 func (a *AuthConfig) oidcTierAllowed() bool {
 	if a.OidcArn == "" || a.RoleArn == "" {
 		return false
@@ -386,18 +412,17 @@ func (a *AuthConfig) oidcTierAllowed() bool {
 	if a.AccessKey == "" || a.AccessSecretKey == "" {
 		return true
 	}
-	// restore 0.6.2 contract: AK AssumeRole takes precedence over
-	// auto-derived file-based RRSA
+	// 0.6.2 contract: AK AssumeRole precedes auto-derived file-based RRSA
 	return false
 }
 
-// createOIDCProvider creates an OIDC provider with either dynamic token or file-based token
+// createOIDCProvider creates an OIDC provider with a dynamic or file-based token
 func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProvider, error) {
-	// Always try to get fresh dynamic token when ServiceAccount info is configured
+	// Dynamic token when ServiceAccount info is configured
 	if a.ServiceAccountName != "" && a.ServiceAccountNamespace != "" && a.KubeClient != nil {
 		dynamicToken, err := a.getIdentityToken()
 		if err != nil {
-			// When ServiceAccountRef is explicitly used, if dynamic token acquisition fails, return error directly
+			// Explicit serviceAccountRef: fail-closed
 			return nil, fmt.Errorf("failed to obtain ServiceAccount identity token for %s/%s: %v", a.ServiceAccountNamespace, a.ServiceAccountName, err)
 		}
 
@@ -405,23 +430,20 @@ func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProv
 			return nil, fmt.Errorf("ServiceAccount identity token is empty for %s/%s", a.ServiceAccountNamespace, a.ServiceAccountName)
 		}
 
-		// Use TokenOIDCProvider to avoid creating temporary files
+		// Use TokenOIDCProvider to avoid creating temporary files for the token
 		oidcProvider := NewTokenOIDCProvider(
 			provider.GetSTSEndpoint(region, true),
 			oidcRoleSessionName,
 			dynamicToken,
 			a.RoleArn,
 			a.OidcArn,
-			a.RefreshPeriod,
 		)
-
-		// Set the token refresh function
 		oidcProvider.getTokenFunc = a.getIdentityToken
 
 		return provider.CredentialsProvider(oidcProvider), nil
 	}
 
-	// Use file-based token when ServiceAccount info is not configured
+	// File-based token otherwise
 	tokenFilePath := oidcTokenFilePath
 	if a.TokenFilePath != "" {
 		tokenFilePath = a.TokenFilePath
@@ -439,21 +461,19 @@ func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProv
 	return oidcProvider, nil
 }
 
-// getIdentityToken gets dynamic token for specific ServiceAccount
+// getIdentityToken requests a dynamic token for the ServiceAccount
 func (a *AuthConfig) getIdentityToken() (string, error) {
-	// Create TokenRequest object
 	tokenRequest := &authenticationv1.TokenRequest{
 		Spec: authenticationv1.TokenRequestSpec{
 			Audiences: a.TokenAudiences,
 		},
 	}
 
-	// Use default value if audiences are not specified
+	// Default audience
 	if len(a.TokenAudiences) == 0 {
 		tokenRequest.Spec.Audiences = []string{"sts.aliyuncs.com"}
 	}
 
-	// Request to get ServiceAccount token
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 

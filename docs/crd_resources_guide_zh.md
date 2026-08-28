@@ -33,6 +33,8 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 
 **设计理念**：权限与数据分离，增强使用灵活性。
 
+> **作用域限制说明**：配置 `--watch-namespaces`（`command.watchNamespaces`）或 `--exclude-namespaces`（`command.excludeNamespaces`），或显式设置 `processClusterSecretStore`/`processClusterExternalSecret` 为 `false` 后，集群级控制器会被禁用，ClusterSecretStore 与 ClusterExternalSecret 资源将不再被处理（详见 README 升级注意事项）。
+
 ### SecretStore vs ClusterSecretStore
 
 | 特性 | SecretStore | ClusterSecretStore |
@@ -54,11 +56,18 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
 | **配置一致性** | 多个 ExternalSecret 之间可能不一致 | 由 ClusterExternalSecret 统一管理，保证一致 |
 | **适用场景** | 少量 namespace | 大量/动态 namespace |
 
+### 资源间自动同步
+
+- 更新 SecretStore/ClusterSecretStore 引用的凭据 Secret 或 ServiceAccount 中的认证信息后，控制器会自动刷新对应的 Store，无需手动操作。
+- SecretStore/ClusterSecretStore 重建 client 后，会自动触发引用它的 ExternalSecret 重新同步。可通过 SecretStore/ClusterSecretStore 的 `status.clientGeneration` 观察 client 重建次数；它是单调递增的客户端重建计数器（每次重建成功该值递增），用于事件驱动同步的新鲜度判定——引用方据此感知 store 变化并即时重新同步。
+
 ## 跨命名空间控制机制
 
 为了增强安全性和灵活性，ack-secret-manager 提供了多种跨命名空间控制机制：
 
-> **不兼容变更（v0.6.4）**：为安全加固，`enableCrossNamespaceSecretStore` 和 `enableCrossNamespaceAuthRef` 默认值从 `true` 改为 `false`。如果您的部署使用了跨命名空间引用，升级时必须在 `values.yaml` 中显式将这两个参数设置为 `true`，否则跨命名空间引用将被拒绝。
+> **不兼容变更**：
+>
+> 1. **v0.6.4**：为安全加固，`enableCrossNamespaceSecretStore` 和 `enableCrossNamespaceAuthRef` 默认值从 `true` 改为 `false`。如果您的部署使用了跨命名空间引用，升级时必须在 `values.yaml` 中显式将这两个参数设置为 `true`，否则跨命名空间引用将被拒绝。
 
 ### ExternalSecret 引用 SecretStore 控制
 
@@ -108,7 +117,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
   2. `namespaces`：明确列出允许访问的命名空间名称列表
   3. `namespaceRegexes`：使用正则表达式匹配允许访问的命名空间名称列表
 
-> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+> **注意**：`namespaceRegexes` 中的正则采用子串匹配。非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ### ClusterSecretStore 访问控制
 
@@ -118,7 +127,7 @@ ack-secret-manager 涉及 4 种 CRD，分为两类：
   2. `namespaces`：明确列出允许访问的命名空间名称列表
   3. `namespaceRegexes`：使用正则表达式匹配允许访问的命名空间名称列表
 
-> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+> **注意**：`namespaceRegexes` 中的正则采用子串匹配。非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ## 推荐使用方式
 
@@ -176,7 +185,7 @@ ClusterSecretStore 是集群级别资源，功能与 SecretStore 相同，但可
 2. **namespaceSelector**：使用标签选择器匹配 namespace
 3. **namespaceRegexes**：使用正则表达式匹配 namespace 名称
 
-> **注意**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+> **注意**：`namespaceRegexes` 中的正则采用子串匹配。非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ### 配置说明
 
@@ -361,6 +370,12 @@ ClusterExternalSecret 的关键配置字段：
 | namespace | ServiceAccount 命名空间 | 否 | SecretStore 时默认引用同 namespace，支持跨 namespace 引用（由 `command.enableCrossNamespaceAuthRef` 控制）；ClusterSecretStore 时必填 |
 | audiences | Audience 数组，用于ServiceAccount token的aud字段 | 否 | 不填时默认使用 `["sts.aliyuncs.com"]` |
 
+**status**
+
+| crd 字段 | 描述 |
+| -------- | ---- |
+| clientGeneration | 单调递增的客户端重建计数器：后端客户端每次成功重建该值加 1；用于事件驱动同步的新鲜度判定（引用它的 ExternalSecret 据此感知 store 变化并即时重新同步）。ClusterSecretStore 同样具备该字段 |
+
 ### ClusterSecretStore
 
 ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任意命名空间下的 ExternalSecret 引用。它除了具备 SecretStore 的所有功能外，还增加了访问控制配置，可以限制该资源被访问的命名空间。
@@ -383,7 +398,7 @@ ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任
 
 > KMS/OOS 下的认证字段（KMSAuth/OOSAuth）与 SecretStore 相同，请参考上方 SecretStore 参数说明。
 >
-> **正则匹配说明**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+> **正则匹配说明**：`namespaceRegexes` 中的正则采用子串匹配。非法的正则或 labelSelector 将拒绝所有命名空间。
 
 ### ExternalSecret
 
@@ -476,7 +491,7 @@ ClusterSecretStore 是集群级别的 SecretStore 资源，可被集群中的任
 | versionStage | 目标凭据的版本状态（如 `ACSCurrent`、`ACSPrevious`） | 否 | 不填时拉取最新版本（`ACSCurrent`） |
 | versionId | 目标凭据的版本号；当 provider 为 `oos` 时不需要指定 | 否 | 不填时拉取最新版本 |
 | jmesPath | 当目标凭据为 JSON/YAML 格式时，通过 JMESPath 表达式提取特定字段 | 否 | 不填时同步整个凭据内容 |
-| secretStoreRef | 该凭据引用的 SecretStore 信息；每个 `data[]` 条目通过该字段指定各自的 SecretStore | 否 | 不填时该数据源使用环境变量或 WorkerRole 认证（参考认证配置指南） |
+| secretStoreRef | 该凭据引用的 SecretStore 信息；每个 `data[]` 条目通过该字段指定各自的 SecretStore | 否 | 不填时该数据源使用环境变量认证；WorkerRole 认证需显式启用（`--enable-worker-role=true` / `command.enableWorkerRole=true`），无可用认证档时按 fail-closed 失败（报错 "no usable authentication tier"）（参考认证配置指南）；配置后环境变量凭据完全不参与该数据源认证（见[认证配置指南 - 环境变量与 SecretStore 的互斥关系](auth_guide_zh.md#环境变量与-secretstore-的互斥关系)） |
 | kmsEndpoint | 该凭据使用的 KMS Endpoint 地址，可覆盖全局配置 | 否 | 不填时依次使用全局 `command.kmsEndpoint` → 默认 `kms-vpc.{region}.aliyuncs.com` |
 
 **dataProcess（需要进行特殊处理的数据源）**
@@ -540,4 +555,4 @@ externalSecretMetadata 字段允许您自动为 ClusterExternalSecret 创建的 
 | namespaces | 明确列出允许访问的命名空间名称列表 | 否 |
 | namespaceRegexes | 使用正则表达式匹配允许访问的命名空间名称列表 | 否 |
 
-> **正则匹配说明**：`namespaceRegexes` 中的正则需完整匹配命名空间名称（如匹配 `prod-` 前缀请写 `prod-.*` 而非 `prod-`）；非法的正则或 labelSelector 将拒绝所有命名空间。
+> **正则匹配说明**：`namespaceRegexes` 中的正则采用子串匹配。非法的正则或 labelSelector 将拒绝所有命名空间。

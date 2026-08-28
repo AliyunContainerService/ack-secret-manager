@@ -1,6 +1,6 @@
 # ACK Secret Manager 高级用法指南
 
-> 本文档说明 ack-secret-manager 的高级功能，包括 JSON/YAML 凭据解析、跨账号同步、kmsEndpoint 配置、凭据轮转、多数据源支持、同步失败处理语义。
+> 本文档说明 ack-secret-manager 的高级功能，包括 JSON/YAML 凭据解析、跨账号同步、kmsEndpoint 配置、凭据轮转、多数据源支持、同步失败处理语义、命名空间限制。
 
 ## 目录
 
@@ -10,6 +10,7 @@
 - [凭据轮转](#凭据轮转)
 - [多数据源支持](#多数据源支持)
 - [同步失败处理语义](#同步失败处理语义)
+- [命名空间限制](#命名空间限制)
 
 ## JSON/YAML 凭据解析
 
@@ -278,5 +279,34 @@ spec:
 - 同步失败记录在 `status.dataSyncResults` 中（键、状态、原因）。失败不会改变轮询频率，也不会加快或减慢后续的同步轮询。
 - 当某轮同步未产出任何数据而跳过写入时，`status.dataSyncResults` 中会出现一条 Status 为 `Failed` 的条目，其 key 为合成标识（非后端密钥名），Reason 说明跳过写入的原因。
 - 对于可重试的瞬态错误（5xx/429/请求超时/连接重置），失败结果可能延迟数秒（约 3~10 秒）才反映到 `status`，这是重试机制的预期行为。
-- 关闭自动轮询（`--disable-polling` / `command.disablePolling`）后，单次同步失败不会自动重试；只有当该 ExternalSecret 的 spec 发生变更时才会再次尝试同步。单次同步过程中的瞬态重试不受此影响。
+- 关闭自动轮询（`--disable-polling` / `command.disablePolling`）后，单次同步失败不会自动重试，也不再定时重新拉取；但以下事件仍会触发重新同步：该 ExternalSecret 的 spec 发生变更，或其引用的 SecretStore/ClusterSecretStore 发生变更（spec 修改、凭据轮换触发、删除）。单次同步过程中的瞬态重试不受此影响。
 - `status.dataSyncResults` 在同步结果语义（各键的状态/原因，或整体成功状态）变化时更新，并在控制器实际写入（或删除）目标 Secret 后强制刷新同步时间戳；`synchronizationTime` 表示当前上报结果的记录时间，**不会**每次同步轮询刷新：稳态轮询轮次（拉取到的数据无变化、未写入 Secret）中，时间戳保持为上次成功同步的时间，请勿将其用作活性心跳。
+
+## 命名空间限制
+
+### 功能说明
+
+通过 `command.watchNamespaces`（白名单）与 `command.excludeNamespaces`（黑名单）参数限制凭据同步的命名空间范围。`env.WATCH_NAMESPACE` 已废弃且不再注入容器环境（该变量自早期版本起即不再生效）。
+
+### 参数说明
+
+| 参数 | 级别 | 说明 |
+| ---- | ---- | ---- |
+| `command.watchNamespaces` | 缓存级硬限制 | 组件仅监听列表内命名空间（含 ExternalSecret、SecretStore 及触发重新同步的 Secret/ServiceAccount 资源），列表外命名空间的事件不可见 |
+| `command.excludeNamespaces` | 事件级排除 | 列表内命名空间的 ExternalSecret 事件不会被处理、不会被同步，除删除流程外也不再写入或刷新任何 status |
+
+### 关键行为
+
+- 同一命名空间同时出现在两个参数中将导致组件启动失败
+- 配置任一参数时，ClusterSecretStore 与 ClusterExternalSecret 控制器会被自动禁用
+- 两个参数均为空时，行为与以往完全一致（全集群监听）
+
+### 使用提示
+
+1. 启用作用域限制前请先删除存量 ClusterExternalSecret，并确认其已下发的子 ExternalSecret 已全部完成删除后再启用（子 ExternalSecret 会随 ClusterExternalSecret 的删除自动清理）
+2. 作用域限制生效期间请勿删除集群中的 ClusterExternalSecret/ClusterSecretStore 资源（其控制器未运行，无人处理的 finalizer 会导致删除挂起）；若已删除并卡在 Terminating，可通过移除 finalizer 完成删除，例如 `kubectl patch clustersecretstore <name> --type=merge -p '{"metadata":{"finalizers":[]}}'`（按实际资源类型替换）
+3. 白名单规模建议控制在数十个命名空间以内（每个命名空间会为每种资源建立独立监听）
+4. 白名单模式下，跨命名空间引用的目标命名空间也必须在白名单内
+5. 启用白名单前，请先删除名单外命名空间中的存量 ExternalSecret，或手动移除其 finalizer——白名单模式下列表外命名空间对组件完全不可见，这些对象的 finalizer 无人摘除，直接删除会永久卡在 Terminating；若删除已挂起，可移除 finalizer，例如 `kubectl patch externalsecret <name> -n <namespace> --type=merge -p '{"metadata":{"finalizers":[]}}'`（按实际资源类型替换）
+6. 集群级控制器禁用期间，对存量 ClusterSecretStore 的配置修改不会生效：引用它的 ExternalSecret 会继续使用修改前的配置与凭据正常同步；新的配置与凭据变更仅在组件重启后生效
+7. 移除 finalizer 强制删除 ExternalSecret 不会自动删除其生成的 Secret，请人工确认并清理

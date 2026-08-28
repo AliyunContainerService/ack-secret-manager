@@ -38,3 +38,25 @@ func (p ClusterExternalSecretPredicate) Update(e event.UpdateEvent) bool {
 func (p ClusterExternalSecretPredicate) Generic(e event.GenericEvent) bool {
 	return true
 }
+
+// NamespaceWatchPredicate keeps only namespace events that can change CES
+// selection: creations, label changes and deletions.
+type NamespaceWatchPredicate struct{}
+
+func (p NamespaceWatchPredicate) Create(e event.CreateEvent) bool {
+	return e.Object != nil
+}
+
+func (p NamespaceWatchPredicate) Delete(e event.DeleteEvent) bool {
+	return e.Object != nil
+}
+
+func (p NamespaceWatchPredicate) Update(e event.UpdateEvent) bool {
+	// Only label changes affect selection; a deletion timestamp change
+	// arrives with unchanged labels and is covered by the Delete event.
+	return !reflect.DeepEqual(e.ObjectOld.GetLabels(), e.ObjectNew.GetLabels())
+}
+
+func (p NamespaceWatchPredicate) Generic(e event.GenericEvent) bool {
+	return false
+}

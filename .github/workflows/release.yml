@@ -1,26 +1,78 @@
-# .github/workflows/helm-release.yml
-name: Publish Helm Chart
+name: Tag and Release Chart
+
 on:
   push:
     branches: [master]
+    paths:
+      - 'charts/ack-secret-manager/Chart.yaml'
 
 jobs:
-  publish:
+  release:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pages: write
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
     steps:
-      - uses: actions/checkout@v4
-      - name: Set up Helm
-        uses: azure/setup-helm@v4.2.0
-        with:
-          version: v3.17.0
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract version and create tag
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          VERSION=$(grep '^version:' charts/ack-secret-manager/Chart.yaml | awk '{print $2}')
+          TAG="v${VERSION}"
+          echo "Chart version: ${VERSION}, Tag: ${TAG}"
+
+          # Check if the tag already exists on remote (no local tag history needed)
+          if git ls-remote --tags origin "refs/tags/${TAG}" | grep -q "${TAG}"; then
+            echo "Tag ${TAG} already exists, skipping tag creation"
+          else
+            git tag -a "${TAG}" -m "Release ${TAG}"
+            if git push origin "${TAG}"; then
+              echo "Successfully created and pushed tag ${TAG}"
+            else
+              echo "WARNING: Failed to push tag ${TAG}, continuing with chart release"
+            fi
+          fi
+
       - name: Package chart
         run: |
-          helm package ./charts/ack-secret-manager -d ./charts
-      - name: Update index.yaml
+          mkdir -p .publish
+          helm package ./charts/ack-secret-manager -d .publish
+
+      - name: Fetch existing index
         run: |
-          helm repo index ./charts --url https://aliyuncontainerservice.github.io/ack-secret-manager
+          if git fetch origin gh-pages 2>/dev/null \
+             && git show origin/gh-pages:index.yaml > existing-index.yaml 2>/dev/null \
+             && [ -s existing-index.yaml ] \
+             && grep -q '^apiVersion:' existing-index.yaml; then
+            echo "Existing valid index.yaml fetched successfully"
+          else
+            echo "No valid existing index.yaml found; will generate a fresh one"
+            rm -f existing-index.yaml
+          fi
+
+      - name: Generate repo index
+        run: |
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"
+          PAGES_URL="https://${OWNER_LC}.github.io/${REPO_NAME}"
+          echo "Using Pages URL: ${PAGES_URL}"
+
+          if [ -f existing-index.yaml ]; then
+            helm repo index .publish --url "$PAGES_URL" --merge existing-index.yaml
+          else
+            helm repo index .publish --url "$PAGES_URL"
+          fi
+
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./charts
+          publish_dir: ./.publish
+          keep_files: true

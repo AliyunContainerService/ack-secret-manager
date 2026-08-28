@@ -1,5 +1,9 @@
 package externalsecret
 
+// pull_limit_test.go covers the Wait-error classification used by the
+// rate_limit branch of pull_limit.go: only a canceled request context
+// disqualifies the error from being reported as rate limiting.
+
 import (
 	"context"
 	"fmt"
@@ -74,7 +78,20 @@ func TestIsWaitErrFromCancellationTimeoutCtx(t *testing.T) {
 	defer cancel()
 	waitTimeoutCtx, waitCancel := context.WithTimeout(ctx, 10*time.Millisecond)
 	defer waitCancel()
-	time.Sleep(20 * time.Millisecond) // let waitTimeoutCtx expire
+
+	// Poll until waitTimeoutCtx expires instead of a fixed sleep, so the test
+	// can never race ahead of the deadline under load; bail out with a hard
+	// bound if the timer never fires.
+	deadline := time.Now().Add(1 * time.Second)
+	for waitTimeoutCtx.Err() == nil && time.Now().Before(deadline) {
+		time.Sleep(1 * time.Millisecond)
+	}
+	// The classification assertions below only hold once the derived context
+	// has actually expired: a nil Err() would masquerade as "rate limiting"
+	// and pass this test vacuously.
+	if waitTimeoutCtx.Err() != context.DeadlineExceeded {
+		t.Fatalf("timeout context did not expire as expected: Err() = %v", waitTimeoutCtx.Err())
+	}
 
 	// Wait returns its own context's deadline error, but the request ctx is
 	// still alive -> genuine rate-limit condition, not cancellation.

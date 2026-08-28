@@ -39,36 +39,65 @@ var _ = Describe("Template Processing E2E", func() {
 		deleteTestNamespace(ctx, testNamespace)
 	})
 
-	Describe("Basic Template Processing", func() {
-		It("Should process template with no template specified (raw data)", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
+	// createTemplateStore creates a standard KMS/RRSA SecretStore and registers
+	// cleanup via DeferCleanup. Returns the store so callers can reference its
+	// Name in ExternalSecret specs.
+	createTemplateStore := func(namespace string) *api.SecretStore {
+		storeName := "template-store-" + getRandString()
+		store := &api.SecretStore{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      storeName,
+				Namespace: namespace,
+			},
+			Spec: api.SecretStoreSpec{
+				KMS: &api.KMSProvider{
+					KMS: &api.KMSAuth{
+						RAMRoleARN:      RAMRoleArnForRRSA,
+						OIDCProviderARN: OIDCProviderARN,
 					},
 				},
-			}
+			},
+		}
+		Expect(k8sClient.Create(ctx, store)).To(Succeed())
+		DeferCleanup(func() {
+			_ = k8sClient.Delete(ctx, store)
+		})
+		waitForSecretStoreReady(ctx, namespace, storeName)
+		return store
+	}
 
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
+	// syncTemplateExternalSecret creates the ExternalSecret, registers cleanup
+	// via DeferCleanup, waits for ES status Succeeded, then reads and returns
+	// the synced Secret. The Secret name is derived from Target.Name (if set)
+	// or falls back to the ES name.
+	syncTemplateExternalSecret := func(es *api.ExternalSecret) *corev1.Secret {
+		Expect(k8sClient.Create(ctx, es)).To(Succeed())
+		DeferCleanup(func() {
+			CleanupExternalSecretAndSyncedSecret(ctx, es)
+		})
 
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+		// Wait for status Succeeded before reading the Secret
+		waitForExternalSecretSucceeded(ctx, es.Namespace, es.Name, 60*time.Second)
 
-			// Create a simple ExternalSecret without template
-			esName := "basic-externalsecret-" + getRandString()
-			secretTargetName := "basic-secret-" + getRandString()
+		// Determine the Secret name
+		secretName := es.Name
+		if es.Spec.Target != nil && es.Spec.Target.Name != "" {
+			secretName = es.Spec.Target.Name
+		}
+		secret := &corev1.Secret{}
+		Expect(k8sClient.Get(ctx, types.NamespacedName{
+			Name: secretName, Namespace: es.Namespace,
+		}, secret)).To(Succeed())
+		return secret
+	}
+
+	Describe("Basic Template Processing", func() {
+		It("Should process template with no template specified (raw data)", func() {
+			store := createTemplateStore(testNamespace.Name)
+
 			externalSecret := &api.ExternalSecret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:      esName,
+					Name:      "basic-externalsecret-" + getRandString(),
 					Namespace: testNamespace.Name,
 				},
 				Spec: api.ExternalSecretSpec{
@@ -76,64 +105,29 @@ var _ = Describe("Template Processing E2E", func() {
 					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
 					Data: []api.DataSource{
 						{
-							Key:  SimpleTemplateSecretName, // Using the correct field and value from resource manager
+							Key:  SimpleTemplateSecretName,
 							Name: "key1",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
 					},
 					Target: &api.ExternalSecretTarget{
-						Name: secretTargetName,
+						Name: "basic-secret-" + getRandString(),
 					},
 				},
 			}
-
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data: Data["key1"] holds the full raw secret content
-			// (key1=value1\nkey2=value2\nstatus=enabled\nname=test-app)
 			Expect(secret.Data).To(HaveKey("key1"))
 			Expect(string(secret.Data["key1"])).To(ContainSubstring("value1"))
-
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should process simple Go template with key-value data", func() {
-			// Create SecretStore first
-			storeName := "simple-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with simple Go template using key-value data
 			esName := "simple-go-template-externalsecret-" + getRandString()
@@ -176,8 +170,8 @@ var _ = Describe("Template Processing E2E", func() {
 								Key:  GoTemplateSecretName,
 								Name: "data",
 								SecretStoreRef: &api.SecretStoreRef{
-									Name:      storeName,
-									Namespace: secretStore.Namespace,
+									Name:      store.Name,
+									Namespace: store.Namespace,
 									Kind:      ResourceSecretStore,
 								},
 							},
@@ -186,15 +180,7 @@ var _ = Describe("Template Processing E2E", func() {
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data
 			// Test 1: Direct field access
@@ -231,33 +217,10 @@ var _ = Describe("Template Processing E2E", func() {
 			deptInfo := string(secret.Data["replicas"])
 			Expect(deptInfo).To(ContainSubstring("Replicas: 3"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should process Go template with structured JSON data", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a simple ExternalSecret with template that tests various Go template syntaxes
 			// Note: GoTemplateSecretName contains a single JSON object, accessed via .data field
@@ -312,8 +275,8 @@ var _ = Describe("Template Processing E2E", func() {
 							Key:  GoTemplateSecretName,
 							Name: "data", // The entire JSON object is stored in the "data" key
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -321,15 +284,7 @@ var _ = Describe("Template Processing E2E", func() {
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data
 			// Test 1: Raw data
@@ -373,33 +328,10 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(secret.Data).To(HaveKey("first-feature"))
 			Expect(string(secret.Data["first-feature"])).To(Equal("auth"))
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should process Go template with range and with statements", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), secretStore.Namespace, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with range and with templates
 			// Using GoTemplateSecretName which contains structured JSON data in the "data" field
@@ -442,8 +374,8 @@ var _ = Describe("Template Processing E2E", func() {
 							Key:  GoTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -451,15 +383,7 @@ var _ = Describe("Template Processing E2E", func() {
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data
 			// Test 1: Features list
@@ -502,33 +426,10 @@ var _ = Describe("Template Processing E2E", func() {
 			Expect(allKeys).To(ContainSubstring("environment,"))
 			Expect(allKeys).To(ContainSubstring("database,"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should apply enabled Sprig function and preserve original value", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create an ExternalSecret verifying the enabled Sprig upper function and the
 			// pass-through behavior for values where the disabled reverse function is not applied
@@ -558,8 +459,8 @@ var _ = Describe("Template Processing E2E", func() {
 							Key:  SimpleTemplateSecretName,
 							Name: "name",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -568,52 +469,19 @@ var _ = Describe("Template Processing E2E", func() {
 			}
 
 			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
+			secret := syncTemplateExternalSecret(externalSecret)
 
-			// Wait for the corresponding secret to be created; fold the value assertions into
-			// the polling so we assert the data at the moment Eventually succeeds.
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
-					return false
-				}
-				// SimpleTemplateSecretName contains name=test-app: the enabled Sprig upper
-				// function turns it into TEST-APP, while the pass-through template keeps
-				// the original value because the disabled reverse function is not applied
-				return string(secret.Data["uppercase-name"]) == "TEST-APP" &&
-					string(secret.Data["passthrough-name"]) == "test-app"
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
-
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			// SimpleTemplateSecretName contains name=test-app: the enabled Sprig upper
+			// function turns it into TEST-APP, while the pass-through template keeps
+			// the original value because the disabled reverse function is not applied
+			Expect(string(secret.Data["uppercase-name"])).To(Equal("TEST-APP"))
+			Expect(string(secret.Data["passthrough-name"])).To(Equal("test-app"))
 		})
 	})
 
 	Describe("TemplateFrom Processing", func() {
 		It("Should process template from ConfigMap", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a ConfigMap with template content
 			// TemplateScopeKeysAndValues parses the template OUTPUT (not input)
@@ -633,7 +501,7 @@ var _ = Describe("Template Processing E2E", func() {
 DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
+			Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
 
 			// Create an ExternalSecret that uses the ConfigMap template
 			esName := "cm-template-externalsecret-" + getRandString()
@@ -669,8 +537,8 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -678,22 +546,7 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check for expected values
-				_, hasHost := secret.Data["DB_KEY1"]
-				_, hasPort := secret.Data["DB_KEY2"]
-				return hasHost && hasPort
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data
 			Expect(secret.Data).To(HaveKey("DB_KEY1"))
@@ -705,33 +558,11 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), configMap)).To(Succeed())
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, configMap)).To(Succeed())
 		})
 
 		It("Should process template from Secret", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a Secret with template content
 			templateSecretName := "template-secret-" + getRandString()
@@ -745,7 +576,7 @@ DB_KEY2={{ (parseKeyValue .data).key2 }}`,
 CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), templateSecret)).To(Succeed())
+			Expect(k8sClient.Create(ctx, templateSecret)).To(Succeed())
 
 			// Create an ExternalSecret that uses the Secret template
 			esName := "secret-template-externalsecret-" + getRandString()
@@ -781,8 +612,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  SimpleTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -790,22 +621,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check for expected values
-				_, hasApiKey := secret.Data["API_KEY"]
-				_, hasClientSecret := secret.Data["CLIENT_SECRET"]
-				return hasApiKey && hasClientSecret
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data
 			Expect(secret.Data).To(HaveKey("API_KEY"))
@@ -817,36 +633,14 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), templateSecret)).To(Succeed())
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, templateSecret)).To(Succeed())
 
 		})
 	})
 
 	Describe("Template Metadata Processing", func() {
 		It("Should process template metadata", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create an ExternalSecret with template metadata
 			esName := "metadata-template-externalsecret-" + getRandString()
@@ -882,8 +676,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  GoTemplateSecretName,
 							Name: "app_name",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -891,8 +685,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  GoTemplateSecretName,
 							Name: "env",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -900,8 +694,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  GoTemplateSecretName,
 							Name: "version",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -909,8 +703,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  GoTemplateSecretName,
 							Name: "config",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -918,26 +712,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check that the expected labels and annotations exist
-				_, hasAppLabel := secret.Labels["app"]
-				_, hasEnvLabel := secret.Labels["environment"]
-				_, hasDescriptionAnnotation := secret.Annotations["description"]
-				_, hasVersionAnnotation := secret.Annotations["version"]
-				_, hasAppConfigData := secret.Data["app-config"]
-
-				return hasAppLabel && hasEnvLabel && hasDescriptionAnnotation && hasVersionAnnotation && hasAppConfigData
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret metadata holds the exact values rendered from GoTemplateSecretName
 			Expect(secret.Labels["app"]).To(Equal("myapp"))
@@ -946,36 +721,12 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(secret.Annotations["version"]).To(Equal("v1.2.3"))
 			Expect(secret.Data).To(HaveKey("app-config"))
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Edge Cases and Error Handling", func() {
 		It("Should handle empty template gracefully", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create an ExternalSecret with empty template
 			esName := "empty-template-externalsecret-" + getRandString()
@@ -999,8 +750,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  SimpleTemplateSecretName, // Using the correct field and value from resource manager
 							Name: "key1",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1008,15 +759,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// With empty template data, the raw data should be preserved
 			// Empty Template.Data{} means "don't use template processing", not "clear all data"
@@ -1025,34 +768,10 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(secret.Data).To(HaveKey("key1"))
 			Expect(secret.Data["key1"]).ToNot(BeEmpty())
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should handle template syntax errors appropriately", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create an ExternalSecret with invalid template syntax
 			esName := "syntax-error-externalsecret-" + getRandString()
@@ -1078,8 +797,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  SimpleTemplateSecretName, // Using the correct field and value from resource manager
 							Name: "key",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1087,8 +806,10 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
 
 			// Wait and check that the ExternalSecret eventually reports a failure whose reason
 			// proves it came from the template parse-error path. Fatal parse errors are recorded
@@ -1096,7 +817,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			// carrying the parse failure (see ProcessAllTemplates/executeTemplate in template_processor.go).
 			Eventually(func() bool {
 				updatedES := &api.ExternalSecret{}
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: esName, Namespace: testNamespace.Name}, updatedES)
+				err := k8sClient.Get(ctx, types.NamespacedName{Name: esName, Namespace: testNamespace.Name}, updatedES)
 				if err != nil {
 					return false
 				}
@@ -1112,36 +833,12 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 					}
 				}
 				return false
-			}, time.Minute*1, time.Second*5).Should(BeTrue())
+			}).WithTimeout(60 * time.Second).WithPolling(5 * time.Second).Should(BeTrue())
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should handle missing data keys gracefully", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create an ExternalSecret that references a non-existent data key in the template
 			esName := "missing-key-externalsecret-" + getRandString()
@@ -1169,8 +866,8 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 							Key:  SimpleTemplateSecretName,
 							Name: "data", // Load entire key=value content as .data
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1178,15 +875,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// The missing key should result in empty string
 			// When accessing a non-existent key in a map, Go template returns the zero value
@@ -1194,10 +883,6 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(secret.Data).To(HaveKey("missing-data"))
 			Expect(string(secret.Data["missing-data"])).To(Equal(""))
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
@@ -1205,27 +890,7 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 		It("Should handle large template processing efficiently", func() {
 			startTime := time.Now()
 
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a template with many fields to test performance
 			largeTemplateData := make(map[string]string)
@@ -1258,22 +923,14 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 					Key:  SimpleTemplateSecretName,
 					Name: fmt.Sprintf("value_%d", i),
 					SecretStoreRef: &api.SecretStoreRef{
-						Name:      storeName,
-						Namespace: secretStore.Namespace,
+						Name:      store.Name,
+						Namespace: store.Namespace,
 						Kind:      ResourceSecretStore,
 					},
 				})
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify that all fields were processed
 			for i := 0; i < 50; i++ {
@@ -1287,36 +944,12 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			// Performance check - should complete within reasonable time
 			Expect(duration.Seconds()).To(BeNumerically("<", 60.0))
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Template Scope Testing", func() {
 		It("Should process template with KeysAndValues scope", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a ConfigMap with template that demonstrates KeysAndValues scope functionality
 			// This template will generate key-value pairs that get parsed into separate secret entries
@@ -1336,7 +969,7 @@ app_version=1.0
 environment={{ (.env | fromJson).environment }}`,
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
+			Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
 
 			// Create ExternalSecret with KeysAndValues template scope
 			esName := "keys-values-externalsecret-" + getRandString()
@@ -1377,8 +1010,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "username",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1386,8 +1019,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "email",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1395,8 +1028,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "env",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1404,26 +1037,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created with the exact expected values
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check parsed key-value pairs from templates against known source data:
-				// SimpleTemplateSecretName contains: key1=value1, key2=value2, status=enabled, name=test-app
-				// GoTemplateSecretName contains JSON with environment=production
-				return string(secret.Data["username"]) == "test-app" &&
-					string(secret.Data["email"]) == "enabled" &&
-					string(secret.Data["app_name"]) == "myapp" &&
-					string(secret.Data["app_version"]) == "1.0" &&
-					string(secret.Data["environment"]) == "production"
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify all expected keys hold the exact values rendered from the known source data
 			Expect(string(secret.Data["username"])).To(Equal("test-app"))
@@ -1434,36 +1048,14 @@ environment={{ (.env | fromJson).environment }}`,
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
 
-			Expect(k8sClient.Delete(context.Background(), configMap)).To(Succeed())
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, configMap)).To(Succeed())
 		})
 	})
 
 	Describe("Literal Template Testing", func() {
 		It("Should process literal template from TemplateFrom", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with literal template
 			esName := "literal-template-externalsecret-" + getRandString()
@@ -1492,8 +1084,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "status",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1501,57 +1093,19 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check for expected literal template result
-				_, hasLiteralKey := secret.Data["literal"]
-				return hasLiteralKey
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data contains the processed literal template
 			Expect(secret.Data).To(HaveKey("literal"))
 			// Should contain "ENV_ENABLED" since SimpleTemplateSecretName has status=enabled
 			Expect(string(secret.Data["literal"])).To(ContainSubstring("ENV_ENABLED"))
 
-			// Clean up - delete resources explicitly before namespace cleanup
-			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Template Target Testing", func() {
 		It("Should process template targeting Annotations", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a ConfigMap with annotation template
 			cmName := "annotation-configmap-" + getRandString()
@@ -1564,7 +1118,7 @@ environment={{ (.env | fromJson).environment }}`,
 					"app-version": `app-version=v1.2.3`,
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
+			Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
 
 			// Create ExternalSecret targeting Annotations
 			esName := "annotation-target-externalsecret-" + getRandString()
@@ -1601,8 +1155,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "version",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1610,21 +1164,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check for annotation from template
-				_, hasAnnotation := secret.Annotations["app-version"]
-				return hasAnnotation
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the annotation contains the processed template
 			Expect(secret.Annotations).To(HaveKey("app-version"))
@@ -1636,34 +1176,12 @@ environment={{ (.env | fromJson).environment }}`,
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
 
-			Expect(k8sClient.Delete(context.Background(), configMap)).To(Succeed())
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, configMap)).To(Succeed())
 		})
 
 		It("Should process template targeting Labels", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create a ConfigMap with label template
 			cmName := "label-configmap-" + getRandString()
@@ -1676,7 +1194,7 @@ environment={{ (.env | fromJson).environment }}`,
 					"env-type": `env-type=TEST_ENV`,
 				},
 			}
-			Expect(k8sClient.Create(context.Background(), configMap)).To(Succeed())
+			Expect(k8sClient.Create(ctx, configMap)).To(Succeed())
 
 			// Create ExternalSecret targeting Labels
 			esName := "label-target-externalsecret-" + getRandString()
@@ -1713,8 +1231,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "env",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1722,21 +1240,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				if err != nil {
-					return false
-				}
-
-				// Check for label from template
-				_, hasLabel := secret.Labels["env-type"]
-				return hasLabel
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the label contains the processed template
 			Expect(secret.Labels).To(HaveKey("env-type"))
@@ -1748,36 +1252,14 @@ environment={{ (.env | fromJson).environment }}`,
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(context.Background(), externalSecret)
 
-			Expect(k8sClient.Delete(context.Background(), configMap)).To(Succeed())
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(k8sClient.Delete(ctx, configMap)).To(Succeed())
 		})
 	})
 
 	Describe("Array/Slice Operations", func() {
 		It("Should process array/slice operations in templates", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with array/slice template operations
 			esName := "array-slice-template-externalsecret-" + getRandString()
@@ -1807,8 +1289,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1817,54 +1299,19 @@ environment={{ (.env | fromJson).environment }}`,
 			}
 
 			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
+			secret := syncTemplateExternalSecret(externalSecret)
 
-			// Wait for the corresponding secret to be created; fold the value assertions into
-			// the polling so we assert the data at the moment Eventually succeeds.
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
-					return false
-				}
-				return string(secret.Data["user-count"]) == "3" &&
-					string(secret.Data["first-tag"]) == "web" &&
-					string(secret.Data["ports-joined"]) == "8080,8081,8082" &&
-					// first-user should contain alice's info in JSON format
-					strings.Contains(string(secret.Data["first-user"]), "alice") &&
-					// users is a JSON array, so range iterates in fixed order and the
-					// rendered result is deterministic: active users alice and charlie
-					string(secret.Data["active-users"]) == "alice,charlie,"
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
-
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			Expect(string(secret.Data["user-count"])).To(Equal("3"))
+			Expect(string(secret.Data["first-tag"])).To(Equal("web"))
+			Expect(string(secret.Data["ports-joined"])).To(Equal("8080,8081,8082"))
+			Expect(string(secret.Data["first-user"])).To(ContainSubstring("alice"))
+			Expect(string(secret.Data["active-users"])).To(Equal("alice,charlie,"))
 		})
 	})
 
 	Describe("Default Value Operations", func() {
 		It("Should process default value operations in templates", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with default value template operations
 			esName := "default-value-template-externalsecret-" + getRandString()
@@ -1895,8 +1342,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -1904,15 +1351,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data contains expected default value operations results
 			Expect(secret.Data).To(HaveKey("with-default"))
@@ -1927,35 +1366,12 @@ environment={{ (.env | fromJson).environment }}`,
 			// key1 exists in SimpleTemplateSecretName with value=value1, so default should NOT be used
 			Expect(string(secret.Data["present-no-default"])).To(Equal("value1"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Type Conversion Operations", func() {
 		It("Should process type conversion operations in templates", func() {
-			// Create SecretStore first
-			storeName := "fake-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with type conversion template operations
 			esName := "type-conversion-template-externalsecret-" + getRandString()
@@ -1995,8 +1411,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2004,15 +1420,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the corresponding secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the secret data contains expected type conversion operations results
 			Expect(secret.Data).To(HaveKey("string-to-int"))
@@ -2038,34 +1446,12 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(string(secret.Data["json-object-value"])).To(Equal("two"))
 			Expect(string(secret.Data["json-object-nested"])).To(Equal("inner-value"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Template Merge Policy Tests", func() {
 		It("Should use Replace policy to clear original data", func() {
-			// Create SecretStore
-			storeName := "merge-replace-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with Replace policy
 			esName := "merge-replace-example-" + getRandString()
@@ -2082,8 +1468,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  AdvancedDatabaseCredsSecret,
 							Name: "dbcreds",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2101,14 +1487,7 @@ environment={{ (.env | fromJson).environment }}`,
 			}
 
 			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify: Only DATABASE_URL should exist, original data should be cleared
 			Expect(secret.Data).To(HaveKey("DATABASE_URL"))
@@ -2121,32 +1500,10 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(secret.Data).ToNot(HaveKey("password"))
 			Expect(secret.Data).ToNot(HaveKey("host"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should use Merge policy to preserve original data and override same keys", func() {
-			// Create SecretStore
-			storeName := "merge-policy-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with Merge policy
 			esName := "merge-policy-example-" + getRandString()
@@ -2163,8 +1520,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  AdvancedDatabaseCredsSecret,
 							Name: "dbcreds",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2183,14 +1540,7 @@ environment={{ (.env | fromJson).environment }}`,
 			}
 
 			// Create the ExternalSecret
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for the secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify: Both original and new keys should exist
 			Expect(secret.Data).To(HaveKey("host"))
@@ -2203,34 +1553,12 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(secret.Data).To(HaveKey("new_key"))
 			Expect(string(secret.Data["new_key"])).To(Equal("new_value"))
 
-			// Clean up
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 
 	Describe("Custom Template Functions", func() {
 		It("Should test bcrypt password hashing function", func() {
-			// Create SecretStore
-			storeName := "bcrypt-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with bcrypt template
 			esName := "bcrypt-test-" + getRandString()
@@ -2247,8 +1575,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "password",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2264,14 +1592,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify the hashed password starts with $2a$ (bcrypt format)
 			Expect(secret.Data).To(HaveKey("hashed-password"))
@@ -2279,31 +1600,10 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(hashedPassword).To(MatchRegexp(`^\$2[ab]?\$\d+\$`))
 			Expect(len(hashedPassword)).To(BeNumerically(">", 50))
 
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should test htpasswd function for HTTP Basic Auth", func() {
-			// Create SecretStore
-			storeName := "htpasswd-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with htpasswd template using JSON credentials
 			esName := "htpasswd-test-" + getRandString()
@@ -2320,8 +1620,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  AuthCredentialsSecretName,
 							Name: "credentials",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2337,45 +1637,17 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			// Wait for secret to be created
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify htpasswd format: username:$2a$...
 			Expect(secret.Data).To(HaveKey("htpasswd-file"))
 			htpasswdContent := string(secret.Data["htpasswd-file"])
 			Expect(htpasswdContent).To(MatchRegexp(`^[\w-]+:\$2[ab]?\$\d+\$.+\n$`))
 
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should test jsonPath function for JSON extraction", func() {
-			// Create SecretStore
-			storeName := "jsonpath-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with jsonPath template
 			esName := "jsonpath-test-" + getRandString()
@@ -2392,8 +1664,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  GoTemplateSecretName,
 							Name: "data",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2411,13 +1683,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify jsonPath extraction works (actual values depend on GoTemplateSecretName structure)
 			// GoTemplateSecretName contains JSON with users array and tags array
@@ -2432,31 +1698,10 @@ environment={{ (.env | fromJson).environment }}`,
 			// tags[0] is "web"
 			Expect(string(secret.Data["first-tag"])).To(Equal("web"))
 
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should test mergeJson function for deep merging", func() {
-			// Create SecretStore
-			storeName := "mergejson-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			// Create ExternalSecret with mergeJson template using two separate JSON secrets
 			esName := "mergejson-test-" + getRandString()
@@ -2473,8 +1718,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  MergeJsonBaseSecretName,
 							Name: "base",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2482,8 +1727,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  MergeJsonOverrideSecretName,
 							Name: "override",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2499,12 +1744,11 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// mergeJson semantics (see deepMerge in template_processor.go): deep merge where
 			// base-only keys are preserved, override-only keys are added and conflicting keys
-			// take the override value. Fold the value assertions into the polling so we assert
-			// the data at the moment Eventually succeeds.
+			// take the override value.
 			getNested := func(m map[string]interface{}, keys ...string) (interface{}, bool) {
 				var cur interface{} = m
 				for _, k := range keys {
@@ -2534,56 +1778,26 @@ environment={{ (.env | fromJson).environment }}`,
 				return ok && isBool && b == want
 			}
 
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
-					return false
-				}
-				mergedRaw, ok := secret.Data["merged"]
-				if !ok || len(mergedRaw) == 0 {
-					return false
-				}
-				var merged map[string]interface{}
-				if err := json.Unmarshal(mergedRaw, &merged); err != nil {
-					return false
-				}
-				return strEq(merged, "myapp", "app", "name") && // base-only key preserved by deep merge
-					strEq(merged, "2.0.0", "app", "version") && // conflicting key takes override value
-					strEq(merged, "production", "app", "environment") && // override-only key merged in
-					strEq(merged, "prod-db.example.com", "database", "host") && // conflicting key takes override value
-					numEq(merged, 5432, "database", "port") && // base-only key preserved
-					strEq(merged, "devdb", "database", "name") && // base-only key preserved
-					strEq(merged, "secret123", "database", "password") && // override-only key merged in
-					strEq(merged, "debug", "logging", "level") && // base-only top-level key preserved
-					strEq(merged, "json", "logging", "format") &&
-					boolEq(merged, true, "cache", "enabled") && // override-only top-level key merged in
-					numEq(merged, 3600, "cache", "ttl")
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			mergedRaw := secret.Data["merged"]
+			Expect(mergedRaw).NotTo(BeEmpty())
+			var merged map[string]interface{}
+			Expect(json.Unmarshal(mergedRaw, &merged)).To(Succeed())
+			Expect(strEq(merged, "myapp", "app", "name")).To(BeTrue())            // base-only key preserved
+			Expect(strEq(merged, "2.0.0", "app", "version")).To(BeTrue())          // conflicting key takes override
+			Expect(strEq(merged, "production", "app", "environment")).To(BeTrue()) // override-only key merged in
+			Expect(strEq(merged, "prod-db.example.com", "database", "host")).To(BeTrue())
+			Expect(numEq(merged, 5432, "database", "port")).To(BeTrue())
+			Expect(strEq(merged, "devdb", "database", "name")).To(BeTrue())
+			Expect(strEq(merged, "secret123", "database", "password")).To(BeTrue())
+			Expect(strEq(merged, "debug", "logging", "level")).To(BeTrue())
+			Expect(strEq(merged, "json", "logging", "format")).To(BeTrue())
+			Expect(boolEq(merged, true, "cache", "enabled")).To(BeTrue())
+			Expect(numEq(merged, 3600, "cache", "ttl")).To(BeTrue())
 
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 
 		It("Should test parseKeyValue function for key=value parsing", func() {
-			storeName := "parsekv-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			esName := "parsekv-test-" + getRandString()
 			secretTargetName := "parsekv-secret-" + getRandString()
@@ -2599,8 +1813,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "config",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2620,45 +1834,16 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
+			secret := syncTemplateExternalSecret(externalSecret)
 
-			// Verify parseKeyValue actually parses key=value lines correctly by asserting the
-			// exact parsed values; fold the assertions into the polling so we assert the data
-			// at the moment Eventually succeeds.
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				if err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret); err != nil {
-					return false
-				}
-				return string(secret.Data["parsed-key1"]) == "value1" &&
-					string(secret.Data["parsed-status"]) == "enabled" &&
-					string(secret.Data["parsed-name"]) == "test-app"
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
-
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
+			// Verify parseKeyValue correctly splits key=value pairs
+			Expect(string(secret.Data["parsed-key1"])).To(Equal("value1"))
+			Expect(string(secret.Data["parsed-status"])).To(Equal("enabled"))
+			Expect(string(secret.Data["parsed-name"])).To(Equal("test-app"))
 		})
 
 		It("Should test toLines function for splitting strings into arrays", func() {
-			storeName := "tolines-store-" + getRandString()
-			secretStore := &api.SecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      storeName,
-					Namespace: testNamespace.Name,
-				},
-				Spec: api.SecretStoreSpec{
-					KMS: &api.KMSProvider{
-						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
-							OIDCProviderARN: OIDCProviderARN,
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(context.Background(), secretStore)).To(Succeed())
-
-			// Wait for SecretStore to be ready
-			waitForSecretStoreReady(context.Background(), testNamespace.Name, storeName)
+			store := createTemplateStore(testNamespace.Name)
 
 			esName := "tolines-test-" + getRandString()
 			secretTargetName := "tolines-secret-" + getRandString()
@@ -2674,8 +1859,8 @@ environment={{ (.env | fromJson).environment }}`,
 							Key:  SimpleTemplateSecretName,
 							Name: "multiline",
 							SecretStoreRef: &api.SecretStoreRef{
-								Name:      storeName,
-								Namespace: secretStore.Namespace,
+								Name:      store.Name,
+								Namespace: store.Namespace,
 								Kind:      ResourceSecretStore,
 							},
 						},
@@ -2692,13 +1877,7 @@ environment={{ (.env | fromJson).environment }}`,
 				},
 			}
 
-			Expect(k8sClient.Create(context.Background(), externalSecret)).To(Succeed())
-
-			secret := &corev1.Secret{}
-			Eventually(func() bool {
-				err := k8sClient.Get(context.Background(), types.NamespacedName{Name: secretTargetName, Namespace: testNamespace.Name}, secret)
-				return err == nil
-			}, time.Minute*2, time.Second*5).Should(BeTrue())
+			secret := syncTemplateExternalSecret(externalSecret)
 
 			// Verify toLines function works (actual values depend on SimpleTemplateSecretName content)
 			// SimpleTemplateSecretName contains: key1=value1\nkey2=value2\nstatus=enabled\nname=test-app (4 lines)
@@ -2709,8 +1888,6 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(string(secret.Data["line-count"])).To(Equal("4"))
 			Expect(string(secret.Data["first-line"])).To(ContainSubstring("key1="))
 
-			CleanupExternalSecret(context.Background(), externalSecret)
-			Expect(k8sClient.Delete(context.Background(), secretStore)).To(Succeed())
 		})
 	})
 })

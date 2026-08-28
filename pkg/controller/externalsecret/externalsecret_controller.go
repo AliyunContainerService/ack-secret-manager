@@ -20,6 +20,7 @@ import (
 	stderrors "errors"
 	"fmt"
 	"reflect"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -36,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
@@ -46,7 +49,22 @@ import (
 
 const (
 	secretFinalizer = "finalizer.ack.secrets-manager.alibabacloud.com"
+
+	// storeClientStaleRetryInterval is the short backoff applied when the
+	// freshness guard rejects a cached client mid Store-client rebuild.
+	storeClientStaleRetryInterval = 2 * time.Second
+
+	// cssControllerDisabledStatusKey is the status key of the notice persisted
+	// on ExternalSecrets referencing a ClusterSecretStore while its controller
+	// is disabled: store updates take effect only after an operator restart.
+	cssControllerDisabledStatusKey = "cluster_secret_store_controller_disabled"
 )
+
+// errStoreClientStale marks errors from the store-client freshness guard:
+// the store is mid rebuild, so the cached client must not be used. Reconcile
+// detects it via errors.Is and returns ctrl.Result{RequeueAfter} directly
+// (NOT r.RequeueAfter, which disables requeuing under --disable-polling).
+var errStoreClientStale = stderrors.New("store client is stale, Store controller is rebuilding it")
 
 // ExternalSecretReconciler reconciles a ExternalSecret object
 type ExternalSecretReconciler struct {
@@ -59,43 +77,35 @@ type ExternalSecretReconciler struct {
 	CleanUpSecretOnFailure bool
 	DisablePolling         bool
 	RotationInterval       time.Duration // Key rotation job running interval.
-	KmsLimiter             KmsLimiter
-	OosLimiter             OosLimiter
+	KmsLimiter             ProviderLimiter
+	OosLimiter             ProviderLimiter
 	EnableCrossNamespace   bool
 	RestConfig             *rest.Config
+	// ProcessClusterSecretStore mirrors --process-cluster-secret-store: when
+	// false the CSS controller is unregistered, so the freshness guard and
+	// status reporting degrade instead of waiting for a rebuild that never
+	// happens (see ensureStoreClientFresh).
+	ProcessClusterSecretStore bool
 
-	// Composite-key client tracker: the previous-round set of
-	// "clientName#endpoint" cache keys per ExternalSecret UID. It is the
-	// diff baseline for reclaiming composite clients when a spec's
-	// kmsEndpoint is modified or removed (see
-	// reconcileStaleCompositeClients). In-memory only: after a restart the
-	// first observation round re-baselines without reclaiming.
+	// Previous-round "clientName#endpoint" keys per ES UID: diff baseline for
+	// reclaiming stale composite clients; in-memory only, re-baselined on the
+	// first round after a restart.
 	compositeKeysMu   sync.Mutex
 	compositeKeysByES map[types.UID]map[string]struct{}
+
+	// cssDisabledWarned deduplicates the CSS-controller-disabled warning to
+	// once per clientKey per process.
+	cssDisabledWarned sync.Map
 }
 
-// WrappedClient wraps both controller-runtime client and kubernetes client
-type WrappedClient struct {
-	client.Client
-	KubeClient kubernetes.Interface
-}
-
-// GetKubeClient returns the kubernetes client interface
-func (w *WrappedClient) GetKubeClient() kubernetes.Interface {
-	return w.KubeClient
-}
-
-// getCurrentData gets the current Secret state (data plus labels and
-// annotations) from the secret api. The labels/annotations are consumed by
-// the template-metadata debounce so a round whose metadata targets are
-// already applied does not force a Secret rewrite.
+// getCurrentData gets the current Secret data plus labels/annotations;
+// the latter drive the template-metadata debounce.
 func (r *ExternalSecretReconciler) getCurrentData(ctx context.Context, namespace string, name string) (map[string][]byte, map[string]string, map[string]string, error) {
 	reader := r.APIReader
 	data := make(map[string][]byte)
 	labels := make(map[string]string)
 	annotations := make(map[string]string)
 	secret := &corev1.Secret{}
-	r.Log.Info("getCurrentData for", "ns", namespace, "name", name)
 	err := reader.Get(ctx, client.ObjectKey{
 		Namespace: namespace,
 		Name:      name,
@@ -115,11 +125,9 @@ func (r *ExternalSecretReconciler) getCurrentData(ctx context.Context, namespace
 	return data, labels, annotations, err
 }
 
-// updateSecret writes the resolved dataset (and template metadata targets) to
-// the target Secret via the secret operation handler, which also applies the
-// CleanUpSecretOnFailure deletion contract for empty datasets.
+// updateSecret writes the resolved dataset (and template metadata targets)
+// to the target Secret via the secret operation handler.
 func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret, secretMap map[string][]byte, currentData map[string][]byte, metadataTargets map[string]map[string]string) error {
-	// Validate input parameters
 	if externalSec == nil {
 		return fmt.Errorf("externalSec cannot be nil")
 	}
@@ -130,24 +138,28 @@ func (r *ExternalSecretReconciler) updateSecret(externalSec *api.ExternalSecret,
 		currentData = make(map[string][]byte)
 	}
 
-	// Create secret operation handler with all required context
 	handler := NewSimpleSecretOperationHandler(r.Client, r.CleanUpSecretOnFailure, r.Log)
-
-	// Execute the complete secret operation with all policies and template processing
-	err := handler.HandleSecretOperation(r.Ctx, externalSec, secretMap, currentData, metadataTargets)
-	if err != nil {
-		return err
-	}
-
-	return nil
+	return handler.HandleSecretOperation(r.Ctx, externalSec, secretMap, currentData, metadataTargets)
 }
 
-// shouldWatch will return true if the ExternalSecret is in a watchable namespace
-func (r *ExternalSecretReconciler) shouldWatch(externalSecNamespace string) bool {
-	if len(r.WatchNamespaces) > 0 {
-		return r.WatchNamespaces[externalSecNamespace]
+// shouldWatch reports whether the namespace is watchable; the include/exclude
+// mode decision is delegated to utils.IsNamespaceWatched.
+func (r *ExternalSecretReconciler) shouldWatch(namespace string) bool {
+	return utils.IsNamespaceWatched(r.WatchNamespaces, namespace)
+}
+
+// namespaceExcludePredicate derives the blacklist predicate from the false
+// (exclude) entries of WatchNamespaces, enforcing the exclude leg at the
+// watch level; the Reconcile entry guard (shouldWatch) stays the second
+// defense-in-depth layer.
+func (r *ExternalSecretReconciler) namespaceExcludePredicate() namespaceExcludePredicate {
+	excluded := make(map[string]struct{})
+	for ns, included := range r.WatchNamespaces {
+		if !included {
+			excluded[ns] = struct{}{}
+		}
 	}
-	return true
+	return namespaceExcludePredicate{excluded: excluded}
 }
 
 // isNamespaceTerminating checks if a namespace is in terminating state
@@ -158,7 +170,6 @@ func (r *ExternalSecretReconciler) isNamespaceTerminating(namespace string) (boo
 		return false, err
 	}
 
-	// Check if namespace is terminating
 	return ns.Status.Phase == corev1.NamespaceTerminating, nil
 }
 
@@ -174,14 +185,13 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 
 	externalSec := &api.ExternalSecret{}
 
-	// only do not requeue when getting CR fails.
+	// Only skip requeue when getting the CR fails.
 	err := r.Get(r.Ctx, req.NamespacedName, externalSec)
 	if err != nil {
-		// Only return error if it's not NotFound - NotFound is normal when resource is deleted
+		// NotFound is normal when the resource is deleted
 		return ctrl.Result{}, utils.IgnoreNotFoundError(err)
 	}
 
-	// Determine the actual secret name to use
 	secretName := externalSec.Name
 	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Name != "" {
 		secretName = externalSec.Spec.Target.Name
@@ -190,20 +200,29 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	secretNamespace := externalSec.Namespace
 	secretIndex := fmt.Sprintf("namespace/%s/%s", secretNamespace, secretName)
 	log = log.WithValues("secret", secretIndex)
-	r.Log.Info("externalSec info", "secretName", secretName, "secretNamespace", secretNamespace)
 
 	rotationInterval := r.RotationInterval
 	if externalSec.Spec.RotationInterval != nil {
 		rotationInterval = externalSec.Spec.RotationInterval.Duration
 	}
 
-	// Handle deletion - resource lifecycle management
 	if externalSec.GetDeletionTimestamp() != nil {
 		r.updateResourceManagementStatus(externalSec, "operation", fmt.Errorf("external secret is being deleted"))
 		return r.handleDeletion(ctx, log, externalSec, rotationInterval, secretName)
 	}
 
 	klog.Infof("reconcile external secret %v", secretIndex)
+
+	// Namespace scope guard BEFORE touching the finalizer: a bypassing
+	// Create/Update must never attach a finalizer the controller refuses to
+	// remove (would leave the object stuck in Terminating). Deletion is
+	// unaffected: a non-nil DeletionTimestamp routes straight to handleDeletion.
+	if !r.shouldWatch(secretNamespace) {
+		watchErr := fmt.Errorf("namespace %s is not in watched namespaces", secretNamespace)
+		log.Info("external secret rejected: namespace not in watch scope", "namespace", secretNamespace, "reason", watchErr.Error())
+		r.updateResourceManagementStatus(externalSec, "namespace_access", watchErr)
+		return ctrl.Result{}, nil
+	}
 
 	// add Finalizer to external secret instance
 	if !utils.Contains(externalSec.GetFinalizers(), secretFinalizer) {
@@ -213,64 +232,56 @@ func (r *ExternalSecretReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	if !r.shouldWatch(secretNamespace) {
-		watchErr := fmt.Errorf("namespace %s is not in watched namespaces", secretNamespace)
-		r.updateResourceManagementStatus(externalSec, "namespace_access", watchErr)
-		return ctrl.Result{}, nil
-	}
-
-	// Check if namespace is terminating before proceeding
 	if isTerminating, err := r.isNamespaceTerminating(secretNamespace); err != nil {
 		r.updateResourceManagementStatus(externalSec, "namespace_check", err)
 		return ctrl.Result{}, err
 	} else if isTerminating {
-		// Namespace is terminating, skip secret creation
 		r.Log.Info("Skipping secret creation as namespace is terminating", "namespace", secretNamespace)
 		r.updateResourceManagementStatus(externalSec, "namespace_terminating", fmt.Errorf("namespace %s is terminating", secretNamespace))
 		return ctrl.Result{}, nil
 	}
 
-	// Reclaim composite ("clientName#endpoint") clients whose endpoint was
-	// modified or removed from the spec since the previous round. Runs
-	// before the data sync so this round's on-demand client re-creation
-	// sees a consistent cache. Fail-closed: a cleanup failure is reported
-	// and retried, never treated as success.
+	// Reclaim composite clients whose endpoint changed since the previous
+	// round; runs before data sync so re-creation sees a consistent cache.
+	// Fail-closed: cleanup failure is reported and retried.
 	if err := r.reconcileStaleCompositeClients(ctx, log, externalSec); err != nil {
-		// Context cancellation ends the round early; it is not a reconcile error.
 		if stderrors.Is(err, context.Canceled) || stderrors.Is(err, context.DeadlineExceeded) {
-			log.V(4).Info("reconcile ended early due to context cancellation/deadline", "stage", "endpoint_client_cleanup")
+			log.Info("reconcile ended early due to context cancellation/deadline", "stage", "endpoint_client_cleanup")
 			return ctrl.Result{}, nil
 		}
 		r.updateResourceManagementStatus(externalSec, "endpoint_client_cleanup", err)
 		return ctrl.Result{}, err
 	}
 
-	// Delegate ALL data synchronization to syncIfNeedUpdate.
 	// Request-scoped ctx covers fetch/pull-limiter/backoff waits; Secret writes
 	// and status updates use r.Ctx.
 	_, syncErr := r.syncIfNeedUpdate(ctx, externalSec)
 
-	// syncIfNeedUpdate handles its own status updates for data-related operations
-	// We only handle requeuing logic here
 	if syncErr != nil {
-		// Context cancellation ends the round early; it is not a reconcile error.
 		if stderrors.Is(syncErr, context.Canceled) || stderrors.Is(syncErr, context.DeadlineExceeded) {
-			log.V(4).Info("reconcile ended early due to context cancellation/deadline")
+			log.Info("reconcile ended early due to context cancellation/deadline")
 			return ctrl.Result{}, nil
 		}
-		// Return only error to let controller-runtime handle exponential backoff
-		// RequeueAfter result is ignored when error is non-nil
+		if stderrors.Is(syncErr, errStoreClientStale) {
+			// The referenced store is mid client rebuild; retry shortly.
+			// RequeueAfter is returned directly (not via r.RequeueAfter) so
+			// the backoff also applies under --disable-polling=true.
+			log.Info("store client is being rebuilt by the Store controller, retrying shortly",
+				"requeueAfter", storeClientStaleRetryInterval, "reason", syncErr.Error())
+			return ctrl.Result{RequeueAfter: storeClientStaleRetryInterval}, nil
+		}
+		// Return error only: controller-runtime applies exponential backoff
+		// (RequeueAfter is ignored when error is non-nil)
 		return ctrl.Result{}, syncErr
 	}
 
-	log.Info("update secret store", "index", secretIndex)
+	log.Info("reconcile completed, scheduling next sync", "index", secretIndex)
 	return r.RequeueAfter(rotationInterval), nil
 }
 
 // updateResourceManagementStatus records a resource-level (non data-sync)
-// error as a placeholder entry. Placeholders replace previous placeholders
-// but never mask real data-key failures; identical consecutive reports are
-// debounced.
+// error as a placeholder entry: placeholders replace previous placeholders
+// but never mask real data-key failures; identical reports are debounced.
 func (r *ExternalSecretReconciler) updateResourceManagementStatus(externalSec *api.ExternalSecret, errorType string, err error) {
 	placeholder := api.DataSyncResult{
 		ExternalSecretKey:   errorType,
@@ -279,31 +290,28 @@ func (r *ExternalSecretReconciler) updateResourceManagementStatus(externalSec *a
 		SynchronizationTime: metav1.Time{Time: time.Now()},
 	}
 	merged := mergeResourceManagementResults(externalSec.Status.DataSyncResults, placeholder)
-	// Skip the API write (and keep the existing timestamps) when the merged
-	// results carry no new information.
+	// Skip the API write when the merged results carry no new information.
 	if !dataSyncResultsChanged(externalSec.Status.DataSyncResults, merged) {
 		return
 	}
 	externalSec.Status.DataSyncResults = merged
 	if updateErr := r.Status().Update(r.Ctx, externalSec); updateErr != nil {
-		klog.Errorf("update external secret status error %v", updateErr)
+		klog.Errorf("update external secret %s/%s status error %v", externalSec.Namespace, externalSec.Name, updateErr)
 	}
 }
 
-// handleDeletion handle resource deletion logic
+// handleDeletion handles resource deletion logic
 func (r *ExternalSecretReconciler) handleDeletion(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, rotationInterval time.Duration, secretName string) (ctrl.Result, error) {
 	if !utils.Contains(externalSec.GetFinalizers(), secretFinalizer) {
 		return r.RequeueAfter(rotationInterval), nil
 	}
 
-	// exec the clean work in secretFinalizer
-	// do not delete Finalizer if clean failed, the clean work will exec in next reconcile
+	// Do not remove the Finalizer if cleanup failed; it retries next reconcile.
 	if err := r.finalizeExternalSecret(ctx, log, externalSec, secretName); err != nil {
 		log.Error(err, "failed to clean secret")
 		return reconcile.Result{RequeueAfter: r.ReconciliationPeriod}, err
 	}
 
-	// remove secretFinalizer
 	log.Info("removing finalizer", "currentFinalizers", externalSec.GetFinalizers())
 	externalSec.SetFinalizers(utils.Remove(externalSec.GetFinalizers(), secretFinalizer))
 	err := r.Update(ctx, externalSec)
@@ -318,7 +326,6 @@ func (r *ExternalSecretReconciler) handleDeletion(ctx context.Context, log logr.
 func (r *ExternalSecretReconciler) finalizeExternalSecret(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, secretName string) error {
 	log.Info("Cleaning up secret for ExternalSecret", "externalSecret", externalSec.Name, "secret", secretName)
 
-	// Get the secret
 	secret := &corev1.Secret{}
 	err := r.Get(ctx, types.NamespacedName{
 		Namespace: externalSec.Namespace,
@@ -330,7 +337,7 @@ func (r *ExternalSecretReconciler) finalizeExternalSecret(ctx context.Context, l
 	}
 
 	if err == nil {
-		// Delete the secret directly (no owner reference is set)
+		// No owner reference is set, delete directly
 		if delErr := r.Delete(ctx, secret); delErr != nil && !errors.IsNotFound(delErr) {
 			return fmt.Errorf("failed to delete secret: %w", delErr)
 		}
@@ -340,19 +347,15 @@ func (r *ExternalSecretReconciler) finalizeExternalSecret(ctx context.Context, l
 		log.Info("Secret already deleted", "namespace", externalSec.Namespace, "name", secretName)
 	}
 
-	// Deregister the endpoint-specific composite-key clients
-	// ("clientName#endpoint") this ExternalSecret used, once no other active
-	// ExternalSecret references the same storeRef+kmsEndpoint combination.
-	// Idempotent: provider.Delete tolerates repeated calls, and the reference
-	// check is re-evaluated on every finalizer retry.
+	// Deregister this ExternalSecret's composite-key clients once no other
+	// active ExternalSecret references the same storeRef+kmsEndpoint;
+	// idempotent across finalizer retries.
 	return r.cleanupEndpointClients(ctx, log, externalSec)
 }
 
 // resolveClientName derives the plain client cache key for a data-source
-// entry, mirroring getExternalSecret / getExternalSecretWithExtract exactly:
-// ENV client when no secretStoreRef is configured, "namespace/<ns>/<name>"
-// for SecretStore references and "cluster/<name>" for ClusterSecretStore
-// references.
+// entry: ENV client without secretStoreRef, "namespace/<ns>/<name>" for
+// SecretStore, "cluster/<name>" for ClusterSecretStore.
 func resolveClientName(secretStoreRef *api.SecretStoreRef, externalSecretNamespace string) string {
 	if secretStoreRef == nil {
 		return backend.EnvClient
@@ -363,28 +366,26 @@ func resolveClientName(secretStoreRef *api.SecretStoreRef, externalSecretNamespa
 	}
 	switch kind {
 	case "ClusterSecretStore":
-		return fmt.Sprintf("cluster/%s", secretStoreRef.Name)
+		return backend.ClusterStoreKey(secretStoreRef.Name)
 	default:
 		namespace := externalSecretNamespace
 		if secretStoreRef.Namespace != "" {
 			namespace = secretStoreRef.Namespace
 		}
-		return fmt.Sprintf("namespace/%s/%s", namespace, secretStoreRef.Name)
+		return backend.SecretStoreKey(namespace, secretStoreRef.Name)
 	}
 }
 
-// normalizeEndpoint trims whitespace so the composite cache key
-// ("clientName#endpoint") aligns with the provider-side registration key; a
-// blank endpoint normalizes to "" (default endpoint, no composite key).
+// normalizeEndpoint trims whitespace so the composite cache key aligns with
+// the provider-side registration key; blank normalizes to "" (default endpoint).
 func normalizeEndpoint(endpoint string) string {
 	return strings.TrimSpace(endpoint)
 }
 
-// compositeClientKeysFromSpec derives the set of composite cache keys
-// ("clientName#endpoint") the ExternalSecret spec uses. Only entries with a
-// custom kmsEndpoint produce composite keys; default-endpoint entries use
-// plain clientName keys whose lifecycle is owned by the SecretStore
-// controller (or the startup ENV registration) and must NOT be deleted here.
+// compositeClientKeysFromSpec derives the composite cache keys used by the
+// spec. Only entries with a custom kmsEndpoint produce composite keys;
+// default-endpoint entries use plain clientName keys whose lifecycle is owned
+// by the SecretStore controller (or the ENV client) and must NOT be deleted here.
 func compositeClientKeysFromSpec(externalSec *api.ExternalSecret) map[string]struct{} {
 	keys := make(map[string]struct{})
 	for i := range externalSec.Spec.Data {
@@ -393,7 +394,7 @@ func compositeClientKeysFromSpec(externalSec *api.ExternalSecret) map[string]str
 		if endpoint == "" {
 			continue
 		}
-		keys[fmt.Sprintf("%s#%s", resolveClientName(data.SecretStoreRef, externalSec.Namespace), endpoint)] = struct{}{}
+		keys[backend.CompositeClientKey(resolveClientName(data.SecretStoreRef, externalSec.Namespace), endpoint)] = struct{}{}
 	}
 	for i := range externalSec.Spec.DataProcess {
 		extract := externalSec.Spec.DataProcess[i].Extract
@@ -404,18 +405,17 @@ func compositeClientKeysFromSpec(externalSec *api.ExternalSecret) map[string]str
 		if endpoint == "" {
 			continue
 		}
-		keys[fmt.Sprintf("%s#%s", resolveClientName(extract.SecretStoreRef, externalSec.Namespace), endpoint)] = struct{}{}
+		keys[backend.CompositeClientKey(resolveClientName(extract.SecretStoreRef, externalSec.Namespace), endpoint)] = struct{}{}
 	}
 	return keys
 }
 
-// cleanupEndpointClients deregisters composite-key ("clientName#endpoint")
-// clients no longer referenced by any other active ExternalSecret (the last
-// deleter performs the deletion; a List failure aborts fail-closed so the
-// finalizer retries). The key set unions the current spec keys with the
-// tracked keys from previous rounds, because event coalescing can deliver an
-// endpoint change together with the deletion in a single round. Plain
-// clientName clients are owned by the SecretStore controller and never touched.
+// cleanupEndpointClients deregisters composite-key clients no longer
+// referenced by other active ExternalSecrets (last deleter wins; a List
+// failure aborts fail-closed so the finalizer retries). The key set unions
+// spec and tracked keys because event coalescing can deliver an endpoint
+// change together with the deletion. Plain clientName clients are owned by
+// the SecretStore controller.
 func (r *ExternalSecretReconciler) cleanupEndpointClients(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret) error {
 	myKeys := compositeClientKeysFromSpec(externalSec)
 	if tracked, ok := r.snapshotCompositeKeys(externalSec.UID); ok {
@@ -428,19 +428,17 @@ func (r *ExternalSecretReconciler) cleanupEndpointClients(ctx context.Context, l
 			return err
 		}
 	}
-	// Drop the tracked key set: the deletion path is finished with it, and
-	// any re-created ExternalSecret with the same name gets a new UID.
+	// Drop the tracked key set: a re-created ExternalSecret with the same
+	// name gets a new UID.
 	r.forgetCompositeKeys(externalSec.UID)
 	return nil
 }
 
 // deleteUnreferencedCompositeClients deregisters the given composite-key
 // clients unless other active ExternalSecrets still reference them. List
-// failures are fail-closed. Provider absence is path-dependent: on the
-// deletion path it logs a warning and continues (deletion must stay the
-// escape hatch for misconfigured resources); on the reconcile path it stays
-// fail-closed so the next round retries. Plain clientName clients are owned
-// by the SecretStore controller and never touched.
+// failures are fail-closed. Provider absence is path-dependent: on deletion
+// it logs and continues (deletion stays the escape hatch for misconfigured
+// resources); on reconcile it fails so the next round retries.
 func (r *ExternalSecretReconciler) deleteUnreferencedCompositeClients(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret, keys map[string]struct{}, onDeletion bool) error {
 	if len(keys) == 0 {
 		return nil
@@ -453,20 +451,18 @@ func (r *ExternalSecretReconciler) deleteUnreferencedCompositeClients(ctx contex
 	provider := backend.GetProviderByName(providerName)
 	if provider == nil {
 		if onDeletion {
-			// The resource is going away; blocking its removal forever on a
-			// provider that may never exist (bad spec.provider) is worse than
-			// the in-memory client leak. Log loudly and continue.
+			// Blocking removal forever on a provider that may never exist (bad
+			// spec.provider) is worse than the in-memory client leak.
 			log.Info("provider not found during endpoint client cleanup on deletion, skipping client deregistration",
 				"provider", providerName, "externalSecret", externalSec.Name)
 			return nil
 		}
-		// Reconcile path: providers are registered at startup and never
-		// removed, so a miss is transient at worst; retrying is safer than
-		// silently leaking clients (the old skip-and-succeed behavior).
+		// Reconcile path: providers are registered at startup and never removed,
+		// so a miss is transient; retrying is safer than leaking clients.
 		return fmt.Errorf("provider %s not found, cannot clean up endpoint clients", providerName)
 	}
 
-	// Collect keys referenced by other active ExternalSecrets; deleted/in-deletion ones are excluded.
+	// Collect keys referenced by other active (non-deleting) ExternalSecrets.
 	esList := &api.ExternalSecretList{}
 	if err := r.List(ctx, esList); err != nil {
 		return fmt.Errorf("failed to list ExternalSecrets for endpoint client cleanup: %w", err)
@@ -497,8 +493,7 @@ func (r *ExternalSecretReconciler) deleteUnreferencedCompositeClients(ctx contex
 }
 
 // snapshotCompositeKeys returns a copy of the composite-key set recorded for
-// the ExternalSecret during its previous reconcile round, and whether it was
-// tracked at all.
+// the ExternalSecret in its previous reconcile round, and whether it was tracked.
 func (r *ExternalSecretReconciler) snapshotCompositeKeys(uid types.UID) (map[string]struct{}, bool) {
 	r.compositeKeysMu.Lock()
 	defer r.compositeKeysMu.Unlock()
@@ -515,7 +510,7 @@ func (r *ExternalSecretReconciler) snapshotCompositeKeys(uid types.UID) (map[str
 
 // storeCompositeKeys records the composite-key set observed in the current
 // spec. An empty set removes the entry so endpoint-free ExternalSecrets
-// never accumulate tracker state.
+// accumulate no tracker state.
 func (r *ExternalSecretReconciler) storeCompositeKeys(uid types.UID, keys map[string]struct{}) {
 	r.compositeKeysMu.Lock()
 	defer r.compositeKeysMu.Unlock()
@@ -540,19 +535,16 @@ func (r *ExternalSecretReconciler) forgetCompositeKeys(uid types.UID) {
 	delete(r.compositeKeysByES, uid)
 }
 
-// reconcileStaleCompositeClients reclaims composite ("clientName#endpoint")
-// clients whose endpoint was modified or removed from the spec since the
-// previous reconcile round. The diff against the tracked key set is the only
-// per-round work; the List + reference check runs solely when the spec
-// actually dropped at least one composite key, so steady-state rounds (and
-// endpoint-free ExternalSecrets) pay no scan cost. On cleanup failure the
-// tracker keeps the previous snapshot so the next round retries fail-closed.
+// reconcileStaleCompositeClients reclaims composite clients whose endpoint
+// was modified/removed since the previous round; the reference scan runs only
+// when a composite key was actually dropped, so steady-state rounds pay no
+// scan cost. On cleanup failure the tracker keeps the previous snapshot so
+// the next round retries fail-closed.
 func (r *ExternalSecretReconciler) reconcileStaleCompositeClients(ctx context.Context, log logr.Logger, externalSec *api.ExternalSecret) error {
 	current := compositeClientKeysFromSpec(externalSec)
 	prev, tracked := r.snapshotCompositeKeys(externalSec.UID)
 	if !tracked {
-		// First observation (e.g. controller start): nothing to reclaim;
-		// just establish the baseline for future diffs.
+		// First observation (e.g. controller start): establish the baseline.
 		r.storeCompositeKeys(externalSec.UID, current)
 		return nil
 	}
@@ -582,23 +574,38 @@ func (r *ExternalSecretReconciler) addFinalizer(ctx context.Context, logger logr
 	return nil
 }
 
-// SetupWithManager sets up the controller with the Manager.
+// SetupWithManager sets up the controller with the Manager. Reverse watches
+// on SecretStore/ClusterSecretStore cascade store changes (spec edits,
+// deletions, status.clientGeneration bumps) to referencing ExternalSecrets,
+// closing the gap where --disable-polling would never observe a store change;
+// the consumer-side freshness guard keeps reconciles off stale cached clients
+// until the Store controller finishes rebuilding.
 func (r *ExternalSecretReconciler) SetupWithManager(mgr ctrl.Manager, reconcileCount int) error {
 	r.RestConfig = mgr.GetConfig()
 
+	// Field index on store references (see store_watch.go), used by the
+	// reverse store watches; must be registered before the cache starts.
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &api.ExternalSecret{}, storeRefIndexField, storeRefIndexKeys); err != nil {
+		return fmt.Errorf("register ExternalSecret store-ref field index failed: %w", err)
+	}
+
 	return ctrl.NewControllerManagedBy(mgr).
-		For(&api.ExternalSecret{}, builder.WithPredicates(ExternalSecretsPredicate{})).
+		For(&api.ExternalSecret{}, builder.WithPredicates(predicate.And(ExternalSecretsPredicate{}, r.namespaceExcludePredicate()))).
+		Watches(&api.SecretStore{},
+			handler.EnqueueRequestsFromMapFunc(r.mapStoreToExternalSecrets),
+			builder.WithPredicates(SecretStoreWatchPredicate{})).
+		Watches(&api.ClusterSecretStore{},
+			handler.EnqueueRequestsFromMapFunc(r.mapClusterStoreToExternalSecrets),
+			builder.WithPredicates(ClusterSecretStoreWatchPredicate{})).
 		WithOptions(controller.Options{
 			MaxConcurrentReconciles: reconcileCount,
 		}).
 		Complete(r)
 }
 
-// getExternalSecret fetches all spec.data entries. Besides the merged output
-// and the error map (both keyed by data.Key), it returns the set of data.Keys
-// that were successfully fetched this round, used by the duplicate-data.Key
-// twin exemption in failure counting and status reporting. Only a nil-error
-// fetch is recorded; every error path continues without recording.
+// getExternalSecret fetches all spec.data entries. Returns the merged output
+// and the error map (both keyed by data.Key) plus the set of data.Keys
+// fetched successfully this round (duplicate-key twin exemption).
 func (r *ExternalSecretReconciler) getExternalSecret(ctx context.Context, provider backend.Provider, dataSources []api.DataSource, externalSecretNamespace string) (map[string][]byte, map[string]error, map[string]struct{}) {
 	out := make(map[string][]byte)
 	errorsMap := make(map[string]error)
@@ -607,7 +614,7 @@ func (r *ExternalSecretReconciler) getExternalSecret(ctx context.Context, provid
 		clientName := resolveClientName(data.SecretStoreRef, externalSecretNamespace)
 		secretStoreRef := data.SecretStoreRef
 
-		klog.V(2).Infof("client name %v,data key %v", clientName, data.Key)
+		klog.V(2).Infof("client name %v, data key %v", clientName, data.Key)
 
 		secretClient, clientKey, err := r.getOrCreateClient(ctx, provider, clientName, secretStoreRef, externalSecretNamespace, data.KmsEndpoint)
 		if err != nil {
@@ -615,26 +622,21 @@ func (r *ExternalSecretReconciler) getExternalSecret(ctx context.Context, provid
 			continue
 		}
 
-		// The request-scoped ctx is used so fetch retries are canceled together with this reconcile.
+		// Request-scoped ctx so fetch retries are canceled with this reconcile.
 		singleMap, err := secretClient.GetExternalSecret(ctx, &data, r.Client)
 		if err != nil {
 			errorsMap[data.Key] = fmt.Errorf("client %s get data failed: %v", clientKey, err)
 			continue
 		}
-		// Record this round's successful key for the duplicate-key twin exemption (see dataEntryTargetCovered).
+		// Successful key of this round, for the duplicate-key twin exemption.
 		succeededKeys[data.Key] = struct{}{}
 
-		// Process each result from backend according to original JMESPath configuration
 		for secretKey, secretData := range singleMap {
-			// For JMESPath results, the secretKey is already the ObjectAlias
-			// So we can use it directly as the final key
+			// For JMESPath results the secretKey is already the ObjectAlias.
 			finalKey := secretKey
 
-			// Only resolve the target key (name, falling back to key) if no
-			// JMESPath processing occurred. This is the case for non-JMESPath
-			// data sources.
-			// When name is omitted, ResolveTargetKey falls back to data.Key,
-			// matching collectFailedEntryTargetKeys and the documented contract.
+			// Non-JMESPath sources resolve the target key (name, falling back
+			// to key), matching collectFailedEntryTargetKeys.
 			if len(data.JMESPath) == 0 {
 				finalKey = common.ResolveTargetKey(&data)
 			}
@@ -645,11 +647,9 @@ func (r *ExternalSecretReconciler) getExternalSecret(ctx context.Context, provid
 	return out, errorsMap, succeededKeys
 }
 
-// getExternalSecretWithExtract fetches all spec.dataProcess entries. Besides
-// the merged output and the error map (both keyed by extract.Key), it returns
-// the set of extract.Keys that were successfully fetched and processed this
-// round, used by the duplicate-extract.Key twin exemption in failure counting
-// and status reporting.
+// getExternalSecretWithExtract fetches all spec.dataProcess entries. Returns
+// the merged output and the error map (both keyed by extract.Key) plus the
+// set of extract.Keys successfully fetched this round (twin exemption).
 func (r *ExternalSecretReconciler) getExternalSecretWithExtract(ctx context.Context, provider backend.Provider, dataSources []api.DataProcess, externalSecretNamespace string) (map[string][]byte, map[string]error, map[string]struct{}) {
 	out := make(map[string][]byte)
 	errorsMap := make(map[string]error)
@@ -662,7 +662,7 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(ctx context.Cont
 		clientName := resolveClientName(data.Extract.SecretStoreRef, externalSecretNamespace)
 		secretStoreRef := data.Extract.SecretStoreRef
 
-		klog.V(2).Infof("client name %v,data key %v", clientName, data.Extract.Key)
+		klog.V(2).Infof("client name %v, data key %v", clientName, data.Extract.Key)
 
 		secretClient, clientKey, err := r.getOrCreateClient(ctx, provider, clientName, secretStoreRef, externalSecretNamespace, data.Extract.KmsEndpoint)
 		if err != nil {
@@ -670,18 +670,16 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(ctx context.Cont
 			continue
 		}
 
-		// The request-scoped ctx is used so fetch retries are canceled together with this reconcile.
+		// Request-scoped ctx so fetch retries are canceled with this reconcile.
 		singleMap, err := secretClient.GetExternalSecretWithExtract(ctx, &data, r.Client)
 		if err != nil {
 			errorsMap[data.Extract.Key] = fmt.Errorf("client %s get data failed: %v", clientKey, err)
 			continue
 		}
-		// Record this round's successful key for the duplicate-key twin exemption (see dataEntryTargetCovered).
+		// Successful key of this round, for the duplicate-key twin exemption.
 		succeededKeys[data.Extract.Key] = struct{}{}
 
-		// Process each result from backend according to original JMESPath configuration
 		for secretKey, secretData := range singleMap {
-			// Apply replace rules if any
 			finalValue := secretData
 			if len(data.ReplaceKey) > 0 {
 				finalValueStr := string(secretData)
@@ -691,10 +689,9 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(ctx context.Cont
 				finalValue = []byte(finalValueStr)
 			}
 
-			// Determine the final key name based on the original JMESPath configuration
-			finalKey := secretKey // default to backend key
+			// If the backend key matches the JMESPath expression, use the alias
+			finalKey := secretKey
 			for _, jp := range data.Extract.JMESPath {
-				// If the backend key matches the original JMESPath expression, use the alias
 				if secretKey == jp.Path {
 					if jp.ObjectAlias != "" {
 						finalKey = jp.ObjectAlias
@@ -709,60 +706,74 @@ func (r *ExternalSecretReconciler) getExternalSecretWithExtract(ctx context.Cont
 	return out, errorsMap, succeededKeys
 }
 
-// getOrCreateClient gets or creates a secret client.
-//
-// Caching: generic clients (no custom endpoint) are registered at startup (ENV)
-// or by the SecretStore controller, keyed by clientName; endpoint-specific
-// clients are created on-demand for a custom kmsEndpoint, keyed by
-// "clientName#endpoint". Returns the resolved client, the cache key used (for
-// error reporting), and any error.
+// getOrCreateClient gets or creates a secret client and returns it with the
+// cache key used (for error reporting). Generic clients (no custom endpoint)
+// are lazily registered on first ENV consumption or by the SecretStore
+// controller; endpoint-specific clients are created on demand, keyed by
+// "clientName#endpoint".
 func (r *ExternalSecretReconciler) getOrCreateClient(ctx context.Context, provider backend.Provider, clientName string, secretStoreRef *api.SecretStoreRef, externalSecretNamespace string, kmsEndpoint string) (backend.SecretClient, string, error) {
-	// Normalize before keying and before handing the endpoint to the
-	// provider, so the composite cache key matches the provider-side
-	// registration key (see normalizeEndpoint).
+	// Normalize before keying so the composite cache key matches the
+	// provider-side registration key.
 	normalizedEndpoint := normalizeEndpoint(kmsEndpoint)
 	if kmsEndpoint != "" && normalizedEndpoint == "" {
-		// The user configured a whitespace-only endpoint; it silently maps
-		// to the default endpoint, so surface it via a Warning.
+		// Whitespace-only endpoint silently maps to the default endpoint.
 		klog.Warningf("client %s: kmsEndpoint contains only whitespace and is normalized to empty, default endpoint will be used", clientName)
 	}
 	kmsEndpoint = normalizedEndpoint
 
 	// For custom endpoint: use composite key to isolate from generic client
 	// For default endpoint: use plain clientName to match pre-registered generic client
-	clientKey := clientName
-	if kmsEndpoint != "" {
-		clientKey = fmt.Sprintf("%s#%s", clientName, kmsEndpoint)
-	}
+	clientKey := backend.CompositeClientKey(clientName, kmsEndpoint)
 
 	secretClient, err := provider.GetClient(clientKey)
 	if err == nil {
-		// Client found in cache - validate namespace access for SecretStore-based clients
+		// Cached: still validate namespace access for SecretStore-based clients
 		if secretStoreRef != nil {
 			if validateErr := r.validateSecretStoreAccess(ctx, secretStoreRef, externalSecretNamespace); validateErr != nil {
 				return nil, clientKey, validateErr
+			}
+			// Freshness guard: reject a stale cached client mid rebuild and
+			// retry after a short backoff (see errStoreClientStale).
+			if freshErr := r.ensureStoreClientFresh(ctx, secretStoreRef, externalSecretNamespace, clientKey); freshErr != nil {
+				klog.Warningf("client %s freshness guard failed: %v", clientKey, freshErr)
+				return nil, clientKey, freshErr
 			}
 		}
 		return secretClient, clientKey, nil
 	}
 
-	// Cache miss - need to create a new client
-	klog.V(2).Infof("client %v get client error %v", clientKey, err)
+	// Cache miss - create a new client
+	klog.V(2).Infof("client %v cache miss, creating new client", clientKey)
 
 	// === ENV authentication path (no SecretStoreRef) ===
 	if secretStoreRef == nil {
 		if kmsEndpoint == "" {
-			// No custom endpoint: the generic ENV client should have been registered at startup.
-			// If we reach here, it means startup registration failed - don't try to recreate.
-			err := fmt.Errorf("generic ENV client not found (key=%s), startup registration may have failed", clientKey)
-			klog.Errorf("client %s get or create client failed: %v", clientKey, err)
+			// Lazily register the ENV client on first use (see EnsureENVClient).
+			// The error may come from another provider; probe GetClient first and
+			// only report when this provider is affected.
+			initErr := backend.EnsureENVClient()
+			secretClient, getErr := provider.GetClient(clientKey)
+			if getErr == nil {
+				if initErr != nil {
+					klog.Warningf("client %s: lazy ENV client initialization partially failed (other providers affected): %v; current provider client is ready", clientKey, initErr)
+				}
+				return secretClient, clientKey, nil
+			}
+			// Wrap initErr with %w so the error chain exposes the concrete failure.
+			var err error
+			if initErr != nil {
+				err = fmt.Errorf("generic ENV client not available (key=%s), lazy ENV client initialization may have failed: %w", clientKey, initErr)
+			} else {
+				err = fmt.Errorf("generic ENV client not available (key=%s), lazy ENV client initialization may have failed", clientKey)
+			}
+			klog.Errorf("client %s get or create client failed (ENV auth, default endpoint): %v", clientKey, err)
 			return nil, clientKey, err
 		}
-		// Custom endpoint: create an endpoint-specific ENV client
+		// Custom endpoint: endpoint-specific ENV client
 		secretClient, err = provider.NewClientByENV(kmsEndpoint)
 		if err != nil {
 			err = fmt.Errorf("init ENV client %s with endpoint %s failed: %v", clientKey, kmsEndpoint, err)
-			klog.Errorf("client %s get or create client failed: %v", clientKey, err)
+			klog.Errorf("client %s get or create client failed (ENV auth, custom endpoint): %v", clientKey, err)
 			return nil, clientKey, err
 		}
 		provider.Register(clientKey, secretClient)
@@ -773,11 +784,11 @@ func (r *ExternalSecretReconciler) getOrCreateClient(ctx context.Context, provid
 	store, err := r.getSecretStore(ctx, secretStoreRef, externalSecretNamespace)
 	if err != nil {
 		err = fmt.Errorf("get client %s failed: %v", clientKey, err)
-		klog.Errorf("client %s get or create client failed: %v", clientKey, err)
+		klog.Errorf("client %s get or create client failed (SecretStore auth, store lookup): %v", clientKey, err)
 		return nil, clientKey, err
 	}
 
-	// Create kubernetes.Interface from rest.Config for dynamic token acquisition
+	// kubeClient from rest.Config enables dynamic token acquisition
 	var kubeClient kubernetes.Interface
 	if r.RestConfig != nil {
 		kubeClient, err = kubernetes.NewForConfig(r.RestConfig)
@@ -786,22 +797,179 @@ func (r *ExternalSecretReconciler) getOrCreateClient(ctx context.Context, provid
 		}
 	}
 
-	wrapperClient := &WrappedClient{
+	wrapperClient := &backend.WrappedClient{
 		Client:     r.Client,
 		KubeClient: kubeClient,
 	}
 
-	// Create client with endpoint (empty string means use default).
-	// The request-scoped ctx bounds the client construction (including any
-	// RAM authentication round-trips) to this reconcile.
+	// Empty endpoint means default; request-scoped ctx bounds client
+	// construction (including RAM authentication round-trips).
 	secretClient, err = provider.NewClient(ctx, store, wrapperClient, kmsEndpoint)
 	if err != nil {
 		err = fmt.Errorf("init client %s failed: %v", clientKey, err)
-		klog.Errorf("client %s get or create client failed: %v", clientKey, err)
+		klog.Errorf("client %s get or create client failed (SecretStore auth, client construction): %v", clientKey, err)
 		return nil, clientKey, err
 	}
 	provider.Register(clientKey, secretClient)
 	return secretClient, clientKey, nil
+}
+
+// ensureStoreClientFresh rejects a cached client while the referenced Store
+// is mid rebuild (trigger annotation pending or ObservedGeneration behind),
+// since it may carry stale credentials; callers retry after a short backoff
+// (errStoreClientStale). Condition-less stores are treated as unmanaged
+// (legacy behavior), and a missing store surfaces a regular error.
+func (r *ExternalSecretReconciler) ensureStoreClientFresh(ctx context.Context, secretStoreRef *api.SecretStoreRef, externalSecretNamespace string, clientKey string) error {
+	kind := secretStoreRef.Kind
+	if kind == "" {
+		kind = "SecretStore"
+	}
+
+	var storeDesc string
+	var generation int64
+	var annotations map[string]string
+	var conditions []api.SecretStoreStatusCondition
+
+	switch kind {
+	case "ClusterSecretStore":
+		css := &api.ClusterSecretStore{}
+		if err := r.Get(ctx, client.ObjectKey{Name: secretStoreRef.Name}, css); err != nil {
+			return fmt.Errorf("failed to get ClusterSecretStore %s for client freshness check: %v", secretStoreRef.Name, err)
+		}
+		storeDesc = fmt.Sprintf("ClusterSecretStore %s", secretStoreRef.Name)
+		generation, annotations, conditions = css.Generation, css.Annotations, css.Status.Conditions
+	case "SecretStore":
+		namespace := externalSecretNamespace
+		if secretStoreRef.Namespace != "" {
+			namespace = secretStoreRef.Namespace
+		}
+		ss := &api.SecretStore{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: namespace, Name: secretStoreRef.Name}, ss); err != nil {
+			return fmt.Errorf("failed to get SecretStore %s in namespace %s for client freshness check: %v", secretStoreRef.Name, namespace, err)
+		}
+		storeDesc = fmt.Sprintf("SecretStore %s/%s", namespace, secretStoreRef.Name)
+		generation, annotations, conditions = ss.Generation, ss.Annotations, ss.Status.Conditions
+	default:
+		return fmt.Errorf("unsupported SecretStoreRef Kind: %s, must be SecretStore or ClusterSecretStore", kind)
+	}
+
+	// Degraded-mode exemption (CSS controller disabled via flag or namespace
+	// scoping): with the controller unregistered nothing will ever rebuild
+	// this client, catch its ObservedGeneration up, or clear the trigger
+	// annotation, so the stale state can never converge and refusing the
+	// cached client would loop forever. Keep serving with the existing client;
+	// store updates take effect only after an operator restart (surfaced via
+	// warnCSSControllerDisabledOnce and the ES status notice). With the
+	// controller enabled the original stale semantics below apply unchanged.
+	if kind == "ClusterSecretStore" && !r.ProcessClusterSecretStore {
+		r.warnCSSControllerDisabledOnce(clientKey, storeDesc)
+		return nil
+	}
+
+	// Locate the Ready condition by Type (never assume list position). No
+	// Ready condition means no Store controller has ever managed this object,
+	// so nothing would clear a trigger annotation or catch the generation up:
+	// keep the legacy behavior of using the cached client.
+	observed, found := utils.ReadyConditionObservedGeneration(conditions)
+	if !found {
+		klog.Infof("client %s freshness guard: %s has no conditions (never managed by a Store controller), using cached client", clientKey, storeDesc)
+		return nil
+	}
+
+	if observed != generation {
+		return fmt.Errorf("client %s not used: %s status observedGeneration %d is behind generation %d; waiting for the Store controller to finish rebuilding: %w",
+			clientKey, storeDesc, observed, generation, errStoreClientStale)
+	}
+	if annotations[utils.TriggerReconcileAnnotation] != "" {
+		return fmt.Errorf("client %s not used: %s still carries the trigger-reconcile annotation; waiting for the Store controller to finish rebuilding: %w",
+			clientKey, storeDesc, errStoreClientStale)
+	}
+	return nil
+}
+
+// warnCSSControllerDisabledOnce emits the degraded-mode warning at most once
+// per clientKey per process (the condition is stable until restart, so
+// logging every reconcile round would be pure noise).
+func (r *ExternalSecretReconciler) warnCSSControllerDisabledOnce(clientKey, storeDesc string) {
+	if _, alreadyWarned := r.cssDisabledWarned.LoadOrStore(clientKey, struct{}{}); alreadyWarned {
+		return
+	}
+	klog.Warningf("client %s: %s is not processed because the ClusterSecretStore controller is disabled; credential/configuration changes to this store will not take effect until the operator restarts; continuing to use the existing cached client and credentials",
+		clientKey, storeDesc)
+}
+
+// disabledCSSReferences returns the deduplicated, sorted names of the
+// ClusterSecretStores referenced by the ExternalSecret's data sources; a nil
+// result means no ClusterSecretStore is referenced.
+func disabledCSSReferences(externalSec *api.ExternalSecret) []string {
+	seen := make(map[string]struct{})
+	for i := range externalSec.Spec.Data {
+		if ref := externalSec.Spec.Data[i].SecretStoreRef; ref != nil && ref.Kind == "ClusterSecretStore" {
+			seen[ref.Name] = struct{}{}
+		}
+	}
+	for i := range externalSec.Spec.DataProcess {
+		if extract := externalSec.Spec.DataProcess[i].Extract; extract != nil &&
+			extract.SecretStoreRef != nil && extract.SecretStoreRef.Kind == "ClusterSecretStore" {
+			seen[extract.SecretStoreRef.Name] = struct{}{}
+		}
+	}
+	if len(seen) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(seen))
+	for name := range seen {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// recordCSSControllerDisabledStatus persists the user-visible notice that the
+// ClusterSecretStore controller is disabled and store updates take effect only
+// after an operator restart. The notice behaves like a data-key entry, not a
+// round-level placeholder: exempt from placeholder-supersede semantics (see
+// mergeResourceManagementResults) and retained while active. Identical notices
+// are debounced by fingerprint comparison so repeated rounds do not churn the
+// resourceVersion. The merge preserves every existing entry except an earlier
+// copy of this notice: the round still SUCCEEDS, so dropping the round-level
+// Succeeded verdict here would only have it re-added by the deferred status
+// write and flip-flop the status forever. Returns whether an API write
+// actually happened.
+func (r *ExternalSecretReconciler) recordCSSControllerDisabledStatus(externalSec *api.ExternalSecret, cssNames []string) bool {
+	placeholder := api.DataSyncResult{
+		ExternalSecretKey: cssControllerDisabledStatusKey,
+		Status:            "Warning",
+		Reason: fmt.Sprintf("ClusterSecretStore controller disabled; credential/config updates for ClusterSecretStore(s) %s take effect only after the operator restarts",
+			strings.Join(cssNames, ", ")),
+		SynchronizationTime: metav1.Time{Time: time.Now()},
+	}
+	merged := make([]api.DataSyncResult, 0, len(externalSec.Status.DataSyncResults)+1)
+	for _, res := range externalSec.Status.DataSyncResults {
+		if res.ExternalSecretKey == cssControllerDisabledStatusKey {
+			// Superseded by the fresh notice appended below.
+			continue
+		}
+		merged = append(merged, res)
+	}
+	merged = append(merged, placeholder)
+	// Skip the API write when the merged results carry no new information.
+	if !dataSyncResultsChanged(externalSec.Status.DataSyncResults, merged) {
+		return false
+	}
+	externalSec.Status.DataSyncResults = merged
+	if updateErr := r.Status().Update(r.Ctx, externalSec); updateErr != nil {
+		klog.Errorf("update external secret %s/%s status error %v", externalSec.Namespace, externalSec.Name, updateErr)
+	}
+	return true
+}
+
+// cssDisabledNoticeActive reports whether the degraded-mode notice applies
+// this round: the CSS controller is disabled AND a ClusterSecretStore is
+// still referenced. This exact predicate gates both the notice write and its
+// retention, so the entry disappears once either condition stops holding.
+func (r *ExternalSecretReconciler) cssDisabledNoticeActive(externalSec *api.ExternalSecret) bool {
+	return !r.ProcessClusterSecretStore && len(disabledCSSReferences(externalSec)) > 0
 }
 
 // validateSecretStoreAccess checks if the namespace is allowed to access the referenced SecretStore
@@ -850,15 +1018,14 @@ func (r *ExternalSecretReconciler) validateSecretStoreAccess(ctx context.Context
 
 // isWaitErrFromCancellation reports whether the error stems from
 // request-context cancellation rather than a genuine condition (e.g.
-// rate-limit timeout). Only a canceled request context qualifies.
+// rate-limit timeout), so shutdown is not misreported as a sync failure.
 func isWaitErrFromCancellation(ctx context.Context, err error) bool {
 	return err != nil && ctx.Err() != nil
 }
 
-// syncIfNeedUpdate processes the external secret and determines if an update is needed
+// syncIfNeedUpdate processes the external secret and decides if an update is needed
 func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externalSec *api.ExternalSecret) (bool, error) {
-	// Graceful shutdown guard: a canceled request context must not be
-	// misreported as rate_limit/state_retrieval/data failure; see isWaitErrFromCancellation.
+	// Graceful shutdown guard, see isWaitErrFromCancellation.
 	if ctxErr := ctx.Err(); isWaitErrFromCancellation(ctx, ctxErr) {
 		return false, ctx.Err()
 	}
@@ -879,27 +1046,29 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		err = r.OosLimiter.Wait(waitTimeoutCtx)
 	default:
 		// Provider configuration is a SYSTEM-LEVEL error, not data-source specific
-		// Use resource management status update instead of polluting data error maps
 		providerErr := fmt.Errorf("unsupported provider: %v, only support kms or oos", providerName)
 		r.updateResourceManagementStatus(externalSec, "provider_configuration", providerErr)
 		return false, providerErr
 	}
 
 	if err != nil {
-		// Graceful shutdown guard: a canceled request context must not be
-		// misreported as rate_limit/state_retrieval/data failure; see isWaitErrFromCancellation.
 		if isWaitErrFromCancellation(ctx, err) {
 			return false, ctx.Err()
 		}
-		// Rate limiting is a SYSTEM-LEVEL error, not data-source specific
-		r.Log.Error(err, "secret pull rate limit exceeded, consider increasing --max-concurrent-secret-pulls or the provider-specific flag",
+		// Rate limiting is a SYSTEM-LEVEL error, not data-source specific.
+		// Guide operators to the provider-specific flag; the global
+		// --max-concurrent-secret-pulls is deprecated (see cmd/manager/main.go).
+		rateLimitFlag := "--max-concurrent-kms-secret-pulls"
+		if providerName == backend.ProviderOOSName {
+			rateLimitFlag = "--max-concurrent-oos-secret-pulls"
+		}
+		r.Log.Error(err, fmt.Sprintf("secret pull rate limit exceeded, consider increasing %s", rateLimitFlag),
 			"provider", providerName,
 			"externalSecret", fmt.Sprintf("%s/%s", externalSec.Namespace, externalSec.Name))
 		r.updateResourceManagementStatus(externalSec, "rate_limit", err)
 		return false, err
 	}
 
-	// Determine the actual secret name to use
 	secretName := externalSec.Name
 	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Name != "" {
 		secretName = externalSec.Spec.Target.Name
@@ -909,7 +1078,7 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 	log := r.Log.WithValues("secret", esIndex)
 	provider := backend.GetProviderByName(providerName)
 	if provider == nil {
-		// Provider lookup failure is a SYSTEM-LEVEL error
+		// SYSTEM-LEVEL error
 		lookupErr := fmt.Errorf("provider %v not found", providerName)
 		r.updateResourceManagementStatus(externalSec, "provider_lookup", lookupErr)
 		return false, lookupErr
@@ -922,11 +1091,10 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 	var extractSucceededKeys map[string]struct{}
 	var currentData map[string][]byte
 
-	// Process ExternalSecret.Spec.Data EXCLUSIVELY - ONLY populate dataErrorsMap
+	// Fetch spec.Data exclusively into dataErrorsMap
 	if len(externalSec.Spec.Data) != 0 {
 		out, errorsMap, succeededKeys := r.getExternalSecret(ctx, provider, externalSec.Spec.Data, externalSec.Namespace)
 		dataSucceededKeys = succeededKeys
-		// EXCLUSIVELY populate dataErrorsMap with Data-specific errors
 		for k, v := range errorsMap {
 			dataErrorsMap[k] = v
 		}
@@ -935,11 +1103,10 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		}
 	}
 
-	// Process ExternalSecret.Spec.DataProcess EXCLUSIVELY - ONLY populate extractDataErrorsMap
+	// Fetch spec.DataProcess exclusively into extractDataErrorsMap
 	if len(externalSec.Spec.DataProcess) != 0 {
 		out, errorsMap, succeededKeys := r.getExternalSecretWithExtract(ctx, provider, externalSec.Spec.DataProcess, externalSec.Namespace)
 		extractSucceededKeys = succeededKeys
-		// EXCLUSIVELY populate extractDataErrorsMap with DataProcess-specific errors
 		for k, v := range errorsMap {
 			extractDataErrorsMap[k] = v
 		}
@@ -948,8 +1115,18 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		}
 	}
 
-	// Graceful shutdown guard: a canceled request context must not be
-	// misreported as rate_limit/state_retrieval/data failure; see isWaitErrFromCancellation.
+	// Store-client freshness guard: when any data source hit a stale store
+	// client, retry the whole round shortly instead of recording data-key
+	// failures; the Store controller's clientGeneration write re-triggers this
+	// ExternalSecret once the rebuild completes.
+	for _, errMap := range []map[string]error{dataErrorsMap, extractDataErrorsMap} {
+		for _, dataErr := range errMap {
+			if stderrors.Is(dataErr, errStoreClientStale) {
+				return false, dataErr
+			}
+		}
+	}
+
 	if ctxErr := ctx.Err(); isWaitErrFromCancellation(ctx, ctxErr) {
 		return false, ctx.Err()
 	}
@@ -958,14 +1135,11 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 	// not the collapsed error map alone.
 	failedUncovered := failedUncoveredEntries(externalSec, dataErrorsMap, secretMap, dataSucceededKeys)
 
-	// Get current secret state (data plus labels/annotations: the latter
-	// drive the template-metadata debounce below).
+	// Current secret state; labels/annotations drive the template-metadata debounce.
 	var getCurrentDataErr error
 	var currentLabels, currentAnnotations map[string]string
 	currentData, currentLabels, currentAnnotations, getCurrentDataErr = r.getCurrentData(ctx, externalSec.Namespace, secretName)
 	if getCurrentDataErr != nil && !errors.IsNotFound(getCurrentDataErr) {
-		// Graceful shutdown guard: a canceled request context must not be
-		// misreported as rate_limit/state_retrieval/data failure; see isWaitErrFromCancellation.
 		if isWaitErrFromCancellation(ctx, getCurrentDataErr) {
 			return false, ctx.Err()
 		}
@@ -974,18 +1148,14 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		return false, getCurrentDataErr
 	}
 
-	// Count failures before template processing; see countFailedSources for
-	// duplicate-key exemption semantics.
+	// Count failures before template processing (see countFailedSources).
 	totalDataSources, failedSources, failedKeyCount := r.countFailedSources(externalSec, failedUncovered, dataErrorsMap, extractDataErrorsMap, extractSucceededKeys)
-	// Check if every configured data source entry has failed
 	allDataSourcesFailed := totalDataSources > 0 && failedSources == totalDataSources
 
-	// Zero-output fail-closed guard (pre-template): an error-free round producing
-	// zero keys must not write an empty dataset (which would delete/clear the
-	// existing Secret while status reports Succeeded). Evaluated before template
-	// processing on the raw secretMap; on a guard round only the zero_output_guard
-	// entry is persisted. See hasDeclaredSourcesButZeroOutput /
-	// hasNoDeclaredSourcesButExistingData.
+	// Zero-output fail-closed guard (pre-template): an error-free round
+	// producing zero keys must not write an empty dataset (which would clear
+	// the existing Secret while status reports Succeeded). Evaluated on the
+	// raw secretMap; a guard round persists only the zero_output_guard entry.
 	templateConfigured := externalSec.Spec.Target != nil && externalSec.Spec.Target.Template != nil
 	if hasDeclaredSourcesButZeroOutput(totalDataSources, failedKeyCount, len(secretMap)) ||
 		hasNoDeclaredSourcesButExistingData(totalDataSources, templateConfigured, len(currentData)) {
@@ -1004,10 +1174,9 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 			"declaredDataKeys", declaredDataKeys,
 			"declaredExtractKeys", declaredExtractKeys,
 			"existingKeyCount", len(currentData))
-		// Distinct messages per predicate so the status pinpoints the
-		// scenario: O-2 (declared sources produced nothing) vs O-3 (no
-		// source declared at all while a Secret with data exists). The two
-		// predicates are mutually exclusive on totalDataSources.
+		// Distinct messages per predicate: O-2 (sources produced nothing) vs
+		// O-3 (no source declared while a Secret with data exists); mutually
+		// exclusive on totalDataSources.
 		if hasDeclaredSourcesButZeroOutput(totalDataSources, failedKeyCount, len(secretMap)) {
 			r.updateResourceManagementStatus(externalSec, "zero_output_guard",
 				fmt.Errorf("declared %d data source(s) produced 0 keys with 0 errors; secret write skipped and deletion withheld", totalDataSources))
@@ -1018,39 +1187,51 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		return false, nil
 	}
 
-	// The data-sync status write is deferred until the template conclusion is known.
-	// Snapshot the PRE-template secretMap so the status-side coverage check shares
-	// the same baseline as the counting side; the write decision keeps using the
+	// The data-sync status write is deferred until the template conclusion is
+	// known. Snapshot the PRE-template secretMap so the status-side coverage
+	// check shares the counting-side baseline; write decisions keep using the
 	// post-template map.
 	preTemplateSecretMap := make(map[string][]byte, len(secretMap))
 	for k, v := range secretMap {
 		preTemplateSecretMap[k] = v
 	}
 
-	// If there are template processing requirements, process them now
-	// This must happen AFTER getting current data but BEFORE checking update conditions
-	templateProcessed := false                       // Track whether template processing occurred
+	// Template processing happens AFTER getting current data but BEFORE checking update conditions.
+	templateProcessed := false                       // whether template processing occurred
 	var metadataTargets map[string]map[string]string // TemplateFrom metadata targets
 
-	// placeholderWrittenThisRound is true when THIS round already wrote a
-	// resource-management placeholder and continued; it keeps that placeholder
-	// visible in the deferred status write while stale placeholders from previous
-	// rounds are superseded.
+	// True when THIS round already wrote a resource-management placeholder;
+	// keeps it visible in the deferred status write while stale placeholders
+	// from previous rounds are superseded.
 	placeholderWrittenThisRound := false
 
+	// Observability fallback for the disabled CSS controller: trigger
+	// controllers skip CSS patches and no client-rebuild chain exists, so
+	// store changes would otherwise stall silently. Persist a debounced status
+	// notice (the fetch continues with the cached client via the
+	// ensureStoreClientFresh exemption). The notice is NOT a round-level
+	// placeholder: exempt from placeholder-supersede semantics and retained
+	// while active (see retainCSSDisabledNotice), so placeholderWrittenThisRound
+	// only flips when a write actually happened; once degraded mode no longer
+	// applies, retention stops and the entry converges away.
+	if cssNames := disabledCSSReferences(externalSec); !r.ProcessClusterSecretStore && len(cssNames) > 0 {
+		if r.recordCSSControllerDisabledStatus(externalSec, cssNames) {
+			placeholderWrittenThisRound = true
+		}
+	}
+
 	if externalSec.Spec.Target != nil && externalSec.Spec.Target.Template != nil {
-		// Capture the pre-template key count for the post-template zero-output
-		// guard below: secretMap is replaced by the template result afterwards,
-		// so the "source data was non-empty" condition must be snapshotted here.
+		// Snapshot for the post-template zero-output guard: secretMap is
+		// replaced by the template result afterwards.
 		preTemplateDataKeys := len(secretMap)
 		tp := NewSimpleTemplateProcessor(r.Client)
 		var err error
 		templateResult, err = tp.ProcessAllTemplates(r.Ctx, externalSec, secretMap)
 		if err != nil {
-			// Contract precedence: data-source failures outrank template fatal errors.
-			// With data-source failures present, the template error is downgraded to a
-			// warning status and the round follows the failure contracts; otherwise a
-			// fatal template error fails the ExternalSecret with zero writes.
+			// Contract precedence: data-source failures outrank template fatal
+			// errors. With data-source failures the template error is downgraded
+			// to a warning status; otherwise a fatal template error fails the
+			// ExternalSecret with zero writes.
 			if failedKeyCount > 0 || allDataSourcesFailed {
 				log.Info("template processing failed while data sources also failed; deferring to the data-source failure contract",
 					"templateError", err.Error(),
@@ -1058,28 +1239,25 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 					"allDataSourcesFailed", allDataSourcesFailed)
 				r.updateResourceManagementStatus(externalSec, "template_processing_errors", err)
 				placeholderWrittenThisRound = true
-				// Keep fail-closed semantics for the rest of the round: the
-				// write decision treats this round as template-processed
-				// (templates may reference failed keys), but no template
-				// output (data or metadata) is applied.
+				// Fail-closed: the write decision treats this round as
+				// template-processed (templates may reference failed keys) but
+				// applies no template output.
 				templateProcessed = true
 				templateResult = nil
 			} else {
-				// Fatal template processing error - mark ExternalSecret as Failed
+				// Fatal template error: mark ExternalSecret as Failed
 				r.updateResourceManagementStatus(externalSec, "template_processing_fatal", err)
 				return false, err
 			}
 		} else {
 			templateProcessed = true
 
-			// Check if there were any non-fatal template processing errors and log them
+			// Non-fatal template errors: log and record as warnings, don't fail
 			if len(templateResult.Stats.Errors) > 0 {
-				// Log recoverable errors but don't fail the ExternalSecret
 				for _, errMsg := range templateResult.Stats.Errors {
 					r.Log.Info("template processing warning", "error", errMsg)
 				}
 
-				// Optionally update status to indicate warnings (but not failure)
 				var warningMsg strings.Builder
 				warningMsg.WriteString("template processing completed with warnings: ")
 				for i, errMsg := range templateResult.Stats.Errors {
@@ -1088,12 +1266,11 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 					}
 					warningMsg.WriteString(errMsg)
 				}
-				// Use a different error type that indicates warnings rather than failures
+				// Warning-type status entry, not a failure
 				r.updateResourceManagementStatus(externalSec, "template_processing_warnings", fmt.Errorf("%s", warningMsg.String()))
 				placeholderWrittenThisRound = true
 			}
 
-			// Collect metadata targets from template result
 			if len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0 {
 				metadataTargets = make(map[string]map[string]string)
 				if len(templateResult.Metadata.Annotations) > 0 {
@@ -1104,22 +1281,17 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 				}
 			}
 
-			// Use Data target for secret creation
 			secretMap = templateResult.Data
 
-			// Post-template zero-output fail-closed guard: rendering can collapse a
-			// non-empty dataset (or a source-less template-only spec) to zero keys;
-			// writing that would delete/clear the existing Secret. Skip the write and
-			// withhold deletion. See templateRenderedZeroOutput.
+			// Post-template zero-output fail-closed guard: rendering can
+			// collapse a dataset to zero keys; writing that would clear the
+			// existing Secret. Skip the write and withhold deletion.
 			if templateRenderedZeroOutput(failedKeyCount, len(secretMap), preTemplateDataKeys, len(currentData)) {
 				log.Info("post-template zero-output guard triggered: secret write skipped and deletion withheld",
 					"preTemplateDataKeys", preTemplateDataKeys,
 					"existingKeyCount", len(currentData),
 					"templateErrors", templateResult.Stats.Errors)
-				// Distinct messages per trigger leg, mirroring the O-2/O-3
-				// split of the pre-template guard: source data collapsed
-				// during rendering vs a source-less template round rendering
-				// nothing while a Secret with data exists.
+				// Distinct messages per trigger leg, mirroring the O-2/O-3 split.
 				if preTemplateDataKeys > 0 {
 					r.updateResourceManagementStatus(externalSec, "template_zero_output_guard",
 						fmt.Errorf("template rendering produced 0 data keys while source data was non-empty; secret write skipped and deletion withheld"))
@@ -1131,10 +1303,9 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 			}
 
 			// Known limitation (non-fatal semantics preserved): in Replace mode
-			// a partially failed rendering writes the REDUCED dataset -- the
-			// failed templates' keys are dropped while the successful ones are
-			// written. Only a warning is emitted; the round is not treated as
-			// failed (documented in docs/advanced_usage.md).
+			// a partially failed rendering writes the REDUCED dataset - failed
+			// templates' keys are dropped, successful ones written (documented
+			// in docs/advanced_usage.md).
 			if len(templateResult.Stats.Errors) > 0 &&
 				(externalSec.Spec.Target.Template.MergePolicy == "" ||
 					externalSec.Spec.Target.Template.MergePolicy == api.MergePolicyReplace) {
@@ -1145,37 +1316,34 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 		}
 	}
 
-	// Persist the pure data-source status now that the template conclusion is
-	// known. dropPlaceholder keeps this round's own placeholder visible; secretMap
-	// is the pre-template snapshot (see updateExternalSecretStatus).
+	// Persist the data-source status now that the template conclusion is
+	// known; dropPlaceholder keeps this round's own placeholder visible;
+	// secretMap is the pre-template snapshot (see updateExternalSecretStatus).
 	r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap, preTemplateSecretMap, dataSucceededKeys, extractSucceededKeys, !placeholderWrittenThisRound, false)
 
-	// The degradation branch keeps templateProcessed=true with a nil result, so
-	// both checks are required.
+	// The degradation branch keeps templateProcessed=true with a nil result,
+	// so both checks are required.
 	hasSuccessfulData := len(secretMap) > 0
 	if templateProcessed && templateResult != nil {
 		hasSuccessfulData = hasSuccessfulData || (len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0)
 	}
 
-	// Fail-closed skip guard with partial-failure merge; see shouldSkipSecretWrite
-	// for the truth table. Skipped rounds report via status, so no error is returned.
+	// Fail-closed skip guard with partial-failure merge; see shouldSkipSecretWrite.
+	// Skipped rounds report via status, so no error is returned.
 	if shouldSkipSecretWrite(len(secretMap), failedKeyCount, allDataSourcesFailed, r.CleanUpSecretOnFailure, templateProcessed) {
 		log.Info("skipping secret write due to data sync failures, existing secret retained",
 			"failedKeys", collectFailedKeys(dataErrorsMap, extractDataErrorsMap),
+			"failedErrors", collectFailedErrors(dataErrorsMap, extractDataErrorsMap),
 			"secretMapLength", len(secretMap),
 			"failedKeyCount", failedKeyCount,
 			"allDataSourcesFailed", allDataSourcesFailed)
 		return false, nil
 	}
 
-	// Resolve the dataset to write (see resolveWriteData for the total-failure
-	// deletion contract and the partial-failure merge strategy).
 	writeData := r.resolveWriteData(log, externalSec, dataErrorsMap, extractDataErrorsMap, secretMap, currentData, allDataSourcesFailed, failedKeyCount, templateProcessed)
 
-	// Template metadata contributes to the update condition only when debounced:
-	// rendered labels/annotations force a write only while absent or different from
-	// the current Secret metadata (see templateMetadataTargetsApplied). Same flag+nil
-	// double check as hasSuccessfulData.
+	// Template metadata forces a write only while absent or different from the
+	// current Secret metadata (debounce, see templateMetadataTargetsApplied).
 	templateMetadataPresent := false
 	if templateProcessed && templateResult != nil {
 		templateMetadataPresent = len(templateResult.Metadata.Annotations) > 0 || len(templateResult.Metadata.Labels) > 0
@@ -1186,31 +1354,28 @@ func (r *ExternalSecretReconciler) syncIfNeedUpdate(ctx context.Context, externa
 	if !eq {
 		log.Info("found secret need to update", "hasSuccessfulData", hasSuccessfulData, "secretMapLength", len(secretMap), "allDataSourcesFailed", allDataSourcesFailed, "totalDataSources", totalDataSources, "failedKeyCount", failedKeyCount)
 
-		// If there is no successful data but we still need to update (e.g., to delete the secret), proceed
 		if err := r.updateSecret(externalSec, writeData, currentData, metadataTargets); err != nil {
 			log.Error(err, "failed to update secret", "hasSuccessfulData", hasSuccessfulData, "secretMapLength", len(secretMap), "allDataSourcesFailed", allDataSourcesFailed)
 
-			// No empty-dataset special-casing: the deletion contract already ran inside
-			// HandleSecretOperation; any error here is surfaced as update_operation.
-			// Update operation failure is a SYSTEM-LEVEL error
+			// The deletion contract already ran inside HandleSecretOperation;
+			// any error here is a SYSTEM-LEVEL update_operation error.
 			r.updateResourceManagementStatus(externalSec, "update_operation", err)
 			return false, err
 		}
 		log.Info("secret has sync from external backend", "secretMapLength", len(secretMap), "hasSuccessfulData", hasSuccessfulData, "allDataSourcesFailed", allDataSourcesFailed)
 
-		// Forced status refresh after an actual Secret write, bypassing the
+		// Forced status refresh after an actual write, bypassing the
 		// fingerprint debounce so SynchronizationTime advances with the data.
 		r.updateExternalSecretStatus(externalSec, dataErrorsMap, extractDataErrorsMap, preTemplateSecretMap, dataSucceededKeys, extractSucceededKeys, !placeholderWrittenThisRound, true)
 		return true, nil
 	}
 
-	// No update needed
 	return false, nil
 }
 
-// templateMetadataTargetsApplied reports whether every rendered metadata target
-// is already present with an equal value in the current Secret; the debounce
-// primitive for the update condition. Empty targets return false.
+// templateMetadataTargetsApplied reports whether every rendered metadata
+// target already exists with an equal value (update-condition debounce).
+// Empty targets return false.
 func templateMetadataTargetsApplied(metadataTargets map[string]map[string]string, currentLabels, currentAnnotations map[string]string) bool {
 	if len(metadataTargets) == 0 {
 		return false
@@ -1228,20 +1393,11 @@ func templateMetadataTargetsApplied(metadataTargets map[string]map[string]string
 	return true
 }
 
-// countFailedSources counts configured data source entries and how many of
-// them genuinely failed this round, plus the number of distinct failed keys
-// (error map length) used for skip/merge decisions and logging.
-//
-// The error maps are keyed by data.Key / extract.Key, so duplicate entries
-// collapse into one map entry; counting map entries would under-report
-// failures. dataProcess entries whose extract is nil are excluded from both
-// totals.
-//
-// Twin exemptions: a failed spec.data entry is not counted when a successful
-// twin covers its target output (failedUncovered[i] == false), and a failed
-// extract entry is not counted when its extract.Key appears in
-// extractSucceededKeys. See dataEntryTargetCovered for the canonical
-// twin-exemption semantics; the merge layer stays conservative.
+// countFailedSources counts configured data source entries and how many
+// genuinely failed this round, plus the distinct failed keys for skip/merge
+// decisions. Error maps are keyed by data.Key / extract.Key, so duplicate
+// entries collapse. Twin exemptions: a failed entry is skipped when a
+// successful twin covers its output; the merge layer stays conservative.
 func (r *ExternalSecretReconciler) countFailedSources(externalSec *api.ExternalSecret, failedUncovered []bool, dataErrorsMap, extractDataErrorsMap map[string]error, extractSucceededKeys map[string]struct{}) (totalDataSources, failedSources, failedKeyCount int) {
 	totalDataSources = len(externalSec.Spec.Data)
 	for i := range externalSec.Spec.Data {
@@ -1258,25 +1414,36 @@ func (r *ExternalSecretReconciler) countFailedSources(externalSec *api.ExternalS
 			continue
 		}
 		if _, succeeded := extractSucceededKeys[dp.Extract.Key]; succeeded {
-			// Twin exemption: a sibling dataProcess entry already fetched this
-			// extract.Key successfully this round.
+			// Twin exemption: a sibling entry fetched this key successfully.
 			continue
 		}
 		failedSources++
 	}
-	// Number of distinct failed keys (map length); deliberately computed
-	// from the raw error maps so the twin-exempted extract error still
-	// counts here (the merge layer stays conservative).
-	failedKeyCount = len(dataErrorsMap) + len(extractDataErrorsMap)
+	// Distinct failed keys: union of both error maps (a key failing on both
+	// sides counts once; nil errors skipped, matching collectFailedKeys), so
+	// twin-exempted extract errors still count here -- the merge layer stays
+	// conservative.
+	failedKeySet := make(map[string]struct{}, len(dataErrorsMap)+len(extractDataErrorsMap))
+	for k, v := range dataErrorsMap {
+		if v == nil {
+			continue
+		}
+		failedKeySet[k] = struct{}{}
+	}
+	for k, v := range extractDataErrorsMap {
+		if v == nil {
+			continue
+		}
+		failedKeySet[k] = struct{}{}
+	}
+	failedKeyCount = len(failedKeySet)
 	return totalDataSources, failedSources, failedKeyCount
 }
 
 // resolveWriteData resolves the dataset to write:
-//  1. total failure + CleanUpSecretOnFailure -> nil (deletion contract takes
-//     over, template output discarded);
+//  1. total failure + CleanUpSecretOnFailure -> nil (deletion contract);
 //  2. partial failure without template -> merge fresh values with retained
-//     previous values of failed keys (see collectFailedEntryTargetKeys /
-//     mergeWithFailedKeys);
+//     previous values of failed keys;
 //  3. otherwise the fetched secretMap as-is.
 func (r *ExternalSecretReconciler) resolveWriteData(log logr.Logger, externalSec *api.ExternalSecret, dataErrorsMap, extractDataErrorsMap map[string]error, secretMap, currentData map[string][]byte, allDataSourcesFailed bool, failedKeyCount int, templateProcessed bool) map[string][]byte {
 	if allDataSourcesFailed && r.CleanUpSecretOnFailure {
@@ -1287,6 +1454,7 @@ func (r *ExternalSecretReconciler) resolveWriteData(log logr.Logger, externalSec
 		writeData := mergeWithFailedKeys(secretMap, currentData, failedTargetKeys, retainAllUnmapped)
 		log.Info("partial failure detected, merging successful keys with retained values of failed keys",
 			"failedKeys", collectFailedKeys(dataErrorsMap, extractDataErrorsMap),
+			"failedErrors", collectFailedErrors(dataErrorsMap, extractDataErrorsMap),
 			"failedTargetKeys", failedTargetKeys,
 			"retainAllUnmapped", retainAllUnmapped,
 			"mergedDataLength", len(writeData),
@@ -1301,17 +1469,16 @@ func (r *ExternalSecretReconciler) getSecretStore(ctx context.Context, secretSto
 		return nil, fmt.Errorf("secret store ref is nil")
 	}
 
-	// Check if cross namespace reference is enabled
+	// Cross-namespace reference gate
 	if !r.EnableCrossNamespace && secretStoreRef.Namespace != "" && secretStoreRef.Namespace != externalSecretNamespace && secretStoreRef.Kind != "ClusterSecretStore" {
 		return nil, fmt.Errorf("cross namespace SecretStore reference is disabled, cannot reference SecretStore in namespace %s from namespace %s", secretStoreRef.Namespace, externalSecretNamespace)
 	}
 
-	// If namespace is specified, issue a warning as this field is deprecated
+	// Deprecated field: warn when namespace is specified
 	if secretStoreRef.Namespace != "" && secretStoreRef.Kind != "ClusterSecretStore" {
-		klog.Warningf("Namespace field in SecretStoreRef is deprecated. Use SecretStore in the same namespace as ExternalSecret, or use ClusterSecretStore.")
+		klog.Warningf("Namespace field in SecretStoreRef is deprecated (SecretStore %s/%s). Use SecretStore in the same namespace as ExternalSecret, or use ClusterSecretStore.", secretStoreRef.Namespace, secretStoreRef.Name)
 	}
 
-	// If Kind is not specified, default to SecretStore
 	kind := secretStoreRef.Kind
 	if kind == "" {
 		kind = "SecretStore"
@@ -1319,9 +1486,8 @@ func (r *ExternalSecretReconciler) getSecretStore(ctx context.Context, secretSto
 
 	switch kind {
 	case "SecretStore":
-		// Get SecretStore in the same namespace
 		namespace := externalSecretNamespace
-		// If namespace is explicitly specified (backward compatibility), use the specified namespace
+		// Explicit namespace kept for backward compatibility
 		if secretStoreRef.Namespace != "" {
 			namespace = secretStoreRef.Namespace
 		}
@@ -1338,7 +1504,6 @@ func (r *ExternalSecretReconciler) getSecretStore(ctx context.Context, secretSto
 		return secretStore, nil
 
 	case "ClusterSecretStore":
-		// Get ClusterSecretStore
 		clusterSecretStore := &api.ClusterSecretStore{}
 		err := r.Get(ctx, client.ObjectKey{
 			Name: secretStoreRef.Name,
@@ -1348,12 +1513,11 @@ func (r *ExternalSecretReconciler) getSecretStore(ctx context.Context, secretSto
 			return nil, fmt.Errorf("failed to get ClusterSecretStore %s: %v", secretStoreRef.Name, err)
 		}
 
-		// Validate if namespace is allowed to access this ClusterSecretStore
 		if !utils.IsNamespaceAllowedForClusterSecretStore(clusterSecretStore, externalSecretNamespace, r.Get) {
 			return nil, fmt.Errorf("namespace %s is not allowed to access ClusterSecretStore %s", externalSecretNamespace, secretStoreRef.Name)
 		}
 
-		// Convert ClusterSecretStore to SecretStore and return
+		// Convert to SecretStore
 		converted := &api.SecretStore{
 			TypeMeta:   clusterSecretStore.TypeMeta,
 			ObjectMeta: clusterSecretStore.ObjectMeta,
@@ -1362,8 +1526,9 @@ func (r *ExternalSecretReconciler) getSecretStore(ctx context.Context, secretSto
 				OOS: clusterSecretStore.Spec.OOS,
 			},
 			Status: api.SecretStoreStatus{
-				Conditions:   clusterSecretStore.Status.Conditions,
-				Capabilities: clusterSecretStore.Status.Capabilities,
+				Conditions:       clusterSecretStore.Status.Conditions,
+				Capabilities:     clusterSecretStore.Status.Capabilities,
+				ClientGeneration: clusterSecretStore.Status.ClientGeneration,
 			},
 		}
 		// Clear namespace since ClusterSecretStore is cluster-scoped

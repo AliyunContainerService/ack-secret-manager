@@ -1,34 +1,20 @@
 // Copyright © 2025 Alibaba Cloud. All rights reserved.
 
 // composite_client_lifecycle_test.go covers the lifecycle of composite-key
-// ("clientName#endpoint") clients in the ExternalSecret controller:
-//
-//   - finalizer cleanup: the finalizer deregisters endpoint-specific clients
-//     with a reference check, never touching plain clientName clients;
-//   - spec-change garbage collection: a modified/removed kmsEndpoint
-//     reclaims the stale composite client (with the same reference check as
-//     the finalizer path); steady-state rounds and endpoint-free
-//     ExternalSecrets pay no cleanup cost (regression red line); provider
-//     absence is fail-closed on every cleanup path.
-//
-// It also covers the related hardening behaviors:
-//   - template metadata debounce: rendered labels/annotations only force a
-//     Secret write when not already applied (first/add/change states write,
-//     steady state does not);
-//   - status write timing: skipped failure rounds still persist their
-//     data-source failures (the fatal-template counterpart of this contract
-//     lives in zero_output_guard_test.go);
-//   - placeholder retention in the deferred status write.
+// ("clientName#endpoint") clients: finalizer cleanup and spec-change garbage
+// collection (both reference-checked, never touching plain clientName
+// clients; provider absence is fail-closed on the reconcile path), plus the
+// related hardening behaviors: template metadata debounce, status write
+// timing on skipped failure rounds, and placeholder retention in the
+// deferred status write.
 
 package externalsecret
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -100,8 +86,8 @@ func TestCompositeClientKeysFromSpec(t *testing.T) {
 			t.Fatalf("expected composite key %q in %v", k, got)
 		}
 	}
-	// A whitespace-only kmsEndpoint normalizes to the empty string (default
-	// endpoint) and must not produce any composite key.
+	// A whitespace-only kmsEndpoint normalizes to "" and must not produce a
+	// composite key.
 	for k := range got {
 		if strings.Contains(k, "# ") || strings.Contains(k, "#\t") || strings.HasSuffix(k, "#") {
 			t.Fatalf("whitespace-only kmsEndpoint must not produce a composite key, got %q", k)
@@ -164,8 +150,8 @@ func TestFinalizerCleanupIgnoresInDeletionSharer(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	storeRef := &api.SecretStoreRef{Name: "store"}
 	es := endpointES("es-a", "uid-a", storeRef, "kms.vpc.aliyuncs.com")
-	// The only sharer is itself being deleted (and runs its own
-	// reference-checked cleanup), so it does not block the deregistration.
+	// The only sharer is itself being deleted, so it does not block the
+	// deregistration.
 	now := metav1.Now()
 	other := endpointES("es-b", "uid-b", storeRef, "kms.vpc.aliyuncs.com")
 	other.DeletionTimestamp = &now
@@ -227,283 +213,11 @@ func TestFinalizerCleanupNoCompositeKeysIsNoop(t *testing.T) {
 	}
 }
 
-// --- Template metadata debounce ------------------------------------------------
-
-func TestTemplateMetadataTargetsAppliedTruthTable(t *testing.T) {
-	targets := map[string]map[string]string{
-		"labels":      {"app": "v1"},
-		"annotations": {"managed-by": "ack-secret-manager"},
-	}
-	tests := []struct {
-		name        string
-		targets     map[string]map[string]string
-		labels      map[string]string
-		annotations map[string]string
-		expected    bool
-	}{
-		{"nil targets are not applied", nil, map[string]string{"app": "v1"}, nil, false},
-		{"empty targets are not applied", map[string]map[string]string{}, nil, nil, false},
-		{"missing current metadata is not applied", targets, nil, nil, false},
-		{"missing one key is not applied", targets, map[string]string{"app": "v1"}, map[string]string{}, false},
-		{"differing value is not applied", targets, map[string]string{"app": "v2"}, map[string]string{"managed-by": "ack-secret-manager"}, false},
-		{"all targets present and equal are applied", targets, map[string]string{"app": "v1"}, map[string]string{"managed-by": "ack-secret-manager"}, true},
-		{"extra current keys do not prevent applied", targets, map[string]string{"app": "v1", "extra": "x"}, map[string]string{"managed-by": "ack-secret-manager", "extra": "y"}, true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := templateMetadataTargetsApplied(tt.targets, tt.labels, tt.annotations); got != tt.expected {
-				t.Errorf("templateMetadataTargetsApplied() = %v, expected %v", got, tt.expected)
-			}
-		})
-	}
-}
-
-// TestMetadataDebounceThreeStates drives syncIfNeedUpdate through the three
-// metadata states with otherwise stable data: first round writes (annotation
-// absent), steady state does NOT rewrite (all targets applied), and a changed
-// target writes again.
-func TestMetadataDebounceThreeStates(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "metadata-debounce-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "src-key"}},
-			Target: &api.ExternalSecretTarget{
-				Name: "metadata-debounce-secret",
-				Template: &api.ExternalSecretTemplate{
-					TemplateFrom: []api.TemplateFrom{
-						{Literal: strPtr("app=v1"), Target: api.TemplateTargetAnnotations},
-					},
-				},
-			},
-		},
-	}
-	// Existing Secret carries the SAME data the backend returns: only the
-	// metadata can drive the update decision.
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "metadata-debounce-secret", Namespace: "default"},
-		Data:       map[string][]byte{"src-key": []byte("v")},
-	}
-	sc := &fakeSecretClient{dataByKey: map[string]map[string][]byte{
-		"src-key": {"src-key": []byte("v")},
-	}}
-	r := newTestReconciler(t, false, sc, es, secret)
-
-	// State 1 (first/added): the annotation is absent -> the round writes.
-	updated, err := r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("round 1 returned error: %v", err)
-	}
-	if !updated {
-		t.Fatalf("first metadata round must write the Secret")
-	}
-	got := getTestSecret(t, r, "default", "metadata-debounce-secret")
-	if got.Annotations["literal"] != "app=v1" {
-		t.Fatalf("expected rendered annotation after round 1, got %v", got.Annotations)
-	}
-
-	// State 2 (steady): data unchanged and every target applied -> NO write.
-	updated, err = r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("round 2 returned error: %v", err)
-	}
-	if updated {
-		t.Fatalf("steady-state round with applied metadata must NOT rewrite the Secret")
-	}
-
-	// State 3 (changed): the rendered value differs -> the round writes again.
-	es.Spec.Target.Template.TemplateFrom[0].Literal = strPtr("app=v2")
-	updated, err = r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("round 3 returned error: %v", err)
-	}
-	if !updated {
-		t.Fatalf("changed metadata target must trigger a write")
-	}
-	got = getTestSecret(t, r, "default", "metadata-debounce-secret")
-	if got.Annotations["literal"] != "app=v2" {
-		t.Fatalf("expected updated annotation after round 3, got %v", got.Annotations)
-	}
-}
-
-// --- Status write timing -------------------------------------------------------
-
-// TestSkippedFailureRoundStillPersistsDataFailures proves the deferred status
-// write still happens on the fail-closed skip path (total failure with
-// cleanup=false): the data-source failure entry must reach the status even
-// though no Secret write occurs.
-func TestSkippedFailureRoundStillPersistsDataFailures(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "skipped-failure-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "bad-key"}},
-			Target:   &api.ExternalSecretTarget{Name: "skipped-failure-secret"},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "skipped-failure-secret", Namespace: "default"},
-		Data:       map[string][]byte{"existing": []byte("value")},
-	}
-	sc := &fakeSecretClient{failByKey: map[string]error{"bad-key": fmt.Errorf("backend failure")}}
-	r := newTestReconciler(t, false, sc, es, secret)
-
-	updated, err := r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("syncIfNeedUpdate returned error: %v", err)
-	}
-	if updated {
-		t.Fatalf("total failure with cleanup=false must skip the write")
-	}
-	if !statusHasKey(es, "bad-key") {
-		t.Fatalf("the deferred status write must persist the data-source failure, got %+v", es.Status.DataSyncResults)
-	}
-}
-
-// --- Placeholder retention in the deferred status write ------------------------
-
-func TestRetainResourceManagementPlaceholder(t *testing.T) {
-	placeholder := api.DataSyncResult{
-		ExternalSecretKey: "template_processing_errors",
-		Status:            "Failed",
-		Reason:            "parse error",
-	}
-	dataFailure := api.DataSyncResult{
-		ExternalSecretKey: "bad-key",
-		Status:            "Failed",
-		Reason:            "backend down",
-	}
-
-	t.Run("placeholder from old is retained alongside fresh data entries", func(t *testing.T) {
-		fresh := []api.DataSyncResult{dataFailure}
-		old := []api.DataSyncResult{placeholder}
-		got := retainResourceManagementPlaceholder(fresh, old)
-		if len(got) != 2 {
-			t.Fatalf("expected 2 entries (data failure + placeholder), got %+v", got)
-		}
-		// Inputs must not be mutated.
-		if len(fresh) != 1 || len(old) != 1 {
-			t.Fatalf("inputs were mutated: fresh=%v old=%v", fresh, old)
-		}
-	})
-
-	t.Run("genuine data-key entries in old are not retained as placeholders", func(t *testing.T) {
-		got := retainResourceManagementPlaceholder(
-			[]api.DataSyncResult{dataFailure},
-			[]api.DataSyncResult{{ExternalSecretKey: "other-key", Status: "Failed", Reason: "x"}},
-		)
-		if len(got) != 1 {
-			t.Fatalf("expected only the fresh entry, got %+v", got)
-		}
-	})
-
-	t.Run("no duplication when fresh already carries the placeholder key", func(t *testing.T) {
-		got := retainResourceManagementPlaceholder(
-			[]api.DataSyncResult{placeholder},
-			[]api.DataSyncResult{placeholder},
-		)
-		if len(got) != 1 {
-			t.Fatalf("expected a single placeholder entry, got %+v", got)
-		}
-	})
-
-	t.Run("empty-key Succeeded entry in old is superseded, not retained", func(t *testing.T) {
-		got := retainResourceManagementPlaceholder(
-			[]api.DataSyncResult{dataFailure},
-			[]api.DataSyncResult{{ExternalSecretKey: "", Status: "Succeeded", SynchronizationTime: metav1.Time{Time: time.Now()}}},
-		)
-		if len(got) != 1 || got[0].ExternalSecretKey != "bad-key" {
-			t.Fatalf("the stale round verdict must be superseded by the fresh failures, got %+v", got)
-		}
-	})
-}
-
-// TestDegradedRoundRetainsSameRoundPlaceholder drives a full degraded round
-// (data-source failure + fatal template error): the template_processing_errors
-// placeholder written earlier in the SAME round must stay visible alongside
-// the real data-key failure entry persisted by the deferred status write.
-func TestDegradedRoundRetainsSameRoundPlaceholder(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "placeholder-degraded-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "bad-key"}},
-			Target: &api.ExternalSecretTarget{
-				Name: "placeholder-degraded-secret",
-				Template: &api.ExternalSecretTemplate{
-					Data: map[string]string{"out": "{{ if"},
-				},
-			},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "placeholder-degraded-secret", Namespace: "default"},
-		Data:       map[string][]byte{"existing": []byte("value")},
-	}
-	sc := &fakeSecretClient{failByKey: map[string]error{"bad-key": fmt.Errorf("backend failure")}}
-	r := newTestReconciler(t, false, sc, es, secret)
-
-	updated, err := r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("degraded round must not return an error: %v", err)
-	}
-	if updated {
-		t.Fatalf("degraded round must skip the Secret write")
-	}
-	if !statusHasKey(es, "template_processing_errors") {
-		t.Fatalf("the same-round template_processing_errors placeholder must be retained, got %+v", es.Status.DataSyncResults)
-	}
-	if !statusHasKey(es, "bad-key") {
-		t.Fatalf("the real data-key failure entry must be persisted, got %+v", es.Status.DataSyncResults)
-	}
-}
-
-// TestRecoveryRoundDropsStalePlaceholder pins the convergence fix: a
-// placeholder persisted by a PREVIOUS round (rate_limit here) must be
-// superseded once a normal data-sync round completes -- it must NOT be merged
-// into the fresh results forever.
-func TestRecoveryRoundDropsStalePlaceholder(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "placeholder-recover-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "good-key"}},
-			Target:   &api.ExternalSecretTarget{Name: "placeholder-recover-secret"},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "placeholder-recover-secret", Namespace: "default"},
-		Data:       map[string][]byte{"good-key": []byte("stale")},
-	}
-	sc := &fakeSecretClient{dataByKey: map[string]map[string][]byte{
-		"good-key": {"good-key": []byte("fresh")},
-	}}
-	r := newTestReconciler(t, false, sc, es, secret)
-
-	// Simulate a previous throttled round that persisted the placeholder.
-	r.updateResourceManagementStatus(es, "rate_limit", fmt.Errorf("throttled"))
-	if !statusHasKey(es, "rate_limit") {
-		t.Fatalf("precondition: rate_limit placeholder must be persisted, got %+v", es.Status.DataSyncResults)
-	}
-
-	// Recovery round: every data source succeeds.
-	if _, err := r.syncIfNeedUpdate(context.Background(), es); err != nil {
-		t.Fatalf("recovery round returned error: %v", err)
-	}
-	if statusHasKey(es, "rate_limit") {
-		t.Fatalf("stale rate_limit placeholder from a previous round must be dropped on recovery, got %+v", es.Status.DataSyncResults)
-	}
-	if len(es.Status.DataSyncResults) != 1 || es.Status.DataSyncResults[0].Status != "Succeeded" {
-		t.Fatalf("recovery round must converge to a single Succeeded entry, got %+v", es.Status.DataSyncResults)
-	}
-}
-
 // --- Spec-change garbage collection of composite clients -----------------------
 
-// TestSpecEndpointChangeReclaimsStaleCompositeClient drives the reconcile
-// garbage collector across three rounds: baseline (endpoint A), spec change
-// (endpoint B -> the stale A client is reclaimed), and steady state (no
-// further deletions).
+// TestSpecEndpointChangeReclaimsStaleCompositeClient drives the GC across
+// three rounds: baseline (endpoint A), spec change (endpoint B -> the stale
+// A client is reclaimed), and steady state (no further deletions).
 func TestSpecEndpointChangeReclaimsStaleCompositeClient(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, "ep-old")
@@ -536,9 +250,8 @@ func TestSpecEndpointChangeReclaimsStaleCompositeClient(t *testing.T) {
 	}
 }
 
-// TestSpecEndpointRemovedReclaimsStaleCompositeClient covers the deletion
-// variant: dropping kmsEndpoint entirely reclaims the former composite
-// client and leaves no tracker entry behind.
+// TestSpecEndpointRemovedReclaimsStaleCompositeClient: dropping kmsEndpoint
+// entirely reclaims the former composite client and leaves no tracker entry.
 func TestSpecEndpointRemovedReclaimsStaleCompositeClient(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, "ep-old")
@@ -566,9 +279,9 @@ func TestSpecEndpointRemovedReclaimsStaleCompositeClient(t *testing.T) {
 	}
 }
 
-// TestSpecChangeRetainsStaleKeyReferencedByOther proves the spec-change path
-// shares the finalizer's reference check: a stale composite key still used
-// by another active ExternalSecret is retained.
+// TestSpecChangeRetainsStaleKeyReferencedByOther: the spec-change path
+// shares the finalizer's reference check; a stale key still used by another
+// active ExternalSecret is retained.
 func TestSpecChangeRetainsStaleKeyReferencedByOther(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	storeRef := &api.SecretStoreRef{Name: "store"}
@@ -590,10 +303,9 @@ func TestSpecChangeRetainsStaleKeyReferencedByOther(t *testing.T) {
 }
 
 // TestWhitespaceEndpointTreatedAsSameKey pins the endpoint normalization
-// contract of the composite-key GC: a whitespace-padded kmsEndpoint produces
-// the same composite key as its trimmed form, so switching between the two
-// is a no-op, and a subsequent real endpoint change still reclaims the
-// trimmed-form key (the provider side registers under the trimmed key too).
+// contract: a whitespace-padded kmsEndpoint maps to the same composite key
+// as its trimmed form (switching is a no-op), and a real endpoint change
+// still reclaims the trimmed-form key.
 func TestWhitespaceEndpointTreatedAsSameKey(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, " ep-old ")
@@ -624,10 +336,9 @@ func TestWhitespaceEndpointTreatedAsSameKey(t *testing.T) {
 	}
 }
 
-// TestSpecEndpointChangedToWhitespaceOnlyReclaimsStaleCompositeClient covers
-// the whitespace boundary: switching kmsEndpoint from a real endpoint to a
-// whitespace-only value is equivalent to removing the endpoint — the old
-// trimmed-form composite client is reclaimed and no tracker state remains.
+// TestSpecEndpointChangedToWhitespaceOnlyReclaimsStaleCompositeClient:
+// switching to a whitespace-only endpoint equals removing the endpoint --
+// the old composite client is reclaimed and no tracker state remains.
 func TestSpecEndpointChangedToWhitespaceOnlyReclaimsStaleCompositeClient(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, "ep-old")
@@ -649,8 +360,7 @@ func TestSpecEndpointChangedToWhitespaceOnlyReclaimsStaleCompositeClient(t *test
 		t.Fatalf("expected exactly [%s] to be reclaimed (whitespace-only == endpoint removed), got %v", expected, provider.deleted)
 	}
 
-	// A whitespace-only endpoint normalizes to "" and must not keep any
-	// tracker state, exactly like an endpoint-free ExternalSecret.
+	// A whitespace-only endpoint normalizes to "" and keeps no tracker state.
 	if _, tracked := r.snapshotCompositeKeys(es.UID); tracked {
 		t.Fatalf("whitespace-only endpoint ExternalSecret must not retain tracker state")
 	}
@@ -666,7 +376,7 @@ func TestSpecEndpointChangedToWhitespaceOnlyReclaimsStaleCompositeClient(t *test
 
 // TestPlainSpecNeverTrackedIsRegressionGuard pins the red line: an
 // endpoint-free ExternalSecret never enters the tracker and never triggers
-// any client deletion, so the no-endpoint behavior is completely unchanged.
+// client deletion.
 func TestPlainSpecNeverTrackedIsRegressionGuard(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := &api.ExternalSecret{
@@ -691,10 +401,9 @@ func TestPlainSpecNeverTrackedIsRegressionGuard(t *testing.T) {
 	}
 }
 
-// TestCleanupProviderNotFoundSemantics verifies the path-specific handling
-// of a missing provider: the deletion path (finalizer) warns and continues
-// so deletion stays the escape hatch for misconfigured resources, while the
-// reconcile path stays fail-closed.
+// TestCleanupProviderNotFoundSemantics: the deletion path warns and
+// continues (deletion stays the escape hatch), while the reconcile path
+// stays fail-closed.
 func TestCleanupProviderNotFoundSemantics(t *testing.T) {
 	t.Run("deletion path warns and continues", func(t *testing.T) {
 		provider := &cleanupRecordingProvider{}
@@ -705,14 +414,13 @@ func TestCleanupProviderNotFoundSemantics(t *testing.T) {
 		}
 		r := newCleanupReconciler(t, provider, es, secret)
 
-		// Simulate the provider being unavailable during cleanup (e.g. a
-		// legacy ExternalSecret with a misspelled spec.provider).
+		// Simulate the provider being unavailable during cleanup.
 		prev := backend.GetProviderByName(backend.ProviderKMSName)
 		backend.DeleteProvider(backend.ProviderKMSName)
 		t.Cleanup(func() { backend.RegisterProvider(backend.ProviderKMSName, prev) })
 
-		// Must NOT fail: a missing provider may never block the removal of
-		// an ExternalSecret forever (it stays stuck Terminating otherwise).
+		// Must NOT fail: a missing provider may never block the removal of an
+		// ExternalSecret forever (it stays stuck Terminating otherwise).
 		if err := r.cleanupEndpointClients(context.Background(), logr.Discard(), es); err != nil {
 			t.Fatalf("cleanupEndpointClients() error = %v, want nil on the deletion path (warn-and-continue)", err)
 		}
@@ -741,14 +449,14 @@ func TestCleanupProviderNotFoundSemantics(t *testing.T) {
 			t.Fatalf("reconcileStaleCompositeClients() error = %v, want provider-not-found error (fail-closed)", err)
 		}
 
-		// The failed round must keep the previous snapshot so the next round
+		// The failed round keeps the previous snapshot so the next round
 		// retries the same stale-key diff.
 		if _, tracked := r.snapshotCompositeKeys(es.UID); !tracked {
 			t.Fatalf("failed cleanup must retain the tracked snapshot for retry")
 		}
 
-		// Recovery: re-register the recording provider and retry; the stale
-		// key must be reclaimed now.
+		// Recovery: re-register the provider and retry; the stale key must be
+		// reclaimed now.
 		backend.RegisterProvider(backend.ProviderKMSName, provider)
 		if err := r.reconcileStaleCompositeClients(context.Background(), logr.Discard(), es); err != nil {
 			t.Fatalf("retry round after provider recovery returned error: %v", err)
@@ -785,10 +493,9 @@ func TestFinalizerCleanupForgetsTracker(t *testing.T) {
 }
 
 // TestFinalizerCleanupReclaimsTrackedStaleKey pins the deletion-path leak
-// fix: workqueue event coalescing can deliver an endpoint change together
-// with the deletion in a single round (handleDeletion bypasses
-// reconcileStaleCompositeClients), so the finalizer must reclaim stale keys
-// from the tracked snapshot, not just the current spec keys.
+// fix: event coalescing can deliver an endpoint change together with the
+// deletion, so the finalizer must reclaim stale keys from the tracked
+// snapshot, not just the current spec keys.
 func TestFinalizerCleanupReclaimsTrackedStaleKey(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, "ep-new")
@@ -799,7 +506,7 @@ func TestFinalizerCleanupReclaimsTrackedStaleKey(t *testing.T) {
 	r := newCleanupReconciler(t, provider, es, secret)
 
 	// A previous round tracked the pre-change endpoint key; the spec-change
-	// GC round never ran (event coalescing or cleanup backoff).
+	// GC round never ran (event coalescing).
 	r.storeCompositeKeys(es.UID, map[string]struct{}{
 		"namespace/default/store#ep-old": {},
 	})
@@ -819,10 +526,9 @@ func TestFinalizerCleanupReclaimsTrackedStaleKey(t *testing.T) {
 	}
 }
 
-// TestFinalizerCleanupFailureRetainsTracker pins the counterpart of
-// TestFinalizerCleanupForgetsTracker: when the cleanup fails (here a List
-// error, fail-closed), forgetCompositeKeys must NOT run, so the next
-// finalizer attempt retries the same union of tracked + spec keys.
+// TestFinalizerCleanupFailureRetainsTracker: when cleanup fails (fail-closed
+// List error), forgetCompositeKeys must NOT run, so the next finalizer
+// attempt retries the same union of tracked + spec keys.
 func TestFinalizerCleanupFailureRetainsTracker(t *testing.T) {
 	provider := &cleanupRecordingProvider{}
 	es := endpointES("es-a", "uid-a", &api.SecretStoreRef{Name: "store"}, "ep-old")

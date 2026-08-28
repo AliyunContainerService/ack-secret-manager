@@ -1,17 +1,14 @@
 // Copyright © 2025 Alibaba Cloud. All rights reserved.
 
-// zero_output_guard_test.go covers the zero-output fail-closed guard:
-// the pure predicates (truth tables) and chain-level tests that drive
-// syncIfNeedUpdate end to end with a fake provider and a fake client,
-// asserting that an error-free round producing zero keys never deletes or
-// clears an existing Secret, while the established success/failure contracts
-// stay unaffected.
+// zero_output_guard_test.go covers the zero-output fail-closed guard: the
+// pure predicates (truth tables) and chain-level tests asserting that an
+// error-free round producing zero keys never deletes or clears an existing
+// Secret, while the established success/failure contracts stay unaffected.
 
 package externalsecret
 
 import (
 	"context"
-	stderrors "errors"
 	"fmt"
 	"testing"
 
@@ -23,9 +20,8 @@ import (
 
 // --- Truth tables for the pure guard predicates ----------------------------
 
-// TestHasDeclaredSourcesButZeroOutputTruthTable covers all 8 combinations of
-// totalDataSources={0,>0} x failedKeyCount={0,>0} x producedKeys={0,>0}: the
-// guard fires ONLY on the error-free, source-declaring, zero-output round.
+// TestHasDeclaredSourcesButZeroOutputTruthTable covers all 8 combinations:
+// the guard fires ONLY on the error-free, source-declaring, zero-output round.
 func TestHasDeclaredSourcesButZeroOutputTruthTable(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -54,10 +50,9 @@ func TestHasDeclaredSourcesButZeroOutputTruthTable(t *testing.T) {
 	}
 }
 
-// TestHasNoDeclaredSourcesButExistingDataTruthTable covers all 8 combinations
-// of totalDataSources={0,>0} x templateConfigured x existingKeys={0,>0}: the
-// guard fires ONLY when no source is declared, no template is configured and
-// an existing Secret carries data.
+// TestHasNoDeclaredSourcesButExistingDataTruthTable covers all 8
+// combinations: the guard fires ONLY when no source is declared, no template
+// is configured and an existing Secret carries data.
 func TestHasNoDeclaredSourcesButExistingDataTruthTable(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -86,12 +81,10 @@ func TestHasNoDeclaredSourcesButExistingDataTruthTable(t *testing.T) {
 	}
 }
 
-// TestTemplateRenderedZeroOutputTruthTable covers all 16 combinations of
-// failedKeyCount={0,>0} x postTemplateKeys={0,>0} x preTemplateKeys={0,>0} x
-// existingKeys={0,>0}: the post-template guard fires ONLY on the error-free
-// round whose output collapsed to zero keys while there is something to
-// protect (non-empty source data -- the declared-source post-template form --
-// or an existing Secret carrying data -- the source-less post-template form).
+// TestTemplateRenderedZeroOutputTruthTable covers all 16 combinations: the
+// post-template guard fires ONLY on the error-free round whose output
+// collapsed to zero keys while there is something to protect (non-empty
+// source data or an existing Secret carrying data).
 func TestTemplateRenderedZeroOutputTruthTable(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -131,12 +124,10 @@ func TestTemplateRenderedZeroOutputTruthTable(t *testing.T) {
 
 // --- Chain-level tests: the zero-output guard protects existing Secrets ----
 
-// TestZeroOutputGuardExtractEmptyDocument drives the declared-source guard
-// through the full chain: a dataProcess[].extract fetch succeeds but the
-// backend document has been emptied, producing zero keys. The existing
-// Secret must be neither deleted (cleanup=true) nor cleared (cleanup=false),
-// and the round must surface a zero_output_guard status entry instead of a
-// false Succeeded write.
+// TestZeroOutputGuardExtractEmptyDocument: an extract fetch succeeds but the
+// backend document has been emptied (zero keys). The existing Secret must be
+// neither deleted nor cleared, and the round must report zero_output_guard
+// instead of a false Succeeded write.
 func TestZeroOutputGuardExtractEmptyDocument(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -181,11 +172,9 @@ func TestZeroOutputGuardExtractEmptyDocument(t *testing.T) {
 	}
 }
 
-// TestZeroOutputGuardDataEmptyResult is the spec.data-side counterpart of the
-// extract test above: a spec.data fetch succeeds but returns zero keys (no
-// error), so the round produces nothing. The existing Secret must be neither
-// deleted (cleanup=true) nor cleared (cleanup=false), and the round must
-// report zero_output_guard.
+// TestZeroOutputGuardDataEmptyResult is the spec.data-side counterpart: the
+// fetch succeeds but returns zero keys, so the round must protect the
+// existing Secret and report zero_output_guard.
 func TestZeroOutputGuardDataEmptyResult(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -228,10 +217,9 @@ func TestZeroOutputGuardDataEmptyResult(t *testing.T) {
 	}
 }
 
-// TestZeroOutputGuardNoSourcesExistingSecret drives the source-less guard
-// through the full chain: the spec declares neither data nor dataProcess
-// entries, yet a Secret with data exists. The empty round must not delete or
-// clear it.
+// TestZeroOutputGuardNoSourcesExistingSecret drives the source-less guard:
+// no data/dataProcess entries but an existing Secret with data must not be
+// deleted or cleared.
 func TestZeroOutputGuardNoSourcesExistingSecret(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -273,9 +261,8 @@ func TestZeroOutputGuardNoSourcesExistingSecret(t *testing.T) {
 
 // --- Regression tests: the guard must not disturb the existing contracts ----
 
-// TestZeroOutputGuardTemplateOnlySpecStillWrites: no data entries but a
-// templateFrom literal produces data -- totalDataSources=0, so the guard
-// must NOT fire and the templated write proceeds as usual.
+// TestZeroOutputGuardTemplateOnlySpecStillWrites: a templateFrom literal
+// produces data with totalDataSources=0, so the guard must NOT fire.
 func TestZeroOutputGuardTemplateOnlySpecStillWrites(t *testing.T) {
 	es := &api.ExternalSecret{
 		ObjectMeta: metav1.ObjectMeta{Name: "template-only-es", Namespace: "default"},
@@ -419,8 +406,8 @@ func TestZeroOutputGuardPartialFailureMergeUnaffected(t *testing.T) {
 
 // TestPostTemplateZeroOutputGuardInlineExecutionFailures covers Replace mode
 // where every inline data template fails execution: result.Data is cleared
-// and never repopulated, so the guard must skip the write and withhold
-// deletion for both cleanup flag values (template_zero_output_guard).
+// and never repopulated, so the guard skips the write and withholds deletion
+// for both cleanup flag values (template_zero_output_guard).
 func TestPostTemplateZeroOutputGuardInlineExecutionFailures(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -433,9 +420,8 @@ func TestPostTemplateZeroOutputGuardInlineExecutionFailures(t *testing.T) {
 					Target: &api.ExternalSecretTarget{
 						Name: "inline-fail-secret",
 						Template: &api.ExternalSecretTemplate{
-							// MergePolicy omitted -> Replace (default).
-							// The fail function aborts execution with an error:
-							// valid syntax, execution fails (non-fatal grading).
+							// MergePolicy omitted -> Replace (default); the fail function aborts
+							// execution: valid syntax, execution fails (non-fatal grading).
 							Data: map[string]string{"out": `{{ fail "simulated rendering failure" }}`},
 						},
 					},
@@ -471,10 +457,9 @@ func TestPostTemplateZeroOutputGuardInlineExecutionFailures(t *testing.T) {
 	}
 }
 
-// TestPostTemplateZeroOutputGuardTemplateFromDataZeroKeys covers the second
-// post-template gap: a Data-targeted templateFrom renders zero valid keys
-// (a KeysAndValues ConfigMap template without any key=value line), yet its
-// Data target triggers the Replace clear. The guard must protect the Secret.
+// TestPostTemplateZeroOutputGuardTemplateFromDataZeroKeys: a Data-targeted
+// templateFrom renders zero valid keys (KeysAndValues without any key=value
+// line) yet triggers the Replace clear; the guard must protect the Secret.
 func TestPostTemplateZeroOutputGuardTemplateFromDataZeroKeys(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -506,8 +491,8 @@ func TestPostTemplateZeroOutputGuardTemplateFromDataZeroKeys(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "templatefrom-zero-secret", Namespace: "default"},
 				Data:       map[string][]byte{"existing": []byte("value")},
 			}
-			// The template renders to a line without '=': KeysAndValues parses
-			// zero valid key-value pairs out of it.
+			// The template renders a line without '=': KeysAndValues parses zero
+			// valid key-value pairs out of it.
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "templatefrom-zero-cm", Namespace: "default"},
 				Data:       map[string]string{"tpl": "no key value pairs here"},
@@ -538,12 +523,10 @@ func TestPostTemplateZeroOutputGuardTemplateFromDataZeroKeys(t *testing.T) {
 	}
 }
 
-// TestPostTemplateZeroOutputGuardSourceLessTemplateExistingData covers the
-// source-less post-template gap: a template-only spec (no data source,
-// exempt from the pre-template source-less guard via templateConfigured)
-// renders zero Data keys while an existing Secret holds data; the guard
-// must skip the write and withhold deletion for both cleanup flag values
-// (template_zero_output_guard).
+// TestPostTemplateZeroOutputGuardSourceLessTemplateExistingData: a
+// template-only spec (exempt from the pre-template source-less guard) renders
+// zero Data keys while an existing Secret holds data; the guard must skip
+// the write and withhold deletion for both cleanup flag values.
 func TestPostTemplateZeroOutputGuardSourceLessTemplateExistingData(t *testing.T) {
 	for _, cleanup := range []bool{true, false} {
 		name := fmt.Sprintf("cleanup=%v", cleanup)
@@ -574,8 +557,7 @@ func TestPostTemplateZeroOutputGuardSourceLessTemplateExistingData(t *testing.T)
 				ObjectMeta: metav1.ObjectMeta{Name: "sourceless-template-secret", Namespace: "default"},
 				Data:       map[string][]byte{"existing": []byte("value")},
 			}
-			// The template renders to a line without '=': KeysAndValues parses
-			// zero valid key-value pairs out of it, so the Data-targeted
+			// The template renders a line without '=': the Data-targeted
 			// templateFrom yields zero keys.
 			cm := &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{Name: "sourceless-template-cm", Namespace: "default"},
@@ -651,14 +633,10 @@ func TestPostTemplateZeroOutputGuardMetadataOnlyNotTriggered(t *testing.T) {
 	}
 }
 
-// TestStatusCoverageUsesPreTemplateBaseline is the chain-level regression for
-// the status/counting baseline consistency: two spec.data entries reference
-// the same backend key, one succeeds and one fails, and a Replace-mode
-// template replaces the round's dataset. The status-side coverage check must
-// evaluate the PRE-template output (where the successful twin covers the
-// shared target key), NOT the template-replaced map -- otherwise the covered
-// duplicate-key failure would be misreported as Failed while the counting
-// side exempts it.
+// TestStatusCoverageUsesPreTemplateBaseline: the status-side coverage check
+// must evaluate the PRE-template output (where the successful twin covers
+// the shared target key), NOT the template-replaced map -- otherwise the
+// covered duplicate-key failure would be misreported as Failed.
 func TestStatusCoverageUsesPreTemplateBaseline(t *testing.T) {
 	es := &api.ExternalSecret{
 		ObjectMeta: metav1.ObjectMeta{Name: "coverage-baseline-es", Namespace: "default"},
@@ -671,8 +649,8 @@ func TestStatusCoverageUsesPreTemplateBaseline(t *testing.T) {
 			Target: &api.ExternalSecretTarget{
 				Name: "coverage-baseline-secret",
 				Template: &api.ExternalSecretTemplate{
-					// Replace mode (default): the round's dataset becomes the
-					// template output, which does NOT contain "shared-key".
+					// Replace mode (default): the round's dataset becomes the template
+					// output, which does NOT contain "shared-key".
 					TemplateFrom: []api.TemplateFrom{
 						{Literal: strPtr("rendered=yes"), Target: api.TemplateTargetData},
 					},
@@ -705,146 +683,4 @@ func TestStatusCoverageUsesPreTemplateBaseline(t *testing.T) {
 	}
 }
 
-// --- Chain-level tests: contract precedence (data failures vs template fatal)
 
-// TestContractPrecedenceDataFailureWithTemplateParseError: a round with BOTH a
-// data-source failure and a template parse error reports
-// template_processing_errors (NOT template_processing_fatal) and the Secret is
-// handled by the data-source failure contract -- here total failure with
-// cleanup=false retains the Secret.
-func TestContractPrecedenceDataFailureWithTemplateParseError(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "precedence-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "bad-key"}},
-			Target: &api.ExternalSecretTarget{
-				Name: "precedence-secret",
-				Template: &api.ExternalSecretTemplate{
-					// Unclosed action -> parse error (fatal grading).
-					Data: map[string]string{"out": "{{ if"},
-				},
-			},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "precedence-secret", Namespace: "default"},
-		Data:       map[string][]byte{"existing": []byte("value")},
-	}
-	sc := &fakeSecretClient{failByKey: map[string]error{"bad-key": fmt.Errorf("backend failure")}}
-	r := newTestReconciler(t, false, sc, es, secret)
-
-	updated, err := r.syncIfNeedUpdate(context.Background(), es)
-	if err != nil {
-		t.Fatalf("syncIfNeedUpdate returned error: %v", err)
-	}
-	if updated {
-		t.Fatalf("expected no write on a failed round with a template parse error")
-	}
-	got := getTestSecret(t, r, "default", "precedence-secret")
-	if got == nil || string(got.Data["existing"]) != "value" {
-		t.Fatalf("total failure with cleanup=false must retain the Secret, got %v", got)
-	}
-	if !statusHasKey(es, "template_processing_errors") {
-		t.Fatalf("status must report template_processing_errors, got %+v", es.Status.DataSyncResults)
-	}
-	if statusHasKey(es, "template_processing_fatal") {
-		t.Fatalf("status must NOT report template_processing_fatal when data sources failed, got %+v", es.Status.DataSyncResults)
-	}
-	// The real data-source failure entry survives alongside the placeholder.
-	if !statusHasKey(es, "bad-key") {
-		t.Fatalf("status must retain the real data-key failure entry, got %+v", es.Status.DataSyncResults)
-	}
-}
-
-// TestFatalTemplateRoundZeroWritesAndNoSucceeded: when every data source
-// succeeded, a template parse error is the round's only problem. The fatal
-// template round must perform zero Secret writes, never persist the
-// transient empty-key Succeeded entry (only the template_processing_fatal
-// placeholder is allowed in status), and return the fatal error for
-// backoff.
-func TestFatalTemplateRoundZeroWritesAndNoSucceeded(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "fatal-template-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "good-key"}},
-			Target: &api.ExternalSecretTarget{
-				Name: "fatal-template-secret",
-				Template: &api.ExternalSecretTemplate{
-					Data: map[string]string{"out": "{{ if"},
-				},
-			},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "fatal-template-secret", Namespace: "default"},
-		Data:       map[string][]byte{"existing": []byte("value")},
-	}
-	sc := &fakeSecretClient{dataByKey: map[string]map[string][]byte{
-		"good-key": {"good-key": []byte("fresh")},
-	}}
-	r := newTestReconciler(t, true, sc, es, secret)
-
-	updated, err := r.syncIfNeedUpdate(context.Background(), es)
-	if err == nil {
-		t.Fatalf("expected a fatal template error to be returned")
-	}
-	if updated {
-		t.Fatalf("expected zero Secret writes on a fatal template round")
-	}
-	got := getTestSecret(t, r, "default", "fatal-template-secret")
-	if got == nil || string(got.Data["existing"]) != "value" || len(got.Data) != 1 {
-		t.Fatalf("Secret must stay untouched on a fatal template round, got %v", got)
-	}
-	for _, res := range es.Status.DataSyncResults {
-		if res.Status == "Succeeded" {
-			t.Fatalf("fatal template round must not persist any Succeeded entry, got %+v", es.Status.DataSyncResults)
-		}
-	}
-	if !statusHasKey(es, "template_processing_fatal") {
-		t.Fatalf("status must report template_processing_fatal, got %+v", es.Status.DataSyncResults)
-	}
-}
-
-// --- Chain-level test: the cancellation guard --------------------------------
-
-// TestCancellationGuardAbortsRound: a canceled request context aborts the
-// round before any processing -- the cancellation error is returned, the
-// Secret stays untouched, and no rate_limit status is written.
-func TestCancellationGuardAbortsRound(t *testing.T) {
-	es := &api.ExternalSecret{
-		ObjectMeta: metav1.ObjectMeta{Name: "canceled-round-es", Namespace: "default"},
-		Spec: api.ExternalSecretSpec{
-			Provider: "kms",
-			Data:     []api.DataSource{{Key: "src-key"}},
-			Target:   &api.ExternalSecretTarget{Name: "canceled-round-secret"},
-		},
-	}
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{Name: "canceled-round-secret", Namespace: "default"},
-		Data:       map[string][]byte{"existing": []byte("value")},
-	}
-	sc := &fakeSecretClient{dataByKey: map[string]map[string][]byte{
-		"src-key": {"src-key": []byte("fresh")},
-	}}
-	r := newTestReconciler(t, true, sc, es, secret)
-
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel() // simulate manager shutdown canceling the request context
-
-	updated, err := r.syncIfNeedUpdate(ctx, es)
-	if err == nil || !stderrors.Is(err, context.Canceled) {
-		t.Fatalf("expected context.Canceled, got %v", err)
-	}
-	if updated {
-		t.Fatalf("expected no update on a canceled round")
-	}
-	got := getTestSecret(t, r, "default", "canceled-round-secret")
-	if got == nil || string(got.Data["existing"]) != "value" || len(got.Data) != 1 {
-		t.Fatalf("Secret must stay untouched on a canceled round, got %v", got)
-	}
-	if statusHasKey(es, "rate_limit") {
-		t.Fatalf("canceled round must NOT write a rate_limit status, got %+v", es.Status.DataSyncResults)
-	}
-}

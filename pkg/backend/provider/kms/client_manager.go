@@ -36,9 +36,8 @@ func (m *Manager) Register(clientName string, client backendin.SecretClient) {
 	}
 	if kmsClient.kmsClient != nil {
 		m.KmsClientMap.Store(clientName, client)
+		klog.Infof("register or update client, clientName %v", clientName)
 	}
-
-	klog.Infof("register or update client, clientName %v", clientName)
 }
 
 func (m *Manager) Delete(clientName string) {
@@ -51,10 +50,9 @@ func (m *Manager) Delete(clientName string) {
 	klog.Infof("delete client, clientName %v", clientName)
 }
 
-// DeletePrefixed implements the backend.ClientManager contract (see the
-// interface doc for the non-atomicity caveat): removes the plain clientName
-// client plus all composite "clientName#endpoint" variants, stopping the RAM
-// provider refresh routine registered under each removed key.
+// DeletePrefixed implements the backend.ClientManager contract (non-atomic,
+// see interface doc): removes the plain clientName client plus all composite
+// "clientName#endpoint" variants, stopping each one's RAM refresh routine.
 func (m *Manager) DeletePrefixed(clientName string) {
 	compositePrefix := clientName + "#"
 	var staleKeys []string

@@ -25,10 +25,9 @@ func TestResolveTargetKey(t *testing.T) {
 			want: "custom-name",
 		},
 		{
-			// Pin down the degenerate behavior: with both name and key empty
-			// the resolved key is empty. key is a required field in the CRD
-			// schema, so a valid ExternalSecret can never reach this case;
-			// the test only fixes the current behavior against regressions.
+			// Pin down the degenerate behavior: with both name and key empty the
+			// resolved key is empty. key is required by the CRD schema, so this only
+			// fixes current behavior against regressions.
 			name: "empty name and empty key yields empty string",
 			data: v1alpha1.DataSource{Key: "", Name: ""},
 			want: "",
@@ -112,11 +111,9 @@ func TestProcessExternalSecretData_JMESPathUnaffected(t *testing.T) {
 }
 
 func TestProcessExternalSecretData_JMESPathEmptyResultFallsBackToRawValue(t *testing.T) {
-	// jmesPath parsing SUCCEEDS (valid JSON payload) but the configured path
-	// matches nothing, so GetJsonSecrets returns an empty map without an
-	// error: processing must fall back to writing the raw payload under the
-	// resolved target key (name, falling back to key) instead of producing
-	// an empty Secret entry set.
+	// jmesPath parsing SUCCEEDS but the path matches nothing, so GetJsonSecrets
+	// returns an empty map without an error: processing must fall back to writing
+	// the raw payload under the resolved target key instead of an empty entry set.
 	payload := []byte(`{"username":"alice"}`)
 	data := &v1alpha1.DataSource{
 		Key:  "kms-json-secret",

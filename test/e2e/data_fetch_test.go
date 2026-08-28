@@ -586,4 +586,245 @@ var _ = Describe("Data Fetch E2E", func() {
 			CleanupExternalSecret(ctx, externalSecret)
 		})
 	})
+
+	// Covers the versionStage field of DataSource (v0.6.7): the controller
+	// passes VersionStage through to the KMS GetSecretValue request, so an
+	// ExternalSecret pinned to ACSPrevious must fetch the previous version's
+	// value instead of the latest one.
+	Context("versionStage selects a specific KMS secret version stage", func() {
+		It("Should fetch the previous version value when versionStage is ACSPrevious", func() {
+			By("creating a dedicated KMS secret and appending a second version")
+			Expect(GlobalResourceManager).NotTo(BeNil())
+			versionStageSecretName, err := GlobalResourceManager.CreateKMSSecretForCredentialUpdate(ctx)
+			Expect(err).NotTo(HaveOccurred(), "failed to create dedicated KMS secret for versionStage spec")
+			DeferCleanup(func() {
+				if err := GlobalResourceManager.DeleteKMSSecret(versionStageSecretName); err != nil {
+					GinkgoWriter.Printf("WARNING: failed to delete dedicated KMS secret %s: %v\n", versionStageSecretName, err)
+				}
+			})
+			// After appending v2, the v1 seed becomes ACSPrevious and v2 becomes
+			// ACSCurrent; fetching with versionStage=ACSPrevious must return the
+			// v1 seed value.
+			Expect(GlobalResourceManager.PutKMSSecretVersion(ctx, versionStageSecretName, "v2", "version-stage-v2-current-value")).To(Succeed(),
+				"failed to append the v2 version to the dedicated KMS secret")
+
+			secretStore := &api.SecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-version-stage-store",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.SecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
+
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-version-stage-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:          versionStageSecretName,
+							Name:         "version-stage-key",
+							VersionStage: "ACSPrevious",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+
+			// The synced Secret must carry the ACSPrevious (v1 seed) value, not
+			// the latest v2 value.
+			syncedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: externalSecret.Namespace,
+				Name:      externalSecret.Name,
+			}, syncedSecret)).To(Succeed())
+			Expect(string(syncedSecret.Data["version-stage-key"])).To(Equal(CredentialUpdateKMSSecretInitialValue),
+				"synced Secret content should match the ACSPrevious (v1) version, not the latest one")
+
+			// Clean up - delete resources explicitly before namespace cleanup
+			// This prevents controller from trying to create resources in terminating namespace
+			CleanupExternalSecret(ctx, externalSecret)
+		})
+	})
+
+	// Covers the provider default contract (v0.6.7): when spec.provider is
+	// omitted, the controller defaults to the KMS provider, so the
+	// ExternalSecret must sync KMS data exactly like an explicit provider=kms.
+	Context("provider defaults to kms when omitted", func() {
+		It("Should sync KMS data normally when the provider field is omitted", func() {
+			secretStore := &api.SecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-default-provider-store",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.SecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
+
+			// Provider deliberately omitted: the controller must default to KMS.
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-default-provider-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "default-provider-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+
+			syncedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: externalSecret.Namespace,
+				Name:      externalSecret.Name,
+			}, syncedSecret)).To(Succeed())
+			Expect(string(syncedSecret.Data["default-provider-key"])).To(Equal(CommonKMSSecretValue),
+				"synced Secret content should match the source KMS credential value under the defaulted kms provider")
+
+			// Clean up - delete resources explicitly before namespace cleanup
+			// This prevents controller from trying to create resources in terminating namespace
+			CleanupExternalSecret(ctx, externalSecret)
+		})
+	})
+
+	// AUDIT ITEM DOWNGRADED (Skip): this case was proposed by the E2E audit to
+	// cover a single ExternalSecret pulling both a KMS secret and an OOS secret
+	// parameter, but it does not match the current implementation: spec.Provider
+	// is an ExternalSecret-level global field (no per-entry provider exists on
+	// data items), so a "kms"-provider ExternalSecret routes every data entry
+	// through the KMS client, which cannot fetch OOS secret parameters (and
+	// vice versa). Running it today would only document a misuse, so it is
+	// fully implemented but Skipped. Enable it once per-entry provider support
+	// (or multi-provider ExternalSecrets) lands; the assertions below describe
+	// the intended end-state behavior and must NOT be rewritten to expect
+	// partial failure, which would cement the misuse as contract.
+	Context("Mixed KMS and OOS data sources in a single ExternalSecret", func() {
+		It("Should fetch both a KMS secret and an OOS parameter into one Secret", func() {
+			Skip("not supported yet: spec.Provider is ExternalSecret-global with no per-entry provider; " +
+				"a single ExternalSecret cannot mix KMS and OOS backends. Enable once per-entry provider support lands.")
+
+			secretStore := &api.SecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mixed-kms-oos-store",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.SecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+					OOS: &api.OOSProvider{
+						OOS: &api.OOSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+
+			// Wait for SecretStore to be ready
+			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
+
+			// Intended end-state: one ExternalSecret whose data entries point at
+			// different backends (KMS secret + OOS secret parameter), each routed
+			// to its own client, both landing in the same synced Secret.
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-mixed-kms-oos-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "mixed-kms-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
+							},
+						},
+						{
+							Key:  CommonOOSSecretParameterName,
+							Name: "mixed-oos-key",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
+							},
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+
+			// Validate ExternalSecret status update and created Kubernetes Secret
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+
+			// Both backends must have contributed their real preset values.
+			syncedSecret := &corev1.Secret{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Namespace: externalSecret.Namespace,
+				Name:      externalSecret.Name,
+			}, syncedSecret)).To(Succeed())
+			Expect(string(syncedSecret.Data["mixed-kms-key"])).To(Equal(CommonKMSSecretValue),
+				"KMS entry should carry the preset KMS credential value")
+			Expect(string(syncedSecret.Data["mixed-oos-key"])).To(Equal(CommonOOSSecretParameterValue),
+				"OOS entry should carry the preset OOS parameter value")
+
+			// Clean up - delete resources explicitly before namespace cleanup
+			// This prevents controller from trying to create resources in terminating namespace
+			CleanupExternalSecret(ctx, externalSecret)
+		})
+	})
 })

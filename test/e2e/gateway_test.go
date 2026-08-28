@@ -8,6 +8,7 @@ import (
 	. "github.com/onsi/ginkgo/v2"
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
+	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 
@@ -82,7 +83,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -140,7 +141,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -176,7 +177,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
 
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -194,6 +195,18 @@ var _ = Describe("Gateway E2E", func() {
 				restoreDeploymentRRSAEnv(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
 			})
 
+			// Create a dedicated KMS secret so we can stage a new version
+			// before the endpoint change; the fingerprint debounce requires
+			// a data change for SynchronizationTime to advance.
+			By("creating a dedicated KMS secret for the endpoint change spec")
+			endpointKMSName, err := GlobalResourceManager.CreateKMSSecretForCredentialUpdate(ctx)
+			Expect(err).NotTo(HaveOccurred(), "failed to create dedicated KMS secret for endpoint change spec")
+			DeferCleanup(func() {
+				if delErr := GlobalResourceManager.DeleteKMSSecret(endpointKMSName); delErr != nil {
+					GinkgoWriter.Printf("WARNING: failed to delete dedicated KMS secret %s: %v\n", endpointKMSName, delErr)
+				}
+			})
+
 			By("creating ExternalSecret with the dedicated KMS endpoint")
 			externalSecret := &api.ExternalSecret{
 				ObjectMeta: metav1.ObjectMeta{
@@ -205,7 +218,10 @@ var _ = Describe("Gateway E2E", func() {
 					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
 					Data: []api.DataSource{
 						{
-							Key:         CommonKMSSecretName,
+							// No VersionId: always fetch the latest version so
+							// a staged remote value becomes observable on the
+							// next sync round.
+							Key:         endpointKMSName,
 							Name:        "endpoint-change-secret",
 							KmsEndpoint: DedicatedKMSEndpoint,
 						},
@@ -213,8 +229,16 @@ var _ = Describe("Gateway E2E", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
 
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+
+			By("staging a new remote value that only a fresh sync can observe")
+			stagedEndpointValue := CredentialUpdateKMSSecretInitialValue + "-endpoint-changed"
+			Expect(GlobalResourceManager.PutKMSSecretVersion(ctx, endpointKMSName, "e2e-endpoint-change", stagedEndpointValue)).To(Succeed(),
+				"failed to stage remote KMS version for endpoint change spec")
 
 			By("capturing the last sync time before the endpoint change")
 			esKey := types.NamespacedName{Namespace: externalSecret.Namespace, Name: externalSecret.Name}
@@ -238,19 +262,25 @@ var _ = Describe("Gateway E2E", func() {
 			Eventually(func() bool {
 				latest := &api.ExternalSecret{}
 				if err := k8sClient.Get(ctx, esKey, latest); err != nil {
+					GinkgoWriter.Printf("[DIAG] endpoint-change ES get error: %v\n", err)
 					return false
 				}
 				if len(latest.Status.DataSyncResults) == 0 {
+					GinkgoWriter.Printf("[DIAG] endpoint-change ES has no DataSyncResults yet\n")
 					return false
 				}
-				for _, result := range latest.Status.DataSyncResults {
+				for i, result := range latest.Status.DataSyncResults {
 					if result.Status != "Succeeded" {
+						GinkgoWriter.Printf("[DIAG] endpoint-change DataSyncResult[%d] status=%s reason=%s syncTime=%v\n",
+							i, result.Status, result.Reason, result.SynchronizationTime.Time)
 						return false
 					}
 					// A sync time strictly after the pre-change baseline proves the
 					// result comes from a sync performed with the NEW endpoint,
 					// not from the stale result of the old composite client.
 					if !result.SynchronizationTime.After(lastSyncTime.Time) {
+						GinkgoWriter.Printf("[DIAG] endpoint-change DataSyncResult[%d] syncTime %v not after baseline %v\n",
+							i, result.SynchronizationTime.Time, lastSyncTime.Time)
 						return false
 					}
 				}
@@ -258,17 +288,123 @@ var _ = Describe("Gateway E2E", func() {
 			}).WithTimeout(time.Second*120).WithPolling(time.Second*5).Should(BeTrue(),
 				"ExternalSecret should re-sync successfully after the kmsEndpoint change")
 
-			By("validating the synced Secret still carries the preset KMS value")
+			By("validating the synced Secret carries the staged value via the rebuilt composite client")
 			syncedSecret := &corev1.Secret{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{
 				Namespace: testNamespace.Name,
 				Name:      externalSecret.Name,
 			}, syncedSecret)).To(Succeed())
-			Expect(string(syncedSecret.Data["endpoint-change-secret"])).To(Equal(CommonKMSSecretValue),
-				"synced Secret content should match the source KMS credential value after the endpoint change")
+			Expect(string(syncedSecret.Data["endpoint-change-secret"])).To(Equal(stagedEndpointValue),
+				"synced Secret content should match the staged value after the endpoint change")
+		})
+	})
 
-			// Delete the ExternalSecret and assert deletion completes without hanging.
-			CleanupExternalSecret(ctx, externalSecret)
+	// Test: invalid kmsEndpoint is rejected fail-closed (RN 0.6.4 SSRF guard).
+	// validateKmsEndpoint (pkg/backend/provider/kms/endpoint_validation.go)
+	// rejects every endpoint that is not a bare lowercase KMS hostname
+	// before the KMS client is constructed (client_provider.go
+	// newClientWithAuth): credential resolution (auth.GetAuthCred) runs first
+	// and may itself perform network calls, but no KMS client is ever built
+	// and no data-plane request reaches the invalid endpoint, so the spec
+	// needs no reachable backend: every data key must surface a Failed sync
+	// status and no cluster Secret may be written.
+	Context("Invalid kmsEndpoint rejected fail-closed", func() {
+		It("Should fail the sync and write no Secret for malformed and SSRF-class endpoints", func() {
+			clusterSecretStore := &api.ClusterSecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-invalid-endpoint-store-" + getRandString(),
+				},
+				Spec: api.ClusterSecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, clusterSecretStore)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
+			})
+
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
+
+			By("creating an ExternalSecret whose data keys all carry invalid endpoints")
+			// All three endpoint classes rejected by the unit-level table
+			// (endpoint_validation_test.go): an SSRF metadata IP with an http
+			// scheme, a bare SSRF metadata IP literal, and a syntactically
+			// near-valid gateway hostname carrying a port.
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-invalid-endpoint-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "ssrf-metadata-ip-with-scheme",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: clusterSecretStore.Name,
+								Kind: ResourceClusterSecretStore,
+							},
+							KmsEndpoint: "http://169.254.169.254",
+						},
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "ssrf-metadata-ip-literal",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: clusterSecretStore.Name,
+								Kind: ResourceClusterSecretStore,
+							},
+							KmsEndpoint: "169.254.169.254",
+						},
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "malformed-gateway-port",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: clusterSecretStore.Name,
+								Kind: ResourceClusterSecretStore,
+							},
+							KmsEndpoint: "kms-vpc.cn-hangzhou.aliyuncs.com:443",
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("observing every data key fail with the endpoint validation wording")
+			// The validation error ("KMS endpoint %q does not match any allowed
+			// KMS endpoint pattern ...") is returned before the KMS client is
+			// constructed, so it surfaces verbatim in the per-key Failed DataSyncResults.
+			expectExternalSecretFailedWith(ctx, externalSecret.Namespace, externalSecret.Name,
+				"does not match any allowed KMS endpoint pattern", time.Second*60)
+
+			By("consistently observing that no cluster Secret is written (fail-closed)")
+			Consistently(func() bool {
+				syncedSecret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: externalSecret.Namespace,
+					Name:      externalSecret.Name,
+				}, syncedSecret)
+				if err != nil {
+					// Transient API errors are not evidence of a Secret appearing.
+					return k8serrors.IsNotFound(err)
+				}
+				return false
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
+				"no cluster Secret may be written when every endpoint is rejected before the KMS client is constructed")
 		})
 	})
 
@@ -334,7 +470,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
 
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -410,7 +546,7 @@ var _ = Describe("Gateway E2E", func() {
 			Expect(syncedSecret.Data).NotTo(HaveKey("age"),
 				"original key 'age' should be replaced and no longer exist")
 
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -436,6 +572,7 @@ var _ = Describe("Gateway E2E", func() {
 								Name:      serviceAccount.Name,
 								Namespace: testNamespace.Name,
 							},
+							OIDCProviderARN: OIDCProviderARN,
 						},
 					},
 				},
@@ -475,7 +612,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
 
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 })

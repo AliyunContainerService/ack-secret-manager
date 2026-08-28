@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/url"
 	"regexp"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -37,8 +38,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/client-go/dynamic"
-	"k8s.io/client-go/rest"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -49,6 +48,41 @@ const (
 	BinaryType               = "binary"
 	oidcProviderNameTemplate = "ack-rrsa-%s"
 )
+
+// TriggerReconcileAnnotation forces store client recreation when set on a
+// SecretStore/ClusterSecretStore; shared by the store controllers and the
+// Secret/ServiceAccount trigger controllers so the literal never drifts.
+const TriggerReconcileAnnotation = "ack-secret-manager.alibabacloud.com/trigger-reconcile"
+
+// PatchTriggerAnnotation patches the trigger annotation onto the given store
+// so its controller recreates the provider clients; the value is the current
+// unix-nanosecond timestamp, so consecutive calls always produce a change.
+// Callers must skip stores already carrying a non-empty trigger annotation
+// (a pending rebuild is already guaranteed) to avoid amplifying rebuilds.
+func PatchTriggerAnnotation(ctx context.Context, c client.Client, store client.Object) error {
+	updatedStore := store.DeepCopyObject().(client.Object)
+	annotations := updatedStore.GetAnnotations()
+	if annotations == nil {
+		annotations = make(map[string]string)
+	}
+	annotations[TriggerReconcileAnnotation] = strconv.FormatInt(time.Now().UnixNano(), 10)
+	updatedStore.SetAnnotations(annotations)
+
+	return c.Patch(ctx, updatedStore, client.MergeFrom(store))
+}
+
+// ReadyConditionObservedGeneration locates the condition whose Type is
+// SecretStoreReady and returns its ObservedGeneration. found is false when
+// no such condition exists; callers treat that as "never managed by a Store
+// controller" rather than assuming any particular list position.
+func ReadyConditionObservedGeneration(conditions []v1alpha1.SecretStoreStatusCondition) (observed int64, found bool) {
+	for i := range conditions {
+		if conditions[i].Type == v1alpha1.SecretStoreReady {
+			return conditions[i].ObservedGeneration, true
+		}
+	}
+	return 0, false
+}
 
 const (
 	REJECTED_THROTTLING           = "Rejected.Throttling"
@@ -66,10 +100,21 @@ var (
 	BACKOFF_DEFAULT_CAPACITY       = time.Duration(10) * time.Second
 )
 
-var clusterIDPattern = regexp.MustCompile(`^c[0-9a-z]{32}$`)
-
-func IsClusterNamespace(s string) bool {
-	return clusterIDPattern.MatchString(s)
+// IsNamespaceWatched reports whether the namespace falls inside the watch
+// scope built from --watch-namespaces / --exclude-namespaces (a map with
+// true entries for watched and false entries for excluded namespaces).
+// Include mode (any true entry present): only explicitly listed namespaces
+// are watched. Exclude-only mode: a namespace is excluded only when mapped
+// to false; an empty map or a missing key passes.
+func IsNamespaceWatched(watchNs map[string]bool, namespace string) bool {
+	for _, watch := range watchNs {
+		if watch {
+			// Include mode: unlisted namespaces are not watched.
+			return watchNs[namespace]
+		}
+	}
+	watch, excluded := watchNs[namespace]
+	return !excluded || watch
 }
 
 func Contains(list []string, s string) bool {
@@ -81,10 +126,8 @@ func Contains(list []string, s string) bool {
 	return false
 }
 
-// Remove returns a new slice with all occurrences of s removed. The input
-// slice is never modified in place, and adjacent duplicate occurrences are
-// all removed (the previous in-place single-pass implementation skipped the
-// element that shifted into the removed slot).
+// Remove returns a new slice with all occurrences of s removed; the input
+// slice is never modified in place.
 func Remove(list []string, s string) []string {
 	result := make([]string, 0, len(list))
 	for _, v := range list {
@@ -93,23 +136,6 @@ func Remove(list []string, s string) []string {
 		}
 	}
 	return result
-}
-
-// getKubernetesClients returns all the required clients(token CRD client and origin k8s cli) to communicate with
-func GetKubernetesClients() (dynamic.Interface, error) {
-	var err error
-	var cfg *rest.Config
-
-	cfg, err = rest.InClusterConfig()
-	if err != nil {
-		return nil, fmt.Errorf("error loading kubernetes configuration inside cluster, "+
-			"check app is running outside kubernetes cluster or run in development mode: %s", err)
-	}
-	client, err := dynamic.NewForConfig(cfg)
-	if err != nil {
-		return nil, err
-	}
-	return client, nil
 }
 
 func GetConfigFromSecret(ctx context.Context, r client.Client, secretRef *v1alpha1.SecretRef) ([]byte, error) {
@@ -139,7 +165,11 @@ func JsonStr(o interface{}) string {
 	if ok {
 		return temp
 	}
-	str, _ := json.Marshal(o)
+	str, err := json.Marshal(o)
+	if err != nil {
+		klog.Errorf("failed to marshal %T to json: %v", o, err)
+		return ""
+	}
 	return string(str)
 }
 
@@ -148,7 +178,11 @@ func YamlStr(o interface{}) string {
 	if ok {
 		return temp
 	}
-	str, _ := yaml.Marshal(o)
+	str, err := yaml.Marshal(o)
+	if err != nil {
+		klog.Errorf("failed to marshal %T to yaml: %v", o, err)
+		return ""
+	}
 	return string(str)
 }
 
@@ -160,39 +194,29 @@ func IgnoreNotFoundError(err error) error {
 	return err
 }
 
-// IsValidJSON reports whether the given byte slice is a valid JSON document.
-// The check is intentionally strict: the raw first byte must be '{' or '['
-// (no whitespace trimming, since a leading-whitespace JSON is treated as YAML
-// by design), and the content must parse with encoding/json. Empty input is
-// rejected.
+// IsValidJSON reports whether data is a strict JSON document: the first byte
+// must be '{' or '[' (leading whitespace is treated as YAML by design).
 func IsValidJSON(data []byte) bool {
 	if len(data) == 0 {
 		return false
 	}
-	// Quick check: JSON must start with { or [
 	firstChar := data[0]
 	if firstChar != '{' && firstChar != '[' {
 		return false
 	}
-	// Attempt to unmarshal as JSON
 	var js interface{}
 	return json.Unmarshal(data, &js) == nil
 }
 
-// GetJsonSecrets evaluates the configured jmesPath expressions against the
-// fetched secret value (JSON or YAML). Per-expression failures are logged
-// (always including the source secret key) and skipped; the only returned
-// error is a structurally invalid (non-JSON/YAML) secret value.
+// GetJsonSecrets evaluates jmesPath expressions against the fetched secret
+// value (JSON or YAML). Per-expression failures are logged and skipped; the
+// only returned error is a structurally invalid secret value.
 func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) (jsonMap map[string]string, err error) {
 	jsonMap = make(map[string]string, 0)
 	var data interface{}
-	// Attempt to unmarshal the secretValue as YAML. If it fails, try to unmarshal it as JSON.
-	// If both attempts fail, return an error indicating that the provided value is neither valid JSON nor YAML.
-	//
-	// The output format of complex (map/slice) values is decided by the input
-	// format, not by the parser that succeeded (JSON is a YAML subset, so a
-	// YAML parse of a JSON document always succeeds): a strict-JSON input must
-	// keep emitting compact JSON, while YAML input keeps emitting YAML.
+	// The output format of complex values follows the INPUT format, not the
+	// parser that succeeded (JSON is a YAML subset, so YAML parsing of JSON
+	// always succeeds): JSON input keeps emitting JSON, YAML input YAML.
 	marshalToYaml := !IsValidJSON([]byte(secretValue))
 	if err = yaml.Unmarshal([]byte(secretValue), &data); err != nil {
 		if err = json.Unmarshal([]byte(secretValue), &data); err != nil {
@@ -200,7 +224,6 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 		}
 	}
 
-	//fetch all specified key value pairs`
 	for _, jmesPathEntry := range jmesObj {
 		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
 		if err != nil {
@@ -243,10 +266,9 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 			continue
 		}
 
-		// An empty ObjectAlias would otherwise produce an illegal empty Secret
-		// key that the API server rejects atomically (failing the whole write
-		// and every subsequent retry). Fall back to the source data.Key,
-		// mirroring ResolveTargetKey's empty-Name fallback.
+		// Empty ObjectAlias would produce an illegal empty Secret key rejected
+		// by the API server; fall back to the source data.Key (mirrors
+		// ResolveTargetKey).
 		targetKey := jmesPathEntry.ObjectAlias
 		if targetKey == "" {
 			targetKey = key
@@ -257,10 +279,9 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 	return jsonMap, nil
 }
 
-// RewriteRegexp rewrites a single Regexp Rewrite Operation. An
-// uncompilable Source regexp is a configuration error: it is returned
-// wrapped with the offending pattern so the caller can fail the sync
-// instead of silently discarding the extracted keys.
+// RewriteRegexp applies one regexp rewrite rule. An uncompilable Source is
+// a configuration error returned to the caller (fail closed), not silently
+// dropped.
 func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[string]string, error) {
 	out := make(map[string]string)
 	re, err := regexp.Compile(operation.Source)
@@ -270,8 +291,7 @@ func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[st
 	for key, value := range in {
 		newKey := re.ReplaceAllString(key, operation.Target)
 		if _, exists := out[newKey]; exists {
-			// Multiple source keys collapsed onto the same rewritten key:
-			// keep the overwrite semantics but surface the data loss.
+			// Key collision: keep overwrite semantics but surface the data loss
 			klog.Warningf("key conflict after regex rewrite: source %q and a previous key both rewrite to %q (source pattern %q), overwriting",
 				key, newKey, operation.Source)
 		}
@@ -280,35 +300,24 @@ func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[st
 	return out, nil
 }
 
-// JudgeNeedRetry reports whether the given error is transient and worth
-// retrying. It recognizes:
-//   - the legacy alibaba-cloud-sdk-go ClientError and the new darabonba
-//     tea.SDKError used by the kms-20160120/v3 and oos-20190601/v3 clients,
-//     even when wrapped via fmt.Errorf("%w") (matched via errors.As);
-//   - network-level transient errors: request timeouts surfaced as *url.Error
-//     or net.Error (judged by Timeout()), and socket-level failures such as
-//     connection resets or broken pipes surfaced as *net.OpError. Permanent
-//     network failures such as DNS resolution errors are NOT retryable.
-//
-// Transient errors include throttling (Rejected.Throttling), temporary
-// service unavailability (ServiceUnavailableTemporary), internal failures
-// (InternalFailure), any 5xx or 429 HTTP status (darabonba tea.SDKError
-// status fallback only; the legacy ClientError branch judges by error code)
-// and the network errors above. Permanent errors such as 403/404 or
-// InvalidParameter are NOT retryable.
+// JudgeNeedRetry reports whether err is transient and worth retrying:
+// throttling/unavailability/internal-failure codes, 5xx/429 statuses (legacy
+// ClientError by code, tea.SDKError by status fallback), and transient
+// network errors (timeouts, resets, broken pipes). Permanent errors
+// (403/404, DNS failures, invalid parameters) are NOT retryable; wrapped
+// errors are matched via errors.As.
 func JudgeNeedRetry(err error) bool {
 	if err == nil {
 		return false
 	}
 
-	// Legacy alibaba-cloud-sdk-go error type. errors.As is used so errors
-	// wrapped with fmt.Errorf("%w") are also recognized.
+	// Legacy alibaba-cloud-sdk-go error type
 	var clientErr *sdkErr.ClientError
 	if errors.As(err, &clientErr) {
 		return isRetryableErrorCode(clientErr.ErrorCode())
 	}
 
-	// New darabonba SDK error type. All fields are pointers and may be nil.
+	// New darabonba SDK error type; all fields are pointers and may be nil
 	var sdkError *tea.SDKError
 	if errors.As(err, &sdkError) {
 		if sdkError.Code != nil && isRetryableErrorCode(*sdkError.Code) {
@@ -324,16 +333,12 @@ func JudgeNeedRetry(err error) bool {
 	return isRetryableNetworkError(err)
 }
 
-// isRetryableNetworkError reports whether the given error is a network-level
-// transient failure. Timeout errors (matched via *url.Error or net.Error and
-// judged by Timeout()) are retryable. Socket-level errors (*net.OpError) are
-// retried only when they are timeouts or connection-reset/broken-pipe style
-// failures; permanent failures such as DNS resolution errors or invalid
-// addresses (e.g. a misconfigured kmsEndpoint) are NOT retried.
+// isRetryableNetworkError reports whether err is a network-level transient
+// failure: timeouts are retryable; *net.OpError only when timeout or
+// reset/broken-pipe style; DNS failures and invalid addresses are NOT.
 func isRetryableNetworkError(err error) bool {
-	// A *url.Error carries no socket-level detail itself; when it is not a
-	// timeout, fall through so the wrapped error chain (e.g. an inner
-	// *net.OpError connection reset) can still be classified.
+	// A non-timeout *url.Error falls through so the wrapped chain (e.g. an
+	// inner *net.OpError reset) can still be classified.
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Timeout() {
 		return true
@@ -360,8 +365,7 @@ func isRetryableOpError(opErr *net.OpError) bool {
 		return true
 	}
 
-	// Explicit DNS failures are permanent: retrying "no such host" cannot
-	// succeed within a reconcile round.
+	// Explicit DNS failures are permanent
 	var dnsErr *net.DNSError
 	if errors.As(opErr.Err, &dnsErr) {
 		return dnsErr.IsTimeout || dnsErr.IsTemporary
@@ -370,13 +374,9 @@ func isRetryableOpError(opErr *net.OpError) bool {
 	return isConnectionInterruption(opErr.Err)
 }
 
-// isConnectionInterruption reports whether the inner error of an OpError is a
-// connection-reset or broken-pipe style failure. It first matches the
-// well-known errno values via syscall.Errno -- ECONNRESET and EPIPE are
-// defined by Go's syscall package on every supported platform (on Windows
-// they map to WSAECONNRESET / WSAEPIPE), so this is the preferred portable
-// check. Matching on the literal error string is deliberately avoided because
-// errno message text is platform- and locale-dependent.
+// isConnectionInterruption reports whether the inner OpError is a
+// connection-reset/broken-pipe failure, matched portably via syscall.Errno
+// (ECONNRESET/EPIPE); errno message strings are locale-dependent and avoided.
 func isConnectionInterruption(err error) bool {
 	var errno syscall.Errno
 	if errors.As(err, &errno) {
@@ -398,15 +398,11 @@ func isRetryableErrorCode(code string) bool {
 	return false
 }
 
-// RetryOnTransient invokes fn up to maxAttempts times in total. After each
-// failed attempt, if the error is judged transient by JudgeNeedRetry, it
-// backs off exponentially via GetWaitTimeExponential before retrying.
-// Non-retryable errors are returned immediately without further attempts.
-// If all attempts fail, the last error is returned. The backoff wait is
-// interruptible via ctx: if ctx is cancelled while waiting, the cancellation
-// error is returned via fmt.Errorf %w with the last transient error included
-// as text (only the cancellation error is wrapped), so the root cause is not
-// lost.
+// RetryOnTransient invokes fn up to maxAttempts times, backing off
+// exponentially (GetWaitTimeExponential) after each transient error judged
+// by JudgeNeedRetry; non-retryable errors return immediately. The wait is
+// interruptible via ctx: on cancellation the ctx error is wrapped (%w) with
+// the last transient error included as text.
 func RetryOnTransient(ctx context.Context, maxAttempts int, fn func() error) error {
 	if maxAttempts <= 0 {
 		return fmt.Errorf("maxAttempts (%d) should be > 0", maxAttempts)
@@ -424,13 +420,10 @@ func RetryOnTransient(ctx context.Context, maxAttempts int, fn func() error) err
 			break
 		}
 		wait := GetWaitTimeExponential(attempt)
-		klog.Warningf("transient error detected, retrying (attempt %d/%d) after %v backoff, error %v",
+		klog.Infof("transient error detected, retrying (attempt %d/%d) after %v backoff, error %v",
 			attempt+1, maxAttempts, wait, err)
 		select {
 		case <-ctx.Done():
-			// The cancellation error is wrapped via %w; the last transient
-			// error is included as text so callers can see what was being
-			// retried.
 			return fmt.Errorf("%w: last transient error: %v", ctx.Err(), err)
 		case <-time.After(wait):
 		}
@@ -438,14 +431,11 @@ func RetryOnTransient(ctx context.Context, maxAttempts int, fn func() error) err
 	return err
 }
 
-// GetWaitTimeExponential returns the backoff duration for the given retry
-// round: 2^retryTimes * BACKOFF_DEFAULT_RETRY_INTERVAL with a +/-20% random
-// jitter applied, capped at BACKOFF_DEFAULT_CAPACITY. The jitter spreads
-// concurrent retries over time to avoid synchronized retry storms. The global
-// math/rand source is automatically seeded since Go 1.20.
+// GetWaitTimeExponential returns 2^retryTimes * BACKOFF_DEFAULT_RETRY_INTERVAL
+// with +/-20% jitter (spreads concurrent retries), capped at
+// BACKOFF_DEFAULT_CAPACITY.
 func GetWaitTimeExponential(retryTimes int) time.Duration {
 	sleepInterval := time.Duration(math.Pow(2, float64(retryTimes))) * BACKOFF_DEFAULT_RETRY_INTERVAL
-	// Jitter factor in [0.8, 1.2).
 	jitter := 1.0 + (rand.Float64()*0.4 - 0.2)
 	sleepInterval = time.Duration(float64(sleepInterval) * jitter)
 	if sleepInterval >= BACKOFF_DEFAULT_CAPACITY {
@@ -454,14 +444,14 @@ func GetWaitTimeExponential(retryTimes int) time.Duration {
 	return sleepInterval
 }
 
-// IsNamespaceAllowedForClusterSecretStore checks if the given namespace is allowed to access the ClusterSecretStore
+// IsNamespaceAllowedForClusterSecretStore reports whether the namespace may
+// access the ClusterSecretStore (fail-closed on invalid selectors/regexes)
 func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.ClusterSecretStore, namespaceName string, getClient func(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error) bool {
-	// If no conditions are specified, allow access from all namespaces
+	// No conditions: allow all namespaces
 	if len(clusterSecretStore.Spec.Conditions) == 0 {
 		return true
 	}
 
-	// Get namespace object
 	namespace := &corev1.Namespace{}
 	err := getClient(context.Background(), client.ObjectKey{Name: namespaceName}, namespace)
 	if err != nil {
@@ -469,17 +459,14 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 		return false
 	}
 
-	// Check each condition
 	for i, condition := range clusterSecretStore.Spec.Conditions {
 		klog.Infof("Evaluating condition %d for ClusterSecretStore %s", i, clusterSecretStore.Name)
 
-		// Check namespace selector
 		if condition.NamespaceSelector != nil {
 			selector, err := metav1.LabelSelectorAsSelector(condition.NamespaceSelector)
 			if err != nil {
-				// Fail-closed: an invalid label selector means the restriction
-				// cannot be evaluated, so we deny access rather than silently
-				// skipping the check (aligned with the invalid-regex path).
+				// Fail-closed: an invalid selector cannot be evaluated, so deny
+				// instead of silently skipping the check.
 				klog.Errorf("Invalid label selector in ClusterSecretStore %s condition %d: %v", clusterSecretStore.Name, i, err)
 				return false
 			}
@@ -489,65 +476,52 @@ func IsNamespaceAllowedForClusterSecretStore(clusterSecretStore *v1alpha1.Cluste
 			}
 		}
 
-		// Check namespace name list
 		for _, allowedNamespace := range condition.Namespaces {
 			if allowedNamespace == namespaceName {
 				return true
 			}
 		}
 
-		// Check namespace regex (anchored full-string match to prevent substring bypass)
+		// Substring match consistent with upstream ESO ClusterSecretStore
+		// (regexp.MatchString). Users who need full-string matching
+		// should anchor the regex themselves (e.g. "^team-a$").
 		for j, regex := range condition.NamespaceRegexes {
-			// Anchor the pattern to match the entire namespace name, not a substring.
-			// This prevents e.g. regex "team-a" from matching "evil-team-a".
-			anchoredRegex := "^(?:" + regex + ")$"
-			re, err := regexp.Compile(anchoredRegex)
+			match, err := regexp.MatchString(regex, namespaceName)
 			if err != nil {
-				// Fail-closed: invalid regex means the restriction cannot be evaluated,
-				// so we deny access rather than silently skipping the check.
+				// Fail-closed on invalid regex
 				klog.Errorf("Invalid regex %s in ClusterSecretStore %s condition %d regex %d: %v",
 					regex, clusterSecretStore.Name, i, j, err)
 				return false
 			}
 
-			if re.MatchString(namespaceName) {
+			if match {
 				return true
 			}
 		}
 	}
 
-	// No matching condition
-	klog.Infof("Namespace %s is not allowed to access ClusterSecretStore %s", namespaceName, clusterSecretStore.Name)
+	klog.Warningf("Namespace %s is not allowed to access ClusterSecretStore %s", namespaceName, clusterSecretStore.Name)
 	return false
 }
 
-// IsNamespaceAllowedForClusterExternalSecret checks if the given namespace is
-// allowed by the ClusterExternalSecret conditions. It is fail-closed: a
-// namespace is only allowed when it explicitly matches a configured
-// namespaceSelector / condition. Only when neither namespaceSelectors nor
-// conditions are configured at all does the resource match every namespace.
-// Any invalid matching configuration (unparseable label selector, invalid
-// regex) denies every namespace immediately, aligned with
-// IsNamespaceAllowedForClusterSecretStore.
+// IsNamespaceAllowedForClusterExternalSecret reports whether the namespace is
+// selected by the CES conditions (fail-closed): only an explicit match
+// allows; only a fully empty selection config matches every namespace; any
+// invalid selector/regex denies all namespaces.
 func IsNamespaceAllowedForClusterExternalSecret(ces *v1alpha1.ClusterExternalSecret, namespace corev1.Namespace) bool {
-	// Only an empty selection config (no legacy namespaceSelectors AND no
-	// conditions) allows all namespaces; otherwise a namespace must
-	// explicitly match.
+	// Empty selection config (no legacy selectors AND no conditions) matches all
 	if len(ces.Spec.NamespaceSelectors) == 0 && len(ces.Spec.Conditions) == 0 {
 		return true
 	}
 
-	// Check each legacy namespace selector
 	for i, selector := range ces.Spec.NamespaceSelectors {
 		if selector == nil {
 			continue
 		}
 		namespaceSelector, err := metav1.LabelSelectorAsSelector(selector)
 		if err != nil {
-			// Fail-closed: an invalid label selector means the restriction
-			// cannot be evaluated, so we deny access rather than silently
-			// skipping the check (aligned with
-			// IsNamespaceAllowedForClusterSecretStore).
+			// Fail-closed: an invalid selector cannot be evaluated, so deny
+			// instead of silently skipping the check.
 			klog.Errorf("Invalid label selector in ClusterExternalSecret %s namespace selector %d: %v", ces.Name, i, err)
 			return false
 		}
@@ -557,18 +531,13 @@ func IsNamespaceAllowedForClusterExternalSecret(ces *v1alpha1.ClusterExternalSec
 		}
 	}
 
-	// Check each condition
 	for i, condition := range ces.Spec.Conditions {
 		klog.Infof("Evaluating condition %d for ClusterExternalSecret %s", i, ces.Name)
 
-		// Check namespace selector
 		if condition.NamespaceSelector != nil {
 			selector, err := metav1.LabelSelectorAsSelector(condition.NamespaceSelector)
 			if err != nil {
-				// Fail-closed: an invalid label selector means the restriction
-				// cannot be evaluated, so we deny access rather than silently
-				// skipping the check (aligned with
-				// IsNamespaceAllowedForClusterSecretStore).
+				// Fail-closed on invalid selector (see above)
 				klog.Errorf("Invalid label selector in ClusterExternalSecret %s condition %d: %v", ces.Name, i, err)
 				return false
 			}
@@ -578,34 +547,31 @@ func IsNamespaceAllowedForClusterExternalSecret(ces *v1alpha1.ClusterExternalSec
 			}
 		}
 
-		// Check namespace name list
 		for _, allowedNamespace := range condition.Namespaces {
 			if allowedNamespace == namespace.Name {
 				return true
 			}
 		}
 
-		// Check namespace regex (anchored full-string match to prevent substring bypass)
+		// Substring match consistent with upstream ESO ClusterSecretStore
+		// (regexp.MatchString). Users who need full-string matching
+		// should anchor the regex themselves (e.g. "^team-a$").
 		for j, regex := range condition.NamespaceRegexes {
-			// Anchor the pattern to match the entire namespace name, not a substring.
-			anchoredRegex := "^(?:" + regex + ")$"
-			re, err := regexp.Compile(anchoredRegex)
+			match, err := regexp.MatchString(regex, namespace.Name)
 			if err != nil {
-				// Fail-closed: invalid regex means the restriction cannot be evaluated,
-				// so we deny access rather than silently skipping the check.
+				// Fail-closed on invalid regex
 				klog.Errorf("Invalid regex %s in ClusterExternalSecret %s condition %d regex %d: %v",
 					regex, ces.Name, i, j, err)
 				return false
 			}
 
-			if re.MatchString(namespace.Name) {
+			if match {
 				return true
 			}
 		}
 	}
 
-	// No matching condition
-	klog.Infof("Namespace %s is not allowed to access ClusterExternalSecret %s", namespace.Name, ces.Name)
+	klog.Warningf("Namespace %s is not allowed to access ClusterExternalSecret %s", namespace.Name, ces.Name)
 	return false
 }
 

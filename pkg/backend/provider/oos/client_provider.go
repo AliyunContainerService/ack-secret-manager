@@ -69,12 +69,11 @@ func (p *Provider) GetUid() string {
 }
 
 // NewClient creates a new OOS client.
-// NOTE: The endpoint parameter is accepted to satisfy the Provider interface,
-// but OOS currently does NOT support custom endpoints. The default OOS VPC endpoint
-// (oos-vpc.<region>.aliyuncs.com) is always used. Custom endpoint support may be added in the future.
+// NOTE: endpoint satisfies the Provider interface only; OOS always uses the
+// default VPC endpoint and ignores custom endpoints.
 func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (backend.SecretClient, error) {
-	// Trim to align with the controller-side normalizeEndpoint contract:
-	// the composite key "clientName#endpoint" must match on both sides.
+	// Trim to align with the controller-side normalizeEndpoint contract: the
+	// composite key "clientName#endpoint" must match on both sides.
 	endpoint = strings.TrimSpace(endpoint)
 
 	var authProvider commonp.AuthConfigProvider
@@ -89,21 +88,17 @@ func (p *Provider) NewClient(ctx context.Context, store *v1alpha1.SecretStore, k
 
 	warnIfEndpointIgnored(endpoint)
 
-	// Key alignment: the ExternalSecret controller caches custom-endpoint
-	// clients under composite keys ("clientName#endpoint") even for OOS, so
-	// the RAM provider registry must use the same composite key to keep
-	// Delete/Stop symmetric. The endpoint itself is still ignored below.
-	if endpoint != "" {
-		authConfig.ClientName = fmt.Sprintf("%s#%s", authConfig.ClientName, endpoint)
-	}
+	// Key alignment: the controller caches custom-endpoint clients under
+	// composite keys even for OOS, so the RAM registry must use the same key
+	// to keep Delete/Stop symmetric. The endpoint itself is still ignored.
+	authConfig.ClientName = backend.CompositeClientKey(authConfig.ClientName, endpoint)
 
 	return p.newClientWithAuth(authConfig.ClientName, authConfig)
 }
 
-// NewClientByENV creates a new OOS client using environment variable credentials.
-// NOTE: The endpoint parameter is accepted but not used — see NewClient for details.
+// NewClientByENV creates a new OOS client from environment credentials; the
+// endpoint is accepted but ignored (see NewClient).
 func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error) {
-	// Normalize first; see NewClient for the key-alignment rationale.
 	endpoint = strings.TrimSpace(endpoint)
 
 	authEnvs := commonp.BuildAuthConfigFromEnv()
@@ -111,16 +106,13 @@ func (p *Provider) NewClientByENV(endpoint string) (backend.SecretClient, error)
 	warnIfEndpointIgnored(endpoint)
 
 	// Key alignment with the composite cache key; see NewClient.
-	if endpoint != "" {
-		authEnvs.ClientName = fmt.Sprintf("%s#%s", authEnvs.ClientName, endpoint)
-	}
+	authEnvs.ClientName = backend.CompositeClientKey(authEnvs.ClientName, endpoint)
 
 	return p.newClientWithAuth(authEnvs.ClientName, authEnvs)
 }
 
-// warnIfEndpointIgnored warns when a non-empty endpoint is requested while
-// OOS always falls back to the default domain. Behavior is intentionally
-// unchanged: the custom endpoint is ignored.
+// warnIfEndpointIgnored warns when a custom endpoint is requested; OOS
+// always falls back to the default domain and ignores it.
 func warnIfEndpointIgnored(endpoint string) {
 	if endpoint != "" {
 		klog.Warningf("custom endpoint is not supported for OOS and will be ignored (configured endpoint %q)", endpoint)
@@ -130,7 +122,6 @@ func warnIfEndpointIgnored(endpoint string) {
 func (p *Provider) newClientWithAuth(clientName string, authConfig auth.AuthConfig) (*OOSClient, error) {
 	region := p.GetRegion()
 
-	//get ram auth credential
 	cred, err := authConfig.GetAuthCred(region, p.maxConcurrentCount, &backendp.Manager{
 		RamLock:     p.RamLock,
 		RamProvider: p.RamProvider,

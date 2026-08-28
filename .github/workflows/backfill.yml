@@ -1,0 +1,215 @@
+# .github/workflows/backfill.yml
+#
+# One-off workflow to backfill historical git tags and rebuild all historical Helm chart packages.
+#
+# Background: early historical releases of the project were not tagged in git, making it impossible
+# to trace back to the corresponding release commit. Additionally, no Helm chart repository existed
+# for historical versions.
+# This workflow backfills tags for those historical releases and rebuilds all Helm chart .tgz packages
+# from the source at each historical commit, then publishes them to GitHub Pages.
+#
+# Triggers:
+#   1. workflow_dispatch —— manual trigger, can be re-run at any time.
+#   2. push to master that changes this file —— triggers automatically once when the file is first merged, completing the backfill.
+#
+# This operation is idempotent: existing tags are skipped, only missing tags are created.
+# Chart packages are always rebuilt from scratch (full rebuild, no dependency on gh-pages state).
+# After the backfill is done this workflow can be kept (re-running has no side effects), or deleted as needed.
+name: Backfill Historical Tags
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [master]
+    paths:
+      - .github/workflows/backfill.yml
+
+permissions:
+  contents: write
+  pages: write
+
+jobs:
+  backfill-tags:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          # Full history is required, otherwise git cannot locate historical commits to tag them
+          fetch-depth: 0
+
+      - name: Create missing historical tags
+        run: |
+          set -uo pipefail
+
+          # Configure commit identity, used by git tag
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          # Mapping of version -> corresponding release commit
+          declare -A TAGS=(
+            ["v0.4.0"]="4154ba5189f35726056d6f33decf7348b90d9fba"
+            ["v0.5.0"]="d058e09b0732df949723c577c3c27464bf80d296"
+            ["v0.5.2"]="dc569effdb77060c8e0a96a8dfccd30679d8f975"
+            ["v0.5.5"]="cb078799e84260004cd6e56e9a6e4f0faadff76c"
+            ["v0.5.8"]="3d92b2d5eafa4a7153d61e7a3274c8e24a331653"
+            ["v0.6.0"]="299403ddc93ddb2a584e50ecedfb2e81314a83e9"
+            ["v0.6.2"]="9a7a099b15c2fa9ebdc653e1ec47e8d7ac70970d"
+            ["v0.6.3"]="226bb6557331f15afbf79570d1943312c73cd186"
+            ["v0.6.4"]="28666acc963e55fee559c8a582fb16797a7c05ac"
+            ["v0.6.6"]="0da02c4bf6bc0e6f3a5be866afc4cb52334807a2"
+          )
+
+          created=0
+          skipped=0
+          failed=0
+          for tag in "${!TAGS[@]}"; do
+            commit="${TAGS[$tag]}"
+
+            # Idempotent: skip if the tag already exists
+            if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null; then
+              echo "Skip ${tag}: tag already exists"
+              skipped=$((skipped + 1))
+              continue
+            fi
+
+            # Verify the target commit exists in the current repository history
+            if ! git cat-file -e "${commit}^{commit}" 2>/dev/null; then
+              echo "WARNING: commit ${commit} for ${tag} does not exist in the repository, skipping" >&2
+              failed=$((failed + 1))
+              continue
+            fi
+
+            # Attempt to create the tag; warn and continue on failure
+            if git tag -a "${tag}" "${commit}" -m "Release ${tag}"; then
+              echo "Create ${tag} -> ${commit}"
+              created=$((created + 1))
+            else
+              echo "WARNING: failed to create tag ${tag} at ${commit}, skipping" >&2
+              failed=$((failed + 1))
+            fi
+          done
+
+          echo "Backfill done: ${created} created, ${skipped} skipped, ${failed} failed"
+
+      - name: Push tags
+        run: |
+          # Push all tags at once (existing remote tags will not be modified)
+          # Continue even if push fails (e.g. permission issues) so downstream jobs can proceed
+          if ! git push origin --tags; then
+            echo "WARNING: git push --tags failed, some tags may not have been pushed" >&2
+            exit 1
+          fi
+
+  backfill-charts:
+    needs: backfill-tags
+    if: ${{ always() }}
+    runs-on: ubuntu-latest
+    concurrency:
+      group: gh-pages-publish
+      cancel-in-progress: false
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Helm
+        uses: azure/setup-helm@v4
+        with:
+          version: v3.17.0
+
+      - name: Build historical Helm chart packages
+        run: |
+          set -uo pipefail
+
+          mkdir -p .publish
+
+          # Ordered list of version -> commit mappings
+          VERSIONS=(
+            "v0.4.0:4154ba5189f35726056d6f33decf7348b90d9fba"
+            "v0.5.0:d058e09b0732df949723c577c3c27464bf80d296"
+            "v0.5.2:dc569effdb77060c8e0a96a8dfccd30679d8f975"
+            "v0.5.5:cb078799e84260004cd6e56e9a6e4f0faadff76c"
+            "v0.5.8:3d92b2d5eafa4a7153d61e7a3274c8e24a331653"
+            "v0.6.0:299403ddc93ddb2a584e50ecedfb2e81314a83e9"
+            "v0.6.2:9a7a099b15c2fa9ebdc653e1ec47e8d7ac70970d"
+            "v0.6.3:226bb6557331f15afbf79570d1943312c73cd186"
+            "v0.6.4:28666acc963e55fee559c8a582fb16797a7c05ac"
+            "v0.6.6:0da02c4bf6bc0e6f3a5be866afc4cb52334807a2"
+          )
+
+          packaged=0
+          skipped=0
+
+          for entry in "${VERSIONS[@]}"; do
+            version="${entry%%:*}"
+            commit="${entry##*:}"
+
+            echo "Processing ${version} (${commit})..."
+
+            # Remove existing chart dir first because `git checkout <commit> -- <path>`
+            # does not remove files absent from that commit; leftover newer templates
+            # would contaminate older packages.
+            rm -rf charts/ack-secret-manager
+
+            # Try to checkout the chart directory from the historical commit
+            if ! git checkout "${commit}" -- charts/ack-secret-manager 2>/dev/null; then
+              echo "WARNING: charts/ack-secret-manager does not exist at ${commit} for ${version}, skipping"
+              skipped=$((skipped + 1))
+              continue
+            fi
+
+            # Try to package the chart; skip on failure (early commits may have incompatible chart structure)
+            if helm package ./charts/ack-secret-manager -d .publish; then
+              echo "Successfully packaged ${version}"
+              packaged=$((packaged + 1))
+            else
+              echo "WARNING: helm package failed for ${version} (commit ${commit}), skipping"
+              skipped=$((skipped + 1))
+            fi
+
+            # Restore working tree to HEAD to avoid affecting the next iteration
+            git checkout HEAD -- charts/ack-secret-manager
+          done
+
+          echo "Chart packaging done: ${packaged} packaged, ${skipped} skipped"
+
+          if [ "${packaged}" -eq 0 ]; then
+            echo "ERROR: No charts were packaged successfully" >&2
+            exit 1
+          fi
+
+      - name: Fetch existing index from gh-pages
+        run: |
+          # Only reuse the existing index for --merge when it is both non-empty
+          # and contains a valid apiVersion field. An empty or malformed index.yaml
+          # (e.g. a 1-byte newline on a fork) would make `helm repo index --merge` fail.
+          if git fetch origin gh-pages 2>/dev/null && git show origin/gh-pages:index.yaml > existing-index.yaml 2>/dev/null && [ -s existing-index.yaml ] && grep -q '^apiVersion:' existing-index.yaml; then
+            echo "Existing valid index.yaml fetched successfully"
+          else
+            echo "No valid existing index.yaml found; will generate a fresh one"
+            rm -f existing-index.yaml
+          fi
+
+      - name: Generate Helm repository index
+        run: |
+          # Derive the GitHub Pages URL from the repository running this workflow,
+          # so it works correctly on both the upstream repo and any fork.
+          # The Pages host uses a lowercased owner name.
+          REPO_NAME="${GITHUB_REPOSITORY#*/}"
+          OWNER_LC="$(echo "${GITHUB_REPOSITORY%%/*}" | tr '[:upper:]' '[:lower:]')"
+          PAGES_URL="https://${OWNER_LC}.github.io/${REPO_NAME}"
+
+          if [ -f existing-index.yaml ]; then
+            helm repo index .publish --url "$PAGES_URL" --merge existing-index.yaml
+          else
+            helm repo index .publish --url "$PAGES_URL"
+          fi
+
+      - name: Deploy to GitHub Pages
+        uses: peaceiris/actions-gh-pages@v4
+        with:
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          publish_dir: ./.publish
+          keep_files: true

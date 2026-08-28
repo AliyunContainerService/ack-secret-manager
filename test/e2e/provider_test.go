@@ -94,7 +94,7 @@ var _ = Describe("Provider E2E", func() {
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 })

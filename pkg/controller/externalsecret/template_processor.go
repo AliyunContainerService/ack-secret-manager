@@ -25,13 +25,13 @@ import (
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
 
-// SimpleTemplateProcessor Template processor
+// SimpleTemplateProcessor renders ExternalSecret templates
 type SimpleTemplateProcessor struct {
 	Client  client.Client
-	funcMap template.FuncMap // Cached function map to avoid recreation on each call
+	funcMap template.FuncMap // cached to avoid recreation on each call
 }
 
-// NewSimpleTemplateProcessor creates a new template processor with initialized function map
+// NewSimpleTemplateProcessor creates a template processor with the function map initialized
 func NewSimpleTemplateProcessor(client client.Client) *SimpleTemplateProcessor {
 	stp := &SimpleTemplateProcessor{Client: client}
 	stp.funcMap = stp.createFuncMap()
@@ -39,16 +39,13 @@ func NewSimpleTemplateProcessor(client client.Client) *SimpleTemplateProcessor {
 }
 
 const (
-	// ManagedKeysAnnotation is the annotation key to store managed secret keys
+	// ManagedKeysAnnotation stores the managed secret keys
 	ManagedKeysAnnotation = "ack-alibabacloud.com/managed-keys"
 )
 
-// Sentinel errors distinguishing template PARSE failures (fatal: the
-// template is structurally invalid and can never render) from EXECUTION
-// failures (non-fatal per the established grading: the template is valid
-// but this round's data cannot render it). executeTemplate wraps both via
-// fmt.Errorf %w so callers classify with errors.Is instead of string
-// sniffing; the user-visible message format is unchanged.
+// Sentinel errors distinguishing PARSE failures (fatal: structurally
+// invalid, can never render) from EXECUTION failures (non-fatal per the
+// established grading). Callers classify via errors.Is.
 var (
 	errTemplateParse     = stderrors.New("failed to parse template")
 	errTemplateExecution = stderrors.New("template execution failed")
@@ -56,22 +53,20 @@ var (
 
 // UnifiedTemplateResult represents the complete result of all template processing
 type UnifiedTemplateResult struct {
-	// Processed secret data
 	Data map[string][]byte
 
-	// Metadata that will be applied to the target secret
+	// Metadata applied to the target secret
 	Metadata struct {
 		Labels      map[string]string
 		Annotations map[string]string
 	}
 
-	// Processing statistics
 	Stats struct {
 		DataTemplatesProcessed     int
 		TemplateFromProcessed      int
 		MetadataTemplatesProcessed int
 		Errors                     []string
-		FatalErrors                []string // New: track fatal errors separately
+		FatalErrors                []string
 	}
 }
 
@@ -82,12 +77,10 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 	rawData map[string][]byte,
 ) (*UnifiedTemplateResult, error) {
 
-	// If ExternalSecret is being deleted, skip template processing.
-	// The deletion flow intentionally bypasses templates so that raw data
-	// alone drives the round; re-rendering templates here would re-add
-	// managed keys that the deletion flow has intentionally removed.
+	// Deletion flow intentionally bypasses templates so raw data alone
+	// drives the round; re-rendering would re-add managed keys the deletion
+	// flow removed.
 	if externalSec.GetDeletionTimestamp() != nil {
-		// Return raw data only, without processing templates
 		result := &UnifiedTemplateResult{
 			Data: make(map[string][]byte),
 			Metadata: struct {
@@ -99,7 +92,6 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 			},
 		}
 
-		// Preserve existing data to avoid modifying the secret
 		for k, v := range rawData {
 			result.Data[k] = v
 		}
@@ -107,8 +99,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 		return result, nil
 	}
 
-	// Return raw data if no template configuration exists
-	// Check if Target is nil or Template is nil
+	// No template configuration: return raw data
 	if externalSec.Spec.Target == nil || externalSec.Spec.Target.Template == nil {
 		result := &UnifiedTemplateResult{
 			Data: make(map[string][]byte),
@@ -132,7 +123,6 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 		templateData[k] = string(v)
 	}
 
-	// Convert to interface{} map for template engine
 	interfaceData := make(map[string]interface{})
 	for k, v := range templateData {
 		interfaceData[k] = v
@@ -149,27 +139,24 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 		},
 	}
 
-	// Copy raw data to result first as fallback
+	// Raw data as fallback
 	for k, v := range rawData {
 		result.Data[k] = v
 	}
 
-	// Track managed keys for the ManagedKeysAnnotation written below
+	// Managed keys feed the ManagedKeysAnnotation written below
 	managedKeys := make(map[string]bool)
 
-	// Process inline data templates (Template.Data section)
-	// Safe to access because we checked Target and Template are not nil above
+	// Inline data templates (Template.Data)
 	if externalSec.Spec.Target.Template.Data != nil {
-		// Empty map means "preserve raw data without processing"
-		// Non-empty map means "use templates instead of raw data"
+		// Empty map preserves raw data; non-empty replaces it with templates
 		if len(externalSec.Spec.Target.Template.Data) > 0 {
-			// Check MergePolicy before clearing data
 			if externalSec.Spec.Target.Template.MergePolicy == "" ||
 				externalSec.Spec.Target.Template.MergePolicy == api.MergePolicyReplace {
-				// Replace mode: clear raw data
+				// Replace mode clears raw data; Merge mode keeps it and
+				// templates override same keys
 				clear(result.Data)
 			}
-			// Merge mode: keep raw data, templates will override same keys
 
 			for key, templateStr := range externalSec.Spec.Target.Template.Data {
 				processedValue, err := stp.executeTemplate(templateStr, interfaceData)
@@ -185,36 +172,31 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				} else {
 					result.Data[key] = processedValue
 					result.Stats.DataTemplatesProcessed++
-					managedKeys[key] = true // Track managed key
+					managedKeys[key] = true
 				}
 			}
 		}
-		// If len() == 0, keep raw data and don't process any templates
 	}
 
-	// Process TemplateFrom references
-	// Safe to access because we checked Target and Template are not nil above
+	// TemplateFrom references
 	if len(externalSec.Spec.Target.Template.TemplateFrom) > 0 {
 		templateFromResults, err := stp.processTemplateFromByTarget(ctx, externalSec, interfaceData)
 		if err != nil {
 			result.Stats.FatalErrors = append(result.Stats.FatalErrors,
 				fmt.Sprintf("TemplateFrom processing failed: %v", err))
 		} else {
-			// Apply MergePolicy for TemplateFrom as well
-			// If MergePolicy is Replace (default), clear existing data before adding TemplateFrom results
 			hasTemplateData := len(externalSec.Spec.Target.Template.Data) > 0
 			isReplaceMode := externalSec.Spec.Target.Template.MergePolicy == "" ||
 				externalSec.Spec.Target.Template.MergePolicy == api.MergePolicyReplace
 
 			// Presence of the "Data" target is checked by KEY (not output): a
-			// Data-targeted templateFrom keeps Replace semantics even when it yields
-			// zero keys; Labels/Annotations-only lists must not clear raw data (O-1).
+			// Data-targeted templateFrom keeps Replace semantics even when it
+			// yields zero keys; Labels/Annotations-only lists must not clear
+			// raw data (O-1).
 			_, hasDataTarget := templateFromResults[string(api.TemplateTargetData)]
 
-			// Only clear data if:
-			// 1. MergePolicy is Replace AND
-			// 2. No inline Template.Data was processed (to avoid double-clearing) AND
-			// 3. At least one templateFrom entry targets Data
+			// Clear only when Replace mode AND no inline Template.Data was
+			// processed (avoid double-clearing) AND some entry targets Data
 			if isReplaceMode && !hasTemplateData && hasDataTarget {
 				clear(result.Data)
 			}
@@ -225,12 +207,16 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 					for k, v := range targetData {
 						if stp.isValidAnnotationKey(k) {
 							result.Metadata.Annotations[k] = string(v)
+						} else {
+							klog.Warningf("templateFrom: dropping annotation key %q: invalid annotation key format", k)
 						}
 					}
 				case api.TemplateTargetLabels:
 					for k, v := range targetData {
 						if stp.isValidLabelKey(k) {
 							result.Metadata.Labels[k] = string(v)
+						} else {
+							klog.Warningf("templateFrom: dropping label key %q: invalid label key format", k)
 						}
 					}
 				case api.TemplateTargetData, "":
@@ -240,7 +226,9 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 						if stp.isValidSecretKey(k) {
 							result.Data[k] = v
 							result.Stats.DataTemplatesProcessed++
-							managedKeys[k] = true // Track dynamically generated key
+							managedKeys[k] = true
+						} else {
+							klog.Warningf("templateFrom: dropping data key %q: invalid secret data key format", k)
 						}
 					}
 				}
@@ -255,13 +243,12 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 		for key := range managedKeys {
 			keysList = append(keysList, key)
 		}
-		// Sort for deterministic output
+		// Deterministic output
 		sort.Strings(keysList)
 		result.Metadata.Annotations[ManagedKeysAnnotation] = strings.Join(keysList, ",")
 	}
 
-	// Process Template.Metadata
-	// Safe to access because we checked Target and Template are not nil above
+	// Template.Metadata
 	if externalSec.Spec.Target.Template.Metadata != nil {
 		if len(externalSec.Spec.Target.Template.Metadata.Labels) > 0 {
 			for key, templateStr := range externalSec.Spec.Target.Template.Metadata.Labels {
@@ -274,6 +261,8 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				if stp.isValidLabelKey(key) {
 					result.Metadata.Labels[key] = string(processedValue)
 					result.Stats.MetadataTemplatesProcessed++
+				} else {
+					klog.Warningf("metadata template: dropping label key %q: invalid label key format", key)
 				}
 			}
 		}
@@ -289,12 +278,14 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				if stp.isValidAnnotationKey(key) {
 					result.Metadata.Annotations[key] = string(processedValue)
 					result.Stats.MetadataTemplatesProcessed++
+				} else {
+					klog.Warningf("metadata template: dropping annotation key %q: invalid annotation key format", key)
 				}
 			}
 		}
 	}
 
-	// Return error if there are fatal errors
+	// Fatal errors abort the round
 	if len(result.Stats.FatalErrors) > 0 {
 		var errorMsg strings.Builder
 		errorMsg.WriteString("fatal template processing errors: ")
@@ -310,11 +301,11 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 	return result, nil
 }
 
-// createFuncMap creates and caches the function map for template execution
+// createFuncMap creates the function map for template execution
 func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	funcMap := sprig.TxtFuncMap()
 
-	// Add custom functions that provide real value (not available in Sprig)
+	// Custom functions not available in Sprig
 
 	// Bcrypt password hashing
 	funcMap["bcrypt"] = func(password string, cost ...int) string {
@@ -330,7 +321,7 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 		return string(hash)
 	}
 
-	// Htpasswd format for basic auth (bcrypt algorithm)
+	// Htpasswd format for basic auth
 	funcMap["htpasswd"] = func(username, password string) string {
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
@@ -340,34 +331,38 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 		return fmt.Sprintf("%s:%s\n", username, string(hash))
 	}
 
-	// JSON Path query - extract value from JSON using dot notation
+	// JSON value extraction by dot-notation path
 	funcMap["jsonPath"] = func(jsonStr, path string) interface{} {
 		var data interface{}
 		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
+			klog.Warningf("jsonPath: failed to unmarshal input json for path %s: %v", path, err)
 			return ""
 		}
 		return extractJSONPath(data, path)
 	}
 
-	// Merge JSON objects - deep merge two JSON strings
+	// Deep merge of two JSON strings
 	funcMap["mergeJson"] = func(base, override string) string {
 		var baseMap, overrideMap map[string]interface{}
 		if err := json.Unmarshal([]byte(base), &baseMap); err != nil {
+			klog.Warningf("mergeJson: failed to unmarshal base json: %v", err)
 			return base
 		}
 		if err := json.Unmarshal([]byte(override), &overrideMap); err != nil {
+			klog.Warningf("mergeJson: failed to unmarshal override json: %v", err)
 			return base
 		}
 
 		merged := deepMerge(baseMap, overrideMap)
 		result, err := json.Marshal(merged)
 		if err != nil {
+			klog.Warningf("mergeJson: failed to marshal merged result: %v", err)
 			return base
 		}
 		return string(result)
 	}
 
-	// Parse key=value format into a map
+	// Parse key=value lines into a map
 	funcMap["parseKeyValue"] = func(input string) map[string]string {
 		result := make(map[string]string)
 		lines := strings.Split(input, "\n")
@@ -384,7 +379,7 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 		return result
 	}
 
-	// Split string into lines (array)
+	// Split string into lines
 	funcMap["toLines"] = func(input string) []string {
 		if input == "" {
 			return []string{}
@@ -395,19 +390,17 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	return funcMap
 }
 
-// executeTemplate Execute single template with support for standard Go template syntax and custom functions.
-// Parse failures wrap errTemplateParse (fatal), execution failures wrap
-// errTemplateExecution (non-fatal); callers classify via errors.Is.
+// executeTemplate executes a single template with standard Go template
+// syntax and custom functions. Parse failures wrap errTemplateParse (fatal),
+// execution failures wrap errTemplateExecution (non-fatal).
 func (stp *SimpleTemplateProcessor) executeTemplate(templateStr string, data map[string]interface{}) ([]byte, error) {
-	// Use cached function map instead of recreating it
 	tmpl, err := template.New("").Funcs(stp.funcMap).Parse(templateStr)
 	if err != nil {
 		return nil, fmt.Errorf("%w: %v", errTemplateParse, err)
 	}
 
 	var buf bytes.Buffer
-	// Pass the underlying data map to enable {{ .key }} syntax.
-	// This allows: {{ .password }}, {{ range $k, $v := . }}, {{ if .enabled }}, etc.
+	// Passing the data map enables {{ .key }} syntax
 	if err := tmpl.Execute(&buf, data); err != nil {
 		return nil, fmt.Errorf("%w: %v", errTemplateExecution, err)
 	}
@@ -415,9 +408,8 @@ func (stp *SimpleTemplateProcessor) executeTemplate(templateStr string, data map
 	return buf.Bytes(), nil
 }
 
-// extractJSONPath extracts a value from JSON data using dot notation path
-// Returns empty string "" if path is not found or any error occurs
-// Logs debug information for troubleshooting
+// extractJSONPath extracts a value from JSON data using a dot-notation path;
+// returns "" when the path is not found or traversal fails.
 func extractJSONPath(data interface{}, path string) interface{} {
 	if path == "" {
 		return data
@@ -432,9 +424,8 @@ func extractJSONPath(data interface{}, path string) interface{} {
 			if val, exists := v[part]; exists {
 				current = val
 			} else {
-				// Log detailed path information for debugging
 				currentPath := strings.Join(parts[:i+1], ".")
-				klog.V(4).Infof("jsonPath: key '%s' not found in map at path '%s', available keys: %v",
+				klog.Warningf("jsonPath: key '%s' not found in map at path '%s', available keys: %v",
 					part, currentPath, getMapKeys(v))
 				return ""
 			}
@@ -442,16 +433,15 @@ func extractJSONPath(data interface{}, path string) interface{} {
 			if idx, err := strconv.Atoi(part); err == nil && idx >= 0 && idx < len(v) {
 				current = v[idx]
 			} else {
-				// Log array index error details
 				currentPath := strings.Join(parts[:i+1], ".")
-				klog.V(4).Infof("jsonPath: invalid array index '%s' at path '%s', array length: %d",
+				klog.Warningf("jsonPath: invalid array index '%s' at path '%s', array length: %d",
 					part, currentPath, len(v))
 				return ""
 			}
 		default:
-			// Cannot traverse further (reached a primitive value)
+			// Primitive value: cannot traverse further
 			remainingPath := strings.Join(parts[i:], ".")
-			klog.V(4).Infof("jsonPath: cannot traverse path '%s', current value type is %T",
+			klog.Warningf("jsonPath: cannot traverse path '%s', current value type is %T",
 				remainingPath, current)
 			return ""
 		}
@@ -460,7 +450,7 @@ func extractJSONPath(data interface{}, path string) interface{} {
 	return current
 }
 
-// getMapKeys returns all keys from a map as a slice (for debugging)
+// getMapKeys returns all keys from a map (for debug logging)
 func getMapKeys(m map[string]interface{}) []string {
 	keys := make([]string, 0, len(m))
 	for k := range m {
@@ -469,33 +459,30 @@ func getMapKeys(m map[string]interface{}) []string {
 	return keys
 }
 
-// deepMerge performs deep merge of two maps with cycle detection
+// deepMerge deep-merges two maps with cycle detection
 func deepMerge(base, override map[string]interface{}) map[string]interface{} {
 	return deepMergeWithCycle(base, override, make(map[uintptr]bool))
 }
 
-// deepMergeWithCycle performs deep merge with cycle detection to prevent infinite recursion
+// deepMergeWithCycle prevents infinite recursion on cyclic structures
 func deepMergeWithCycle(base, override map[string]interface{}, visited map[uintptr]bool) map[string]interface{} {
 	result := make(map[string]interface{})
 
-	// Cycle detection: check if we've already visited this base map
 	basePtr := reflect.ValueOf(base).Pointer()
 	if visited[basePtr] {
-		// Cycle detected, return base as-is to prevent infinite recursion
+		// Cycle detected: return base as-is
 		return base
 	}
 	visited[basePtr] = true
-	defer delete(visited, basePtr) // Clean up after processing
+	defer delete(visited, basePtr)
 
-	// Copy base first
 	for k, v := range base {
 		result[k] = v
 	}
 
-	// Override and merge
 	for k, v := range override {
 		if baseVal, exists := base[k]; exists {
-			// If both are maps, do recursive merge
+			// Recursive merge when both sides are maps
 			if baseMap, ok := baseVal.(map[string]interface{}); ok {
 				if overrideMap, ok := v.(map[string]interface{}); ok {
 					result[k] = deepMergeWithCycle(baseMap, overrideMap, visited)
@@ -503,14 +490,13 @@ func deepMergeWithCycle(base, override map[string]interface{}, visited map[uintp
 				}
 			}
 		}
-		// Otherwise, override
 		result[k] = v
 	}
 
 	return result
 }
 
-// processTemplateFromByTarget processes TemplateFrom references and separates results by target
+// processTemplateFromByTarget processes TemplateFrom references, separating results by target
 func (stp *SimpleTemplateProcessor) processTemplateFromByTarget(
 	ctx context.Context,
 	externalSec *api.ExternalSecret,
@@ -518,14 +504,12 @@ func (stp *SimpleTemplateProcessor) processTemplateFromByTarget(
 ) (map[string]map[string][]byte, error) {
 	results := make(map[string]map[string][]byte)
 
-	// Target and Template are guaranteed to be non-nil when this method is called
 	for _, templateFrom := range externalSec.Spec.Target.Template.TemplateFrom {
 		target := string(templateFrom.Target)
 		if target == "" {
 			target = string(api.TemplateTargetData) // Default target
 		}
 
-		// Initialize target map if exists
 		if _, exists := results[target]; !exists {
 			results[target] = make(map[string][]byte)
 		}
@@ -547,7 +531,6 @@ func (stp *SimpleTemplateProcessor) processTemplateFromByTarget(
 			return nil, err
 		}
 
-		// Merge template data into target
 		for k, v := range templateData {
 			results[target][k] = v
 		}
@@ -556,8 +539,8 @@ func (stp *SimpleTemplateProcessor) processTemplateFromByTarget(
 	return results, nil
 }
 
-// processTemplateFromRef processes a template reference from ConfigMap, Secret, or Literal
-// This is the common implementation extracted from processConfigMapTemplate and processSecretTemplate
+// processTemplateFromRef is the common implementation behind
+// processConfigMapTemplate and processSecretTemplate.
 func (stp *SimpleTemplateProcessor) processTemplateFromRef(
 	ctx context.Context,
 	templateRef *api.TemplateRef,
@@ -581,13 +564,11 @@ func (stp *SimpleTemplateProcessor) processTemplateFromRef(
 
 		switch item.TemplateAs {
 		case api.TemplateScopeValues:
-			// Process as value only
 			result[item.Key] = processedValue
 		case api.TemplateScopeKeysAndValues:
-			// Process as key-value pairs - parse the processed value as key=value format
+			// Parse the rendered value as key=value lines
 			processedValueStr := string(processedValue)
 
-			// Parse key=value pairs from the processed template
 			lines := strings.Split(strings.TrimSpace(processedValueStr), "\n")
 			for _, line := range lines {
 				line = strings.TrimSpace(line)
@@ -604,10 +585,8 @@ func (stp *SimpleTemplateProcessor) processTemplateFromRef(
 					}
 				}
 			}
-			// For KeysAndValues scope, do NOT preserve the original processed value
-			// Only the parsed key-value pairs should be included
+			// KeysAndValues scope only includes the parsed pairs, not the raw value
 		default:
-			// Default to process as value
 			result[item.Key] = processedValue
 		}
 	}
@@ -615,14 +594,13 @@ func (stp *SimpleTemplateProcessor) processTemplateFromRef(
 	return result, nil
 }
 
-// processConfigMapTemplate Process ConfigMap template reference
+// processConfigMapTemplate processes a ConfigMap template reference
 func (stp *SimpleTemplateProcessor) processConfigMapTemplate(
 	ctx context.Context,
 	templateRef *api.TemplateRef,
 	namespace string,
 	data map[string]interface{},
 ) (map[string][]byte, error) {
-	// Helper function to get ConfigMap data
 	getConfigMapData := func(ctx context.Context, name, namespace, key string) (string, error) {
 		configMap := &corev1.ConfigMap{}
 		err := stp.Client.Get(ctx, types.NamespacedName{
@@ -649,7 +627,6 @@ func (stp *SimpleTemplateProcessor) processSecretTemplate(
 	namespace string,
 	data map[string]interface{},
 ) (map[string][]byte, error) {
-	// Helper function to get Secret data
 	getSecretData := func(ctx context.Context, name, namespace, key string) (string, error) {
 		secret := &corev1.Secret{}
 		err := stp.Client.Get(ctx, types.NamespacedName{
@@ -670,7 +647,7 @@ func (stp *SimpleTemplateProcessor) processSecretTemplate(
 	return stp.processTemplateFromRef(ctx, templateRef, namespace, data, getSecretData, "Secret")
 }
 
-// processLiteralTemplate Process literal template
+// processLiteralTemplate processes a literal template
 func (stp *SimpleTemplateProcessor) processLiteralTemplate(
 	literal string,
 	data map[string]interface{},
@@ -680,7 +657,7 @@ func (stp *SimpleTemplateProcessor) processLiteralTemplate(
 		return nil, fmt.Errorf("failed to process literal template: %w", err)
 	}
 
-	// Literal template generates a default key
+	// Literal templates output under the fixed "literal" key
 	result := map[string][]byte{
 		"literal": processedValue,
 	}
@@ -698,15 +675,13 @@ func (stp *SimpleTemplateProcessor) isValidLabelKey(key string) bool {
 	return stp.validatePrefixedKey(key, 253) // Total max 253 chars for prefixed keys (DNS_SUBDOMAIN + / + DNS_LABEL)
 }
 
-// validatePrefixedKey validates keys that may have prefixes (like annotations)
-// For keys without prefixes, validates as DNS label
-// For keys with prefixes, validates prefix as DNS subdomain and name as DNS label
+// validatePrefixedKey validates optionally-prefixed keys: prefix as DNS
+// subdomain, name as DNS label; unprefixed keys validate as DNS label.
 func (stp *SimpleTemplateProcessor) validatePrefixedKey(key string, maxLength int) bool {
 	if len(key) == 0 || len(key) > maxLength {
 		return false
 	}
 
-	// Check for prefix separator
 	if strings.Contains(key, "/") {
 		parts := strings.SplitN(key, "/", 2)
 		if len(parts) != 2 {
@@ -714,20 +689,15 @@ func (stp *SimpleTemplateProcessor) validatePrefixedKey(key string, maxLength in
 		}
 		prefix, name := parts[0], parts[1]
 
-		// Validate prefix (DNS subdomain)
 		if !stp.isDNSSubdomain(prefix) {
 			return false
 		}
 
-		// Validate name (DNS label)
 		if !stp.isDNSLabel(name) {
 			return false
 		}
-	} else {
-		// No prefix, validate as DNS label
-		if !stp.isDNSLabel(key) {
-			return false
-		}
+	} else if !stp.isDNSLabel(key) {
+		return false
 	}
 
 	return true
@@ -739,7 +709,7 @@ func (stp *SimpleTemplateProcessor) isDNSSubdomain(name string) bool {
 		return false
 	}
 
-	// Must consist of alphanumeric characters, '-' or '.', and must start and end with alphanumeric
+	// Alphanumeric/'-'/'.' only, must start and end with alphanumeric
 	if !unicode.IsLetter(rune(name[0])) && !unicode.IsDigit(rune(name[0])) {
 		return false
 	}
@@ -762,7 +732,7 @@ func (stp *SimpleTemplateProcessor) isDNSLabel(name string) bool {
 		return false
 	}
 
-	// Must consist of alphanumeric characters or '-', and must start and end with alphanumeric
+	// Lowercase alphanumeric/'-' only, must start and end with alphanumeric
 	if !unicode.IsLetter(rune(name[0])) && !unicode.IsDigit(rune(name[0])) {
 		return false
 	}
@@ -779,9 +749,8 @@ func (stp *SimpleTemplateProcessor) isDNSLabel(name string) bool {
 	return true
 }
 
-// isValidSecretKey validates secret data key format according to Kubernetes standards
+// isValidSecretKey validates secret data key format (alphanumeric, '-', '_' or '.')
 func (stp *SimpleTemplateProcessor) isValidSecretKey(key string) bool {
-	// Kubernetes secret keys must consist of alphanumeric characters, '-', '_' or '.'
 	if len(key) == 0 {
 		return false
 	}

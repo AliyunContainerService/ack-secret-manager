@@ -58,7 +58,6 @@ spec:
           args:
             - --reconcile-period={{ .Values.command.reconcilePeriod }}
             - --reconcile-count={{ .Values.command.reconcileCount }}
-            - --token-rotation-period={{ .Values.command.tokenRotationPeriod }}
 {{- if .Values.command.region }}
             - --region={{ .Values.command.region }}
 {{- end }}
@@ -75,8 +74,12 @@ spec:
             - --process-cluster-external-secret={{ .Values.command.processClusterExternalSecret }}
             - --enable-cross-namespace-secret-store={{ .Values.command.enableCrossNamespaceSecretStore }}
             - --enable-cross-namespace-auth-ref={{ .Values.command.enableCrossNamespaceAuthRef }}
+{{- if .Values.command.clusterId }}
             - --cluster-id={{ .Values.command.clusterId }}
+{{- end }}
+{{- if .Values.command.aliuid }}
             - --uid={{ .Values.command.aliuid }}
+{{- end }}
 {{- if .Values.command.watchNamespaces }}
             - --watch-namespaces={{ .Values.command.watchNamespaces }}
 {{- end }}
@@ -92,17 +95,21 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
-            - name: WATCH_NAMESPACE
-              value: {{ .Values.env.WATCH_NAMESPACE }}
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+{{- /* Reserved env vars injected by this template; entries with the same names in .Values.env are skipped to avoid kubelet last-wins override */}}
+{{- $reservedEnv := list "POD_NAME" "POD_NAMESPACE" }}
 {{- range $name, $value := .Values.env }}
-{{- if not (empty $value) }}
+{{- if and (not (empty $value)) (not (has $name $reservedEnv)) }}
             - name: {{ $name | quote }}
               value: {{ $value | quote }}
 {{- end }}
 {{- end }}
             # Params for env vars populated from k8s secrets
 {{- range $key, $value := .Values.envVarsFromSecret }}
-            - name: {{ $key }}
+            - name: {{ $key | quote }}
               valueFrom:
                 secretKeyRef:
                   name: {{ $value.secretKeyRef | quote }}
