@@ -17,6 +17,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/rest"
@@ -122,11 +123,26 @@ var _ = BeforeSuite(func() {
 	err = GlobalResourceManager.SetupTestResources(ctx)
 	Expect(err).NotTo(HaveOccurred())
 
+	// Normalize the Deployment args baseline BEFORE any spec runs: a
+	// hard-killed run (e.g. a CI timeout kill) can skip the per-spec
+	// DeferCleanup restores and leave test-only flags such as
+	// --disable-polling=true on the shared cluster. Without this step the
+	// next run would capture the polluted state as its baseline (getDeploymentArgs)
+	// and permanently cement the drift. This is the args counterpart of the
+	// ensureRRSAEnabled self-healing below; regular configuration flags
+	// (--cluster-id/--uid/--enable-*/...) are never touched.
+	normalizeDeploymentArgsBaseline(ctx)
+
 	// Ensure RRSA is enabled on the ack-secret-manager Deployment.
 	// RRSA requires a projected OIDC token volume; without it, all tests that
 	// rely on RRSA / OIDC authentication will fail with
 	// "open /var/run/secrets/tokens/ack-secret-manager: no such file or directory".
 	ensureRRSAEnabled(ctx)
+
+	// The controller now runs with leader election (LeaderElectionReleaseOnCancel
+	// migration): every reconcile path is gated behind the lease, so assert early
+	// that leadership was actually acquired before any test starts exercising it.
+	verifyLeaderElectionLease(ctx)
 })
 
 var _ = AfterSuite(func() {
@@ -208,43 +224,123 @@ func createTestNamespace(ctx context.Context, name string) *corev1.Namespace {
 }
 
 // Delete test namespace helper function.
-// Acts as a safety net: actively cleans up any remaining ExternalSecrets and their
-// synced Secrets before deleting the namespace. This ensures cleanup even when a test
-// fails before reaching its own CleanupExternalSecret/DeferCleanup calls.
+// Acts as a safety net: actively cleans up any remaining ExternalSecrets, their
+// synced Secrets, and SecretStores before deleting the namespace. This ensures
+// cleanup even when a test fails before reaching its own CleanupExternalSecret/DeferCleanup calls.
+// SecretStores carry a finalizer that blocks namespace cascade deletion when the
+// controller cannot reconcile in time, so their finalizers are stripped explicitly.
 func deleteTestNamespace(ctx context.Context, namespace *corev1.Namespace) {
 	if namespace == nil {
 		return
 	}
 
-	// Step 1: Actively delete any remaining ExternalSecrets in the namespace.
-	// This is a safety net for tests that failed before reaching their own cleanup.
+	// Step 1: Best-effort cleanup of synced Secrets, ExternalSecrets, and SecretStores.
+	// Delete synced Secrets, then delete ESes and try to remove their
+	// finalizers. Also delete SecretStores and strip their finalizers so the
+	// namespace cascade deletion is not blocked by the store finalizer when
+	// the controller cannot reconcile in time.
+	// If the controller is slow or the finalizer removal fails,
+	// we proceed anyway — Step 4 force-finalizes the namespace if it gets
+	// stuck in Terminating.
 	esList := &api.ExternalSecretList{}
 	if err := k8sClient.List(ctx, esList, client.InNamespace(namespace.Name)); err == nil {
 		for i := range esList.Items {
 			es := &esList.Items[i]
-			// Delete synced Secret first (cleanupSecretOnFailure is false by default)
 			syncedSecret := &corev1.Secret{}
 			secretKey := types.NamespacedName{Name: es.Name, Namespace: es.Namespace}
 			if err := k8sClient.Get(ctx, secretKey, syncedSecret); err == nil {
-				_ = k8sClient.Delete(ctx, syncedSecret)
+				if err := k8sClient.Delete(ctx, syncedSecret); err != nil && !k8serrors.IsNotFound(err) {
+					GinkgoWriter.Printf("WARNING: failed to delete synced Secret %s: %v\n", secretKey, err)
+				}
 			}
-			// Delete the ExternalSecret
-			_ = k8sClient.Delete(ctx, es)
+			if err := k8sClient.Delete(ctx, es); err != nil && !k8serrors.IsNotFound(err) {
+				GinkgoWriter.Printf("WARNING: failed to delete ExternalSecret %s/%s: %v\n", es.Namespace, es.Name, err)
+			}
+			// Try to remove finalizers via JSON Patch (no resourceVersion check).
+			if len(es.Finalizers) > 0 {
+				jsonPatch := []byte(`[{"op":"replace","path":"/metadata/finalizers","value":[]}]`)
+				if err := k8sClient.Patch(ctx, es, client.RawPatch(types.JSONPatchType, jsonPatch)); err != nil && !k8serrors.IsNotFound(err) {
+					GinkgoWriter.Printf("WARNING: failed to strip finalizers from ExternalSecret %s/%s: %v\n", es.Namespace, es.Name, err)
+				}
+			}
 		}
 	}
 
-	// Step 2: Wait for all ExternalSecrets to be fully deleted
-	Eventually(func() bool {
-		checkList := &api.ExternalSecretList{}
-		err := k8sClient.List(ctx, checkList, client.InNamespace(namespace.Name))
-		if err != nil {
-			return true // namespace may already be gone
+	ssList := &api.SecretStoreList{}
+	if err := k8sClient.List(ctx, ssList, client.InNamespace(namespace.Name)); err == nil {
+		for i := range ssList.Items {
+			ss := &ssList.Items[i]
+			if err := k8sClient.Delete(ctx, ss); err != nil && !k8serrors.IsNotFound(err) {
+				GinkgoWriter.Printf("WARNING: failed to delete SecretStore %s/%s: %v\n", ss.Namespace, ss.Name, err)
+			}
+			if len(ss.Finalizers) > 0 {
+				jsonPatch := []byte(`[{"op":"replace","path":"/metadata/finalizers","value":[]}]`)
+				if err := k8sClient.Patch(ctx, ss, client.RawPatch(types.JSONPatchType, jsonPatch)); err != nil && !k8serrors.IsNotFound(err) {
+					GinkgoWriter.Printf("WARNING: failed to strip finalizers from SecretStore %s/%s: %v\n", ss.Namespace, ss.Name, err)
+				}
+			}
 		}
-		return len(checkList.Items) == 0
-	}, time.Second*30, time.Second*2).Should(BeTrue(), "All ExternalSecrets should be cleaned up before namespace deletion")
+	}
 
-	// Step 3: Delete the namespace (cascades to all remaining Secrets, ConfigMaps, etc.)
-	_ = k8sClient.Delete(ctx, namespace)
+	// Step 2: Brief wait for ES and SecretStore cleanup (best-effort, deliberately NOT
+	// blocking: cleanup issues must not mask the test result).
+	esCleaned := false
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		checkList := &api.ExternalSecretList{}
+		if err := k8sClient.List(ctx, checkList, client.InNamespace(namespace.Name)); err != nil || len(checkList.Items) == 0 {
+			esCleaned = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !esCleaned {
+		GinkgoWriter.Printf("WARNING: ExternalSecrets in namespace %s not cleaned up in time; proceeding with namespace deletion\n", namespace.Name)
+	}
+
+	ssCleaned := false
+	deadline = time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		checkList := &api.SecretStoreList{}
+		if err := k8sClient.List(ctx, checkList, client.InNamespace(namespace.Name)); err != nil || len(checkList.Items) == 0 {
+			ssCleaned = true
+			break
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !ssCleaned {
+		GinkgoWriter.Printf("WARNING: SecretStores in namespace %s not cleaned up in time; proceeding with namespace deletion\n", namespace.Name)
+	}
+
+	// Step 3: Delete the namespace.
+	if err := k8sClient.Delete(ctx, namespace); err != nil && !k8serrors.IsNotFound(err) {
+		GinkgoWriter.Printf("WARNING: failed to delete namespace %s: %v\n", namespace.Name, err)
+	}
+
+	// Step 4: Wait briefly for the namespace to be deleted. If it gets stuck
+	// in Terminating (due to spec.finalizers), force removal through the
+	// finalize subresource — a plain Update is rejected for Terminating
+	// namespaces and cannot modify namespace finalizers at all. Failure here
+	// is a warning only, consistent with best-effort cleanup semantics.
+	nsGone := false
+	deadline = time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		ns := &corev1.Namespace{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: namespace.Name}, ns); err != nil {
+			nsGone = true // namespace is gone
+			break
+		}
+		if ns.Status.Phase == corev1.NamespaceTerminating && len(ns.Spec.Finalizers) > 0 {
+			ns.Spec.Finalizers = nil
+			if err := k8sClient.SubResource("finalize").Update(ctx, ns); err != nil {
+				GinkgoWriter.Printf("WARNING: failed to force-finalize Terminating namespace %s: %v\n", namespace.Name, err)
+			}
+		}
+		time.Sleep(2 * time.Second)
+	}
+	if !nsGone {
+		GinkgoWriter.Printf("WARNING: namespace %s was not fully deleted during cleanup (may remain in Terminating)\n", namespace.Name)
+	}
 }
 
 // CleanupExternalSecret helper function to properly delete ExternalSecret and wait for completion
@@ -270,12 +366,23 @@ func CleanupExternalSecretAndSyncedSecret(ctx context.Context, es *api.ExternalS
 	}
 
 	// Step 1: Delete synced K8s Secrets explicitly.
-	// The controller creates a Secret with the same name as the ExternalSecret.
-	// cleanupSecretOnFailure is false by default, so synced Secrets may persist.
+	// The controller creates a Secret named after the ExternalSecret (or spec.target.name
+	// when set). cleanupSecretOnFailure is false by default, so synced Secrets may persist.
+	syncedSecretName := es.Name
+	if es.Spec.Target != nil && es.Spec.Target.Name != "" {
+		syncedSecretName = es.Spec.Target.Name
+	}
 	syncedSecret := &corev1.Secret{}
-	secretKey := types.NamespacedName{Name: es.Name, Namespace: es.Namespace}
+	secretKey := types.NamespacedName{Name: syncedSecretName, Namespace: es.Namespace}
 	if err := k8sClient.Get(ctx, secretKey, syncedSecret); err == nil {
 		_ = k8sClient.Delete(ctx, syncedSecret)
+	}
+	// Also try the ES-name-based Secret in case it differs from target name
+	if syncedSecretName != es.Name {
+		esSecret := &corev1.Secret{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: es.Name, Namespace: es.Namespace}, esSecret); err == nil {
+			_ = k8sClient.Delete(ctx, esSecret)
+		}
 	}
 
 	// Step 2: Delete the ExternalSecret (tolerates already-deleted)
@@ -312,12 +419,23 @@ func validateExternalSecretSucceededAndSecretCreated(ctx context.Context, namesp
 			lastCheckError = "ExternalSecret has no DataSyncResults yet"
 			return false
 		}
+		hasSucceeded := false
 		for i, result := range createdExternalSecret.Status.DataSyncResults {
-			if result.Status != "Succeeded" {
+			switch result.Status {
+			case "Succeeded":
+				hasSucceeded = true
+			case "Warning":
+				// CSS disabled notice etc. — acceptable alongside Succeeded data syncs
+				continue
+			default:
 				lastCheckError = fmt.Sprintf(
 					"DataSyncResult[%d] should have status 'Succeeded', got '%s'. Reason: '%s'", i, result.Status, result.Reason)
 				return false
 			}
+		}
+		if !hasSucceeded {
+			lastCheckError = "no DataSyncResult has status 'Succeeded'"
+			return false
 		}
 
 		// Check if corresponding secret was created
@@ -611,8 +729,8 @@ func bumpRestartAnnotationAndUpdate(ctx context.Context, namespace, name string,
 
 // filterRRSAEnvVars strips the RRSA env vars (ALICLOUD_ROLE_ARN,
 // ALICLOUD_OIDC_PROVIDER_ARN) from the Deployment's first container and
-// reports whether anything was removed. Shared by removeRRSAEnvTemporarily
-// (per-test) and cleanupDeploymentRRSAEnv (AfterSuite).
+// reports whether anything was removed. Shared by cleanupDeploymentRRSAEnv
+// (AfterSuite).
 func filterRRSAEnvVars(dep *appsv1.Deployment) bool {
 	rrsaEnvNames := map[string]bool{
 		"ALICLOUD_ROLE_ARN":          true,
@@ -629,6 +747,66 @@ func filterRRSAEnvVars(dep *appsv1.Deployment) bool {
 	}
 	dep.Spec.Template.Spec.Containers[0].Env = filteredEnv
 	return removed
+}
+
+// filterAllAuthEnvVars strips ALL auth-related env vars (RRSA + AK) from the
+// Deployment's first container and reports whether anything was removed.
+// Used by tests that need to exhaust every ENV auth tier (WorkerRole tests,
+// ENV client lazy-init tests).
+func filterAllAuthEnvVars(dep *appsv1.Deployment) bool {
+	authEnvNames := map[string]bool{
+		"ALICLOUD_ROLE_ARN":          true,
+		"ALICLOUD_OIDC_PROVIDER_ARN": true,
+		"ACCESS_KEY_ID":              true,
+		"SECRET_ACCESS_KEY":          true,
+	}
+	filteredEnv := make([]corev1.EnvVar, 0, len(dep.Spec.Template.Spec.Containers[0].Env))
+	removed := false
+	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
+		if authEnvNames[env.Name] {
+			removed = true
+			continue
+		}
+		filteredEnv = append(filteredEnv, env)
+	}
+	if removed {
+		dep.Spec.Template.Spec.Containers[0].Env = filteredEnv
+	}
+	return removed
+}
+
+// strippedAuthEnvVars stores the exact auth env vars (RRSA + AK) removed by
+// the most recent removeRRSAEnvTemporarily call, so restoreRRSAEnvBaseline
+// can put them back verbatim instead of reconstructing hardcoded values. The
+// e2e suite is single-threaded, so one capture slot is sufficient.
+var strippedAuthEnvVars []corev1.EnvVar
+
+// restoreAKEnvVarsFromCapture re-adds exactly the auth env vars that
+// removeRRSAEnvTemporarily stripped (verbatim, preserving their original
+// ValueFrom), and only when they are still missing. Returns true when at
+// least one env var was added. When nothing was stripped in this run it is a
+// no-op, so a baseline without AK env vars is never injected with new ones.
+func restoreAKEnvVarsFromCapture(dep *appsv1.Deployment) bool {
+	if len(strippedAuthEnvVars) == 0 {
+		return false
+	}
+	existing := make(map[string]bool, len(dep.Spec.Template.Spec.Containers[0].Env))
+	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
+		existing[env.Name] = true
+	}
+	added := false
+	for _, env := range strippedAuthEnvVars {
+		// RRSA env vars are restored by patchDeploymentEnvWithRRSA; only the
+		// AK tier is handled here.
+		if env.Name != "ACCESS_KEY_ID" && env.Name != "SECRET_ACCESS_KEY" {
+			continue
+		}
+		if !existing[env.Name] {
+			dep.Spec.Template.Spec.Containers[0].Env = append(dep.Spec.Template.Spec.Containers[0].Env, env)
+			added = true
+		}
+	}
+	return added
 }
 
 // updateDeploymentAndRollout fetches the Deployment, applies mutate to it,
@@ -650,6 +828,10 @@ func updateDeploymentAndRollout(ctx context.Context, namespace, name string, mut
 
 	By(fmt.Sprintf("waiting for Deployment %s/%s rollout to complete", namespace, name))
 	waitForDeploymentRollout(ctx, namespace, name)
+
+	// Every restart must re-confirm leadership before subsequent specs
+	// exercise the lease-gated reconcile paths.
+	verifyLeaderElectionLease(ctx)
 }
 
 // getDeploymentArgs returns a copy of the current args of the first
@@ -744,6 +926,52 @@ func patchDeploymentArgs(ctx context.Context, removePrefixes []string, addArgs [
 	})
 
 	return originalArgs
+}
+
+// testOnlyFlagPrefixes lists the Deployment args that only e2e specs ever
+// set (via patchDeploymentArgs) to steer the operator under test; none of
+// them belongs to a regular production configuration. Every prefix maps to
+// a flag whose DEFAULT restores the expected baseline once the arg is
+// dropped (cmd/manager/main.go). Deliberately NOT listed: regular
+// configuration flags such as --cluster-id, --uid, --region, --backend and
+// the --enable-* family, which must survive normalization untouched.
+var testOnlyFlagPrefixes = []string{
+	"--disable-polling",
+	"--polling-interval",
+	"--process-cluster-secret-store",
+	"--process-cluster-external-secret",
+	"--cleanup-secret-on-failure",
+	"--watch-namespaces",
+	"--exclude-namespaces",
+	"--max-concurrent-kms-secret-pulls",
+	"--max-concurrent-secret-pulls",
+}
+
+// normalizeDeploymentArgsBaseline removes test-only flags left behind on the
+// ack-secret-manager Deployment (e.g. by a hard-killed previous run whose
+// DeferCleanup restore never ran) so every suite start observes the true
+// production args baseline. Idempotent: patchDeploymentArgs skips the
+// Update/rollout entirely when no test-only flag is present.
+func normalizeDeploymentArgsBaseline(ctx context.Context) {
+	currentArgs := getDeploymentArgs(ctx)
+
+	leftover := make([]string, 0)
+	for _, arg := range currentArgs {
+		for _, prefix := range testOnlyFlagPrefixes {
+			if strings.HasPrefix(arg, prefix) {
+				leftover = append(leftover, arg)
+				break
+			}
+		}
+	}
+	if len(leftover) == 0 {
+		By("Deployment args baseline is clean, no test-only flags to normalize")
+		return
+	}
+
+	GinkgoWriter.Printf("WARNING: normalizing Deployment args baseline; removing test-only flag(s) left behind by a previous run: %v\n", leftover)
+	By(fmt.Sprintf("normalizing Deployment args baseline (removing leftover test-only flags %v)", leftover))
+	patchDeploymentArgs(ctx, testOnlyFlagPrefixes, nil)
 }
 
 // ensureRRSAEnvSecret ensures the RRSA env Secret exists with the correct data.
@@ -880,26 +1108,40 @@ func restoreDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
 }
 
 // removeRRSAEnvTemporarily removes the RRSA env vars (ALICLOUD_ROLE_ARN,
-// ALICLOUD_OIDC_PROVIDER_ARN) from the Deployment and triggers a rollout.
-// It is used by WorkerRole tests: with the globally injected ENV OIDC
+// ALICLOUD_OIDC_PROVIDER_ARN) AND the AK env vars (ACCESS_KEY_ID,
+// SECRET_ACCESS_KEY) from the Deployment and triggers a rollout.
+// It is used by WorkerRole/ENV-client tests that need to exhaust every ENV
+// auth tier: with the globally injected ENV OIDC credentials OR AK
 // credentials present, an ExternalSecret without SecretStoreRef would be
-// served by ENV RRSA (auth chain priority 2) instead of WorkerRole
-// (priority 5). Removing the two env vars forces the chain down to the
-// WorkerRole provider.
+// served by ENV RRSA (auth chain priority 2) or ENV AK (priority 3)
+// instead of reaching the WorkerRole tier (priority 5) or producing the
+// "no usable authentication tier" error.
 //
 // Callers MUST restore the baseline afterwards via restoreRRSAEnvBaseline
-// (typically in DeferCleanup), otherwise subsequent tests lose ENV RRSA.
+// (typically in DeferCleanup), otherwise subsequent tests lose ENV RRSA
+// and ENV AK credentials.
 func removeRRSAEnvTemporarily(ctx context.Context, namespace, name string) {
 	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	Expect(err).NotTo(HaveOccurred(), "failed to get Deployment for RRSA env removal")
 
-	if !filterRRSAEnvVars(dep) {
-		By("RRSA env vars already absent from Deployment, nothing to remove")
+	// Capture the exact env vars about to be stripped so the restore path can
+	// put them back verbatim (no hardcoded reconstruction).
+	captured := []corev1.EnvVar{}
+	for _, env := range dep.Spec.Template.Spec.Containers[0].Env {
+		switch env.Name {
+		case "ALICLOUD_ROLE_ARN", "ALICLOUD_OIDC_PROVIDER_ARN", "ACCESS_KEY_ID", "SECRET_ACCESS_KEY":
+			captured = append(captured, env)
+		}
+	}
+	if len(captured) == 0 {
+		strippedAuthEnvVars = nil
+		By("auth env vars already absent from Deployment, nothing to remove")
 		return
 	}
+	strippedAuthEnvVars = captured
 
 	updateDeploymentAndRollout(ctx, namespace, name, func(dep *appsv1.Deployment) {
-		filterRRSAEnvVars(dep)
+		filterAllAuthEnvVars(dep)
 	})
 }
 
@@ -955,9 +1197,11 @@ func cleanupDeploymentRRSAEnv(ctx context.Context, namespace, name string) {
 // restoreRRSAEnvBaseline restores the RRSA env baseline established by
 // BeforeSuite (ensureRRSAEnabled): it re-ensures the RRSA env Secret and the
 // secretKeyRef env vars, patching + rolling out only when the Deployment has
-// drifted from the baseline. The env Secret is deliberately NOT deleted here
-// (AfterSuite owns its final cleanup) so the secretKeyRef env vars always
-// resolve and pods keep starting up.
+// drifted from the baseline. It also restores the AK env vars
+// (ACCESS_KEY_ID, SECRET_ACCESS_KEY) that removeRRSAEnvTemporarily actually
+// stripped, re-adding them verbatim from the captured originals. The env
+// Secret is deliberately NOT deleted here (AfterSuite owns its final cleanup)
+// so the secretKeyRef env vars always resolve and pods keep starting up.
 func restoreRRSAEnvBaseline(ctx context.Context, namespace, name string) {
 	if RAMRoleArnForRRSA == "" || OIDCProviderARN == "" {
 		GinkgoWriter.Printf("WARNING: RRSA baseline not configured (RAMRoleArnForRRSA=%q, OIDCProviderARN=%q), skipping baseline restore\n",
@@ -975,6 +1219,12 @@ func restoreRRSAEnvBaseline(ctx context.Context, namespace, name string) {
 	ensureRRSAEnvSecret(ctx, namespace)
 
 	needsUpdate := patchDeploymentEnvWithRRSA(ctx, dep)
+	// Restore only the AK env vars this suite actually stripped, verbatim.
+	// When nothing was stripped (or the baseline has no AK env vars), this is
+	// a no-op and nothing is injected.
+	if restoreAKEnvVarsFromCapture(dep) {
+		needsUpdate = true
+	}
 	if !needsUpdate {
 		By("Deployment already matches the RRSA env baseline, skipping restore")
 		return
@@ -991,25 +1241,27 @@ func restoreRRSAEnvBaseline(ctx context.Context, namespace, name string) {
 	}
 	By("waiting for Deployment rollout after RRSA env baseline restore")
 	waitForDeploymentRollout(ctx, namespace, name)
+	// The baseline restore rollout restarted the controller; re-confirm leadership.
+	verifyLeaderElectionLease(ctx)
 }
 
 // workerRoleEnabledInDeployment reports whether the ack-secret-manager
 // Deployment runs with --enable-worker-role enabled. The flag defaults to
-// true (see cmd/manager/main.go), so its absence means enabled; only an
-// explicit --enable-worker-role=false disables the WorkerRole auth provider.
+// false (see cmd/manager/main.go), so only an explicit
+// --enable-worker-role=true enables the WorkerRole auth provider.
 func workerRoleEnabledInDeployment(ctx context.Context, namespace, name string) bool {
 	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		GinkgoWriter.Printf("WARNING: failed to get Deployment %s/%s to inspect --enable-worker-role: %v\n", namespace, name, err)
-		// Flag default is true; assume enabled when we cannot inspect.
-		return true
+		// Flag default is false; assume disabled when we cannot inspect.
+		return false
 	}
 	for _, arg := range dep.Spec.Template.Spec.Containers[0].Args {
 		if strings.HasPrefix(arg, "--enable-worker-role=") {
 			return strings.TrimPrefix(arg, "--enable-worker-role=") == "true"
 		}
 	}
-	return true
+	return false
 }
 
 // restoreDeploymentEnv restores the original env vars of a Deployment's first container.
@@ -1107,6 +1359,8 @@ func restoreDeploymentArgs(ctx context.Context, originalArgs []string) {
 	if updated {
 		By("waiting for Deployment rollout after restoring args")
 		waitForDeploymentRollout(ctx, namespace, deploymentName)
+		// The restore rollout restarted the controller; re-confirm leadership.
+		verifyLeaderElectionLease(ctx)
 	}
 }
 
@@ -1161,6 +1415,143 @@ func hasRRSAProjectedVolume(dep *appsv1.Deployment, volumeName string) bool {
 		}
 	}
 	return false
+}
+
+const (
+	// leaderElectionLeaseName mirrors the controller-runtime LeaderElectionID
+	// configured in cmd/manager/main.go.
+	leaderElectionLeaseName = "ack-secret-manager-lock"
+
+	// leaderRenewFreshnessWindow is the maximum age a Lease renewTime may have
+	// before the holder is considered dead. The controller-runtime renew loop
+	// renews every few seconds (RetryPeriod=2s by default), so 30s leaves
+	// ample headroom while still catching a stale lease left behind by a
+	// leader that crashed without releasing it.
+	leaderRenewFreshnessWindow = 30 * time.Second
+)
+
+// leaderElectionLeaseNamespace resolves the namespace holding the leader
+// election Lease. It is taken from the Deployment's POD_NAMESPACE env var;
+// since it is injected via the downward API (fieldRef: metadata.namespace),
+// its spec value is empty and the Deployment namespace is the effective
+// fallback.
+func leaderElectionLeaseNamespace(ctx context.Context) string {
+	leaseNamespace := ackSecretManagerNamespace
+	dep, err := clientset.AppsV1().Deployments(ackSecretManagerNamespace).Get(ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
+	Expect(err).NotTo(HaveOccurred(), "failed to get ack-secret-manager Deployment for leader-election namespace detection")
+	for _, container := range dep.Spec.Template.Spec.Containers {
+		for _, envVar := range container.Env {
+			if envVar.Name == "POD_NAMESPACE" && envVar.Value != "" {
+				leaseNamespace = envVar.Value
+			}
+		}
+	}
+	return leaseNamespace
+}
+
+// runningControllerPodNames lists the names of the Running Pods selected by
+// the ack-secret-manager Deployment's label selector, so a Lease holder can
+// be checked against the live Pod population.
+func runningControllerPodNames(ctx context.Context, namespace string) ([]string, error) {
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, ackSecretManagerDeploymentName, metav1.GetOptions{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to get Deployment %s/%s for Pod listing: %v", namespace, ackSecretManagerDeploymentName, err)
+	}
+	selector := labels.Set(dep.Spec.Selector.MatchLabels).String()
+	pods, err := clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: selector})
+	if err != nil {
+		return nil, fmt.Errorf("failed to list controller Pods in %s: %v", namespace, err)
+	}
+	names := make([]string, 0, len(pods.Items))
+	for i := range pods.Items {
+		if pods.Items[i].Status.Phase == corev1.PodRunning {
+			names = append(names, pods.Items[i].Name)
+		}
+	}
+	return names, nil
+}
+
+// leaseHolderPodName returns the Pod-name portion of a controller-runtime
+// holderIdentity, which has the form "<pod-name>_<uuid>" (the UUID suffix
+// never contains underscores, the Pod name may contain dashes).
+func leaseHolderPodName(holder string) string {
+	if idx := strings.LastIndex(holder, "_"); idx >= 0 {
+		return holder[:idx]
+	}
+	return holder
+}
+
+// leaseHolderMatchesRunningPod reports whether the holderIdentity corresponds
+// to one of the currently Running controller Pods (exclusive leadership by a
+// live replica).
+func leaseHolderMatchesRunningPod(holder string, podNames []string) bool {
+	name := leaseHolderPodName(holder)
+	for _, podName := range podNames {
+		if podName == name {
+			return true
+		}
+	}
+	return false
+}
+
+// verifyLeaderElectionLease asserts that the controller-manager acquired
+// leadership: the coordination.k8s.io Lease "ack-secret-manager-lock" exists
+// in the leader-election namespace, carries a non-empty holderIdentity that
+// corresponds to one of the Running controller Pods, and a recent renewTime.
+// It is reusable: every Deployment restart (updateDeploymentAndRollout,
+// restoreDeploymentArgs, restoreRRSAEnvBaseline) calls it to re-confirm
+// leadership before subsequent specs exercise the lease-gated reconcile paths.
+func verifyLeaderElectionLease(ctx context.Context) {
+	By("verifying the leader election Lease exists, is actively renewed and held by a running Pod")
+
+	leaseNamespace := leaderElectionLeaseNamespace(ctx)
+
+	Eventually(func(g Gomega) {
+		lease, err := clientset.CoordinationV1().Leases(leaseNamespace).Get(ctx, leaderElectionLeaseName, metav1.GetOptions{})
+		g.Expect(err).NotTo(HaveOccurred(), "Lease %s/%s should exist once leadership is acquired", leaseNamespace, leaderElectionLeaseName)
+		g.Expect(lease.Spec.HolderIdentity).NotTo(BeNil(), "Lease holderIdentity must be set")
+		holder := *lease.Spec.HolderIdentity
+		g.Expect(holder).NotTo(BeEmpty(), "Lease holderIdentity must not be empty")
+		g.Expect(lease.Spec.RenewTime).NotTo(BeNil(), "Lease renewTime must be set")
+		g.Expect(time.Since(lease.Spec.RenewTime.Time)).To(BeNumerically("<", leaderRenewFreshnessWindow),
+			"Lease renewTime should be fresh, indicating the holder is still renewing")
+
+		podNames, err := runningControllerPodNames(ctx, ackSecretManagerNamespace)
+		g.Expect(err).NotTo(HaveOccurred(), "controller Pods should be listable for the holderIdentity consistency check")
+		g.Expect(leaseHolderMatchesRunningPod(holder, podNames)).To(BeTrue(),
+			"Lease holderIdentity %q must correspond to one of the Running controller Pods %v", holder, podNames)
+	}).WithTimeout(2*time.Minute).WithPolling(5*time.Second).Should(Succeed(),
+		"leader election Lease %s/%s was not acquired and kept fresh by a running Pod", leaseNamespace, leaderElectionLeaseName)
+}
+
+// ptrToInt32 returns a pointer to the given int32 value, for patching
+// pointer-typed Deployment fields such as Spec.Replicas.
+func ptrToInt32(v int32) *int32 {
+	return &v
+}
+
+// restoreDeploymentReplicas restores the Deployment's replica count to the
+// captured baseline, waits for the resulting rollout and re-confirms
+// leadership. Intended for DeferCleanup registration in specs that scale the
+// controller Deployment, so the single-replica baseline (and a stable leader)
+// is always restored even on failure paths.
+func restoreDeploymentReplicas(ctx context.Context, namespace, deploymentName string, replicas int32) {
+	By(fmt.Sprintf("restoring Deployment %s/%s replicas to %d", namespace, deploymentName, replicas))
+	dep, err := clientset.AppsV1().Deployments(namespace).Get(ctx, deploymentName, metav1.GetOptions{})
+	if err != nil {
+		Fail(fmt.Sprintf("failed to get Deployment %s/%s for replica restoration: %v", namespace, deploymentName, err))
+	}
+	if dep.Spec.Replicas != nil && *dep.Spec.Replicas == replicas {
+		return
+	}
+	dep.Spec.Replicas = &replicas
+	if _, err := clientset.AppsV1().Deployments(namespace).Update(ctx, dep, metav1.UpdateOptions{}); err != nil {
+		Fail(fmt.Sprintf("failed to restore Deployment %s/%s replicas to %d; leaking the scaled replica count would break subsequent tests: %v",
+			namespace, deploymentName, replicas, err))
+	}
+	waitForDeploymentRollout(ctx, namespace, deploymentName)
+	// The scale change alters the live Pod population; re-confirm leadership.
+	verifyLeaderElectionLease(ctx)
 }
 
 // addRRSAProjectedVolume adds the RRSA projected OIDC token volume and its

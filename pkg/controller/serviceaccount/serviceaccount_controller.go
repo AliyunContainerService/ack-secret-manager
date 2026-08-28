@@ -1,11 +1,8 @@
-// pkg/controller/serviceaccount/serviceaccount_controller.go
 package serviceaccount
 
 import (
 	"context"
-	"fmt"
 	"reflect"
-	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
@@ -19,7 +16,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
-	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 const (
@@ -32,6 +29,12 @@ type ServiceAccountReconciler struct {
 	client.Client
 	Scheme *runtime.Scheme
 	Log    logr.Logger
+	// ProcessClusterSecretStore mirrors the --process-cluster-secret-store
+	// flag: when false the ClusterSecretStore controller is disabled, so this
+	// reconciler must not patch trigger annotations onto ClusterSecretStores
+	// either (nobody would clear them, leaving referencing ExternalSecrets
+	// stuck in the freshness-guard retry loop).
+	ProcessClusterSecretStore bool
 }
 
 //+kubebuilder:rbac:groups=core,resources=serviceaccounts,verbs=get;list;watch
@@ -57,11 +60,40 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		}
 	}
 
-	// Find all SecretStore and ClusterSecretStore objects that reference this service account
+	// Find all stores referencing this service account
 	secretStoreList := &api.SecretStoreList{}
 	err = r.List(ctx, secretStoreList, &client.ListOptions{})
 	if err != nil {
 		return ctrl.Result{}, err
+	}
+
+	for _, store := range secretStoreList.Items {
+		if r.serviceAccountIsReferenced(serviceAccount, &store.Spec, store.Namespace) {
+			// A non-empty trigger annotation already guarantees a pending
+			// rebuild; re-patching a fresh value would force another full
+			// rebuild+fan-out on every whole-loop retry.
+			if store.Annotations[utils.TriggerReconcileAnnotation] != "" {
+				log.Info("SecretStore already carries a pending trigger annotation, skipping redundant patch", "store", store.Name, "namespace", store.Namespace)
+				continue
+			}
+			log.Info("Triggering reconcile for SecretStore", "store", store.Name, "namespace", store.Namespace)
+			err := utils.PatchTriggerAnnotation(ctx, r.Client, &store)
+			if err != nil {
+				if errors.IsNotFound(err) {
+					// The store was deleted between List and Patch: there is
+					// nothing left to trigger, so skip without requeueing.
+					log.Info("SecretStore already deleted, skipping trigger annotation patch", "store", store.Name, "namespace", store.Namespace)
+					continue
+				}
+				log.Error(err, "Failed to trigger reconcile for SecretStore, will retry via workqueue", "store", store.Name, "namespace", store.Namespace)
+				return ctrl.Result{}, err
+			}
+		}
+	}
+
+	if !r.ProcessClusterSecretStore {
+		log.Info("ClusterSecretStore processing disabled, skipping trigger annotation patches for ClusterSecretStores")
+		return ctrl.Result{}, nil
 	}
 
 	clusterSecretStoreList := &api.ClusterSecretStoreList{}
@@ -70,23 +102,26 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 		return ctrl.Result{}, err
 	}
 
-	// Trigger reconcile for each referencing store
-	for _, store := range secretStoreList.Items {
-		if r.serviceAccountIsReferenced(serviceAccount, &store.Spec, store.Namespace) {
-			log.Info("Triggering reconcile for SecretStore", "store", store.Name, "namespace", store.Namespace)
-			err := r.triggerStoreReconcile(ctx, &store)
-			if err != nil {
-				log.Error(err, "Failed to trigger reconcile for SecretStore", "store", store.Name)
-			}
-		}
-	}
-
 	for _, store := range clusterSecretStoreList.Items {
 		if r.serviceAccountIsReferencedByClusterStore(serviceAccount, &store.Spec) {
+			// A non-empty trigger annotation already guarantees a pending
+			// rebuild; re-patching a fresh value would force another full
+			// rebuild+fan-out on every whole-loop retry.
+			if store.Annotations[utils.TriggerReconcileAnnotation] != "" {
+				log.Info("ClusterSecretStore already carries a pending trigger annotation, skipping redundant patch", "store", store.Name)
+				continue
+			}
 			log.Info("Triggering reconcile for ClusterSecretStore", "store", store.Name)
-			err := r.triggerClusterStoreReconcile(ctx, &store)
+			err := utils.PatchTriggerAnnotation(ctx, r.Client, &store)
 			if err != nil {
-				log.Error(err, "Failed to trigger reconcile for ClusterSecretStore", "store", store.Name)
+				if errors.IsNotFound(err) {
+					// The store was deleted between List and Patch: there is
+					// nothing left to trigger, so skip without requeueing.
+					log.Info("ClusterSecretStore already deleted, skipping trigger annotation patch", "store", store.Name)
+					continue
+				}
+				log.Error(err, "Failed to trigger reconcile for ClusterSecretStore, will retry via workqueue", "store", store.Name)
+				return ctrl.Result{}, err
 			}
 		}
 	}
@@ -94,18 +129,15 @@ func (r *ServiceAccountReconciler) Reconcile(ctx context.Context, req ctrl.Reque
 	return ctrl.Result{}, nil
 }
 
-// serviceAccountIsReferenced checks if a service account is referenced by the store spec.
-// storeNamespace is the namespace of the SecretStore owning the spec, used to
-// resolve references that omit the namespace field.
+// serviceAccountIsReferenced reports whether the store spec references this
+// service account; storeNamespace resolves references omitting the namespace.
 func (r *ServiceAccountReconciler) serviceAccountIsReferenced(sa *corev1.ServiceAccount, spec *api.SecretStoreSpec, storeNamespace string) bool {
-	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
 		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef, storeNamespace) {
 			return true
 		}
 	}
 
-	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
 		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef, storeNamespace) {
 			return true
@@ -115,18 +147,16 @@ func (r *ServiceAccountReconciler) serviceAccountIsReferenced(sa *corev1.Service
 	return false
 }
 
-// serviceAccountIsReferencedByClusterStore checks if a service account is referenced by the cluster store spec.
-// ClusterSecretStore is cluster-scoped, so references must specify the namespace;
-// an empty reference namespace resolves to "" and never matches a namespaced service account.
+// serviceAccountIsReferencedByClusterStore reports whether the cluster store
+// spec references this service account; an empty reference namespace resolves
+// to "" and never matches a namespaced service account.
 func (r *ServiceAccountReconciler) serviceAccountIsReferencedByClusterStore(sa *corev1.ServiceAccount, spec *api.ClusterSecretStoreSpec) bool {
-	// Check KMS provider
 	if spec.KMS != nil && spec.KMS.KMS != nil {
 		if r.checkServiceAccount(sa, spec.KMS.KMS.ServiceAccountRef, "") {
 			return true
 		}
 	}
 
-	// Check OOS provider
 	if spec.OOS != nil && spec.OOS.OOS != nil {
 		if r.checkServiceAccount(sa, spec.OOS.OOS.ServiceAccountRef, "") {
 			return true
@@ -136,10 +166,8 @@ func (r *ServiceAccountReconciler) serviceAccountIsReferencedByClusterStore(sa *
 	return false
 }
 
-// checkServiceAccount checks if a service account reference matches the given service account.
-// storeNamespace is used as the expected namespace when ref.Namespace is omitted,
-// mirroring the auth chain which defaults an empty reference namespace to the
-// store's own namespace.
+// checkServiceAccount reports whether ref matches the service account; an
+// omitted ref.Namespace defaults to storeNamespace, mirroring the auth chain.
 func (r *ServiceAccountReconciler) checkServiceAccount(sa *corev1.ServiceAccount, ref *api.ServiceAccountRef, storeNamespace string) bool {
 	if ref == nil {
 		return false
@@ -151,28 +179,6 @@ func (r *ServiceAccountReconciler) checkServiceAccount(sa *corev1.ServiceAccount
 	}
 
 	return sa.Name == ref.Name && sa.Namespace == expectedNamespace
-}
-
-// triggerStoreReconcile triggers a reconcile for a SecretStore by updating its annotation
-func (r *ServiceAccountReconciler) triggerStoreReconcile(ctx context.Context, store *api.SecretStore) error {
-	updatedStore := store.DeepCopy()
-	if updatedStore.Annotations == nil {
-		updatedStore.Annotations = make(map[string]string)
-	}
-	updatedStore.Annotations[secretstore.TriggerReconcileAnnotation] = fmt.Sprintf("%d", time.Now().UnixNano())
-
-	return r.Patch(ctx, updatedStore, client.MergeFrom(store))
-}
-
-// triggerClusterStoreReconcile triggers a reconcile for a ClusterSecretStore by updating its annotation
-func (r *ServiceAccountReconciler) triggerClusterStoreReconcile(ctx context.Context, store *api.ClusterSecretStore) error {
-	updatedStore := store.DeepCopy()
-	if updatedStore.Annotations == nil {
-		updatedStore.Annotations = make(map[string]string)
-	}
-	updatedStore.Annotations[secretstore.TriggerReconcileAnnotation] = fmt.Sprintf("%d", time.Now().UnixNano())
-
-	return r.Patch(ctx, updatedStore, client.MergeFrom(store))
 }
 
 // hasRoleARNAnnotation checks if a ServiceAccount has the role-arn annotation
@@ -194,19 +200,17 @@ func (r *ServiceAccountReconciler) SetupWithManager(mgr ctrl.Manager, reconcileC
 				return r.hasRoleARNAnnotation(sa)
 			},
 			UpdateFunc: func(e event.UpdateEvent) bool {
-				// Only trigger on updates if the ServiceAccount has the role-arn annotation
-				// and annotations have changed
+				// Trigger only when annotations changed on an SA carrying (or
+				// previously carrying) the role-arn annotation
 				oldSA := e.ObjectOld.(*corev1.ServiceAccount)
 				newSA := e.ObjectNew.(*corev1.ServiceAccount)
 
-				// Check if either old or new ServiceAccount has the annotation
 				hasAnnotation := r.hasRoleARNAnnotation(oldSA) || r.hasRoleARNAnnotation(newSA)
 				annotationsChanged := !reflect.DeepEqual(oldSA.Annotations, newSA.Annotations)
 
 				return hasAnnotation && annotationsChanged
 			},
 			DeleteFunc: func(e event.DeleteEvent) bool {
-				// Always trigger on deletion if the ServiceAccount had the role-arn annotation
 				sa := e.Object.(*corev1.ServiceAccount)
 				return r.hasRoleARNAnnotation(sa)
 			},

@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -64,13 +65,52 @@ func GetProviderByName(providerName string) Provider {
 	return provider
 }
 
-func NewProviderClientByENV() error {
+// envInitFailureTTL bounds how long a fully-failed ENV client init result is cached before retrying.
+const envInitFailureTTL = 60 * time.Second
+
+var (
+	// envClientInitMu serializes EnsureENVClient callers and guards the
+	// failure negative-cache state below.
+	envClientInitMu   sync.Mutex
+	envInitFailedAt   time.Time
+	envInitFailureErr error
+	// envNow is an indirection over time.Now so TTL tests can inject a fake clock.
+	envNow = time.Now
+	// envInitFailureTTLOverride lets tests shorten the TTL; 0 means use envInitFailureTTL.
+	envInitFailureTTLOverride time.Duration
+)
+
+// EnsureENVClient lazily registers the ENV client for every provider on
+// first use. Thread-safe and retryable: only providers still missing a
+// client are retried. Attempts making no progress cache the error for
+// envInitFailureTTL; partial success never caches. Reconcile-path only,
+// so standby replicas start no credential refresh.
+func EnsureENVClient() error {
+	envClientInitMu.Lock()
+	defer envClientInitMu.Unlock()
+
+	ttl := envInitFailureTTL
+	if envInitFailureTTLOverride > 0 {
+		ttl = envInitFailureTTLOverride
+	}
+	now := envNow()
+	// Within the TTL of a fully-failed attempt, return the cached error.
+	if envInitFailureErr != nil && now.Sub(envInitFailedAt) < ttl {
+		return envInitFailureErr
+	}
+	envInitFailureErr = nil
+	envInitFailedAt = time.Time{}
+
 	errs := make([]error, 0)
+	registered := 0
 	providerMap.Range(func(k, v any) bool {
 		provider, ok := v.(Provider)
 		if !ok {
-			err := fmt.Errorf("provider type error,provider name %v", k)
-			errs = append(errs, err)
+			errs = append(errs, fmt.Errorf("provider type error,provider name %v", k))
+			return true
+		}
+		// Skip providers whose ENV client is already registered
+		if _, err := provider.GetClient(EnvClient); err == nil {
 			return true
 		}
 		secretClient, err := provider.NewClientByENV("")
@@ -79,22 +119,29 @@ func NewProviderClientByENV() error {
 			return true
 		}
 		provider.Register(EnvClient, secretClient)
+		registered++
 		return true
 	})
 	if len(errs) != 0 {
-		return fmt.Errorf("new provider client by env error %v", errs)
+		err := fmt.Errorf("new provider client by env error %v", errs)
+		// Negative cache only on zero progress; partial progress keeps
+		// immediate retry semantics.
+		if registered == 0 {
+			envInitFailedAt = now
+			envInitFailureErr = err
+		}
+		return err
 	}
 	return nil
 }
 
 type Provider interface {
 	ClientManager
-	// NewClient constructs secrets client by secret store
-	// endpoint specifies a custom service endpoint (e.g., KMS VPC endpoint).
-	// Pass empty string to use the provider's default endpoint.
+	// NewClient constructs a secrets client by secret store; endpoint is a
+	// custom service endpoint (empty string = provider default).
 	NewClient(ctx context.Context, store *v1alpha1.SecretStore, kube client.Client, endpoint string) (SecretClient, error)
-	// NewClientByENV constructs secrets client by environment variable
-	// endpoint specifies a custom service endpoint. Pass empty string to use default.
+	// NewClientByENV constructs a secrets client from environment variables
+	// (empty endpoint = default).
 	NewClientByENV(endpoint string) (SecretClient, error)
 	GetName() string
 	GetRegion() string
@@ -115,13 +162,10 @@ type ClientManager interface {
 	GetClient(clientKey string) (SecretClient, error)
 	Delete(clientKey string)
 	// DeletePrefixed removes the plain clientKey client together with every
-	// composite "clientKey#endpoint" variant. Endpoint-specific clients are
-	// created on-demand by the ExternalSecret controller under composite
-	// keys, so store-level lifecycle events (spec update / store deletion)
-	// must retire all variants of the store's clientName at once.
-	// NOT atomic: implementations scan sync.Map.Range, whose weakly
-	// consistent snapshot may miss a composite client registered
-	// concurrently; such a client self-heals only on the next store
-	// lifecycle event.
+	// composite "clientKey#endpoint" variant, so store-level lifecycle events
+	// retire all variants of the store's clientName at once.
+	// NOT atomic: sync.Map.Range's weakly consistent snapshot may miss a
+	// concurrently registered composite client; it self-heals on the next
+	// store lifecycle event.
 	DeletePrefixed(clientKey string)
 }

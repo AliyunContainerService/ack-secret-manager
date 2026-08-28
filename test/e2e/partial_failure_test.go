@@ -13,6 +13,11 @@
 //  4. cleanupSecretOnFailure deletion contract: with --cleanup-secret-on-failure=true
 //     a TOTAL failure deletes the target Secret; the suite default is false,
 //     so this Context patches the manager Deployment args (and restores them).
+//  5. Zero-output guard (0.6.5 contract): all data sources succeed yet produce
+//     zero keys; the write is skipped and the existing cluster Secret is
+//     preserved in full (pkg/controller/externalsecret/partial_failure.go
+//     hasDeclaredSourcesButZeroOutput; e2e counterpart of
+//     zero_output_guard_test.go).
 package e2e
 
 import (
@@ -746,6 +751,106 @@ var _ = Describe("Partial Failure E2E", func() {
 				return pfSecretAbsent(ctx, testNamespace.Name, targetSecretName)
 			}).WithTimeout(time.Second*20).WithPolling(time.Second*5).Should(BeTrue(),
 				"templated Secret should consistently stay deleted (static template content never re-written)")
+		})
+	})
+
+	// Zero-output fail-closed guard (0.6.5 contract, O-2 leg): every declared
+	// data source succeeds yet produces zero keys (the backend document has
+	// been emptied to {}). The round must NOT write an empty dataset -- which
+	// would silently clear the existing Secret -- and must NOT delete it
+	// either; instead the write is skipped and status reports the
+	// zero_output_guard placeholder. E2E counterpart of
+	// TestZeroOutputGuardExtractEmptyDocument (zero_output_guard_test.go).
+	Context("Zero-output guard", func() {
+		It("Should retain the existing Secret untouched when all sources succeed but produce zero keys", func() {
+			store := createRRSASecretStore(ctx, testNamespace.Name, "pf-zero-output-store-"+getRandString())
+
+			By("creating a dedicated KMS secret whose v1 document extracts into two keys")
+			Expect(GlobalResourceManager).NotTo(BeNil())
+			zeroOutputKMSSecret, err := GlobalResourceManager.CreateKMSSecretWithData(ctx, `{"user":"alice","token":"t0p-secret"}`)
+			Expect(err).NotTo(HaveOccurred(), "failed to create dedicated KMS secret for the zero-output spec")
+			DeferCleanup(func() {
+				if err := GlobalResourceManager.DeleteKMSSecret(zeroOutputKMSSecret); err != nil {
+					GinkgoWriter.Printf("WARNING: failed to delete dedicated KMS secret %s: %v\n", zeroOutputKMSSecret, err)
+				}
+			})
+
+			// extract over the latest version: v1 yields two top-level keys; the
+			// emptied v2 ({}) parses successfully into zero keys, driving the
+			// guard without any data-source failure.
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pf-zero-output-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					DataProcess: []api.DataProcess{
+						{
+							Extract: &api.DataSource{
+								Key: zeroOutputKMSSecret,
+								SecretStoreRef: &api.SecretStoreRef{
+									Name:      store.Name,
+									Namespace: store.Namespace,
+									Kind:      ResourceSecretStore,
+								},
+							},
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("waiting for the initial successful extract sync")
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+
+			baseline := pfGetSecretData(ctx, testNamespace.Name, externalSecret.Name)
+			Expect(baseline).To(HaveKey("user"), "baseline extract should yield the 'user' key")
+			Expect(baseline).To(HaveKey("token"), "baseline extract should yield the 'token' key")
+
+			By("emptying the backend document: appending a {} version as the new latest")
+			Expect(GlobalResourceManager.PutKMSSecretVersion(ctx, zeroOutputKMSSecret, "v2", "{}")).To(Succeed(),
+				"failed to append the emptied version to the dedicated KMS secret")
+
+			By("observing the zero_output_guard placeholder without any data-source failure")
+			// Guard round semantics (externalsecret_controller.go): the round
+			// performs no Secret write and persists ONLY the zero_output_guard
+			// placeholder entry (the previous round's Succeeded entry is
+			// superseded by the merge). A successful fetch must never surface a
+			// Failed entry keyed by the data source itself.
+			Eventually(func() bool {
+				if !pfStatusHasKey(ctx, externalSecret.Namespace, externalSecret.Name, "zero_output_guard") {
+					return false
+				}
+				es := &api.ExternalSecret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: externalSecret.Name, Namespace: externalSecret.Namespace,
+				}, es); err != nil {
+					return false
+				}
+				for _, r := range es.Status.DataSyncResults {
+					if r.Status == "Failed" && r.ExternalSecretKey == zeroOutputKMSSecret {
+						return false
+					}
+				}
+				return true
+			}).WithTimeout(time.Second*90).WithPolling(time.Second*5).Should(BeTrue(),
+				"status should report zero_output_guard with no data-source failure after the backend document was emptied")
+
+			By("consistently observing the existing Secret stays fully intact")
+			Consistently(func() bool {
+				data, ok := pfTryGetSecretData(ctx, testNamespace.Name, externalSecret.Name)
+				if !ok {
+					return false
+				}
+				return reflect.DeepEqual(data, baseline)
+			}).WithTimeout(time.Second*20).WithPolling(time.Second*5).Should(BeTrue(),
+				"Secret should consistently keep its previous content on a zero-output round (no key cleared or deleted)")
 		})
 	})
 })

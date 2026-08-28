@@ -18,19 +18,19 @@
 #
 #      aliyun ram AttachPolicyToRole --PolicyType Custom --PolicyName kms-read --RoleName <worker-role-name>
 #
-#   3. Confirm enableWorkerRole configuration (enabled by default for ACK clusters):
+#   3. Confirm enableWorkerRole configuration (must be explicitly enabled for ACK clusters):
 #
-#      # values.yaml (no explicit configuration needed for ACK clusters, defaults to true)
+#      # values.yaml (explicit configuration required for ACK clusters, defaults to false)
 #      command:
 #        enableWorkerRole: true
 #
 #      # Install command:
 #      helm install ack-secret-manager charts/ack-secret-manager -f values.yaml
 #
-# enableWorkerRole Default Values:
-#   ACK Managed Cluster:  true
-#   ACK Dedicated Cluster: true
-#   ACK Edge Cluster:     true
+# enableWorkerRole Default Value: false
+#   ACK Managed Cluster:  set to true
+#   ACK Dedicated Cluster: set to true
+#   ACK Edge Cluster:     set to true
 #   Other Clusters:       false
 #
 # ============================================================================

@@ -24,14 +24,14 @@ ack-secret-manager supports the following 5 authentication methods:
 | RRSA                | Env Vars / SecretStore | Cluster-wide, quick deploy | ⭐⭐⭐⭐   | Low        |
 | AK AssumeRole       | Env Vars / SecretStore | Temporary credentials, permission narrowing | ⭐⭐⭐     | Medium     |
 | AK                  | Env Vars / SecretStore | Test/dev (not recommended for production) | ⭐         | Low        |
-| WorkerRole          | Automatic (ECS metadata) | Simple deployment      | ⭐⭐⭐     | Low        |
+| WorkerRole          | Explicit opt-in (`--enable-worker-role=true`) | Simple deployment      | ⭐⭐⭐     | Low        |
 
 > **Notes**:
 >
 > - **Environment Variables** method: Authentication parameters are injected through Helm values or helm --set, applied at the component level, ExternalSecret doesn't need to specify `secretStoreRef`
 > - **SecretStore** method: Configured through SecretStore/ClusterSecretStore CRD, ExternalSecret references via `secretStoreRef`
 > - **ServiceAccount RRSA** only supports SecretStore method (referenced via `serviceAccountRef`)
-> - **WorkerRole** automatically uses the node ECS's RAM Role, no configuration required, is used automatically when none of the above are configured
+> - **WorkerRole** uses the node ECS's RAM Role; it must be explicitly enabled (`--enable-worker-role=true` / `command.enableWorkerRole=true`). When it is disabled and no other authentication tier is usable, synchronization fails fail-closed (error: "no usable authentication tier")
 
 ## Authentication Priority
 
@@ -55,7 +55,7 @@ Priority 5: WorkerRole (ECS RAM Role)
 | 2 | RRSA | Env Vars / SecretStore | `ramRoleARN` + `oidcProviderARN` configured | Uses component-level OIDC token for temporary credentials |
 | 3 | AK AssumeRole | Env Vars / SecretStore | `accessKey` + `accessKeySecret` + `ramRoleARN` configured (`ramRoleSessionName` is optional) | Uses AK to log in, then AssumeRole for temporary credentials |
 | 4 | Pure AK | Env Vars / SecretStore | Only `accessKey` + `accessKeySecret` configured | Uses static AK/SK directly |
-| 5 (lowest) | WorkerRole | Default | Is used automatically when none of the above are configured | Uses the node ECS instance's RAM Role |
+| 5 (lowest) | WorkerRole | Explicit opt-in | Explicitly enabled via `--enable-worker-role=true` / `command.enableWorkerRole=true`; when disabled and no other usable tier exists, fails fail-closed (error: "no usable authentication tier") | Uses the node ECS instance's RAM Role |
 
 **Important Notes**:
 
@@ -70,7 +70,7 @@ Each `DataSource` in an ExternalSecret determines its authentication path based 
 
 | `secretStoreRef` | Authentication Path | Description |
 | ----------------- | ------------------- | ----------- |
-| Not configured (nil) | Environment variable authentication | Uses the global ENV client registered at component startup, all DataSources share the same credentials |
+| Not configured (nil) | Environment variable authentication | Uses the lazily registered (on first use) global ENV client, all DataSources share the same credentials |
 | Configured | SecretStore authentication | Uses the authentication method configured in SecretStore, environment variables are completely ignored |
 
 > **Example**: Even if the Deployment is configured with RRSA environment variables (`ALICLOUD_ROLE_ARN`) and a SecretStore is configured with AK authentication, as long as the ExternalSecret's `DataSource` references that SecretStore, the SecretStore's AK authentication takes effect and the environment variables are not used.
@@ -206,14 +206,14 @@ Refer to [examples/auth/auth-04-ak-basic.yaml](../examples/auth/auth-04-ak-basic
 
 ### 5.3 command.enableWorkerRole Configuration
 
-`command.enableWorkerRole` controls whether to enable WorkerRole (ECS RAM Role) authentication. The default value depends on the cluster type:
+`command.enableWorkerRole` controls whether to enable WorkerRole (ECS RAM Role) authentication. The default value is `false`. For ACK clusters (managed, dedicated, edge), set it to `true` explicitly to enable node RAM Role authentication:
 
-| Cluster Type        | command.enableWorkerRole |
-| ------------------- | ------------------------ |
-| ACK Managed Cluster | true                     |
-| ACK Dedicated Cluster | true                   |
-| ACK Edge Cluster    | true                     |
-| Other Clusters      | false                    |
+| Cluster Type        | Recommended command.enableWorkerRole |
+| ------------------- | ------------------------------------ |
+| ACK Managed Cluster | true                                 |
+| ACK Dedicated Cluster | true                               |
+| ACK Edge Cluster    | true                                 |
+| Other Clusters      | false                                |
 
 When `enableWorkerRole` is `true`, the component uses the node ECS instance's RAM Role to obtain temporary credentials, no additional authentication configuration needed (the role needs KMS access permissions).
 

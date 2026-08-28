@@ -2,31 +2,24 @@ package serviceaccount
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/controller/secretstore"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
 )
-
-func newTestScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add corev1 to scheme: %v", err)
-	}
-	if err := api.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add api to scheme: %v", err)
-	}
-	return scheme
-}
 
 // kmsStoreSpec returns a SecretStoreSpec whose KMS serviceAccountRef omits the
 // namespace field (defaults to the store's own namespace in the auth chain).
@@ -114,7 +107,7 @@ func TestCheckServiceAccount(t *testing.T) {
 // case where a SecretStore omits the namespace of its serviceAccountRef and the
 // referenced service account changes in the store's own namespace.
 func TestReconcile_OmittedNamespaceMatchesSameNamespaceServiceAccount(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -240,9 +233,8 @@ func TestServiceAccountIsReferenced_OOSProvider(t *testing.T) {
 }
 
 // TestHasRoleARNAnnotation covers the annotation decision function that backs
-// every predicate in SetupWithManager (Create/Update/Delete all gate on it).
-// The predicate closures themselves are defined inline inside SetupWithManager
-// and cannot be exercised without a live manager, so the shared decision
+// every predicate in SetupWithManager (Create/Update/Delete all gate on it);
+// the inline predicate closures need a live manager, so the shared decision
 // function is covered exhaustively instead.
 func TestHasRoleARNAnnotation(t *testing.T) {
 	r := &ServiceAccountReconciler{}
@@ -302,7 +294,7 @@ func TestHasRoleARNAnnotation(t *testing.T) {
 // TestReconcile_OOSProviderStoreTriggered covers the reconcile path for a
 // SecretStore that references a service account via the OOS provider.
 func TestReconcile_OOSProviderStoreTriggered(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-oos", Namespace: "ns1"},
@@ -353,7 +345,7 @@ func TestReconcile_OOSProviderStoreTriggered(t *testing.T) {
 // path: the service account no longer exists, but stores referencing it must
 // still be triggered.
 func TestReconcile_DeletedServiceAccountTriggersStoreReconcile(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -371,7 +363,7 @@ func TestReconcile_DeletedServiceAccountTriggersStoreReconcile(t *testing.T) {
 	}
 	// No ServiceAccount object: it has been deleted.
 	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore).Build()
-	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
 		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "rrsa-sa"},
@@ -400,7 +392,7 @@ func TestReconcile_DeletedServiceAccountTriggersStoreReconcile(t *testing.T) {
 // TestReconcile_DeletedUnreferencedServiceAccountTriggersNothing ensures a
 // deleted service account that no store references does not trigger any store.
 func TestReconcile_DeletedUnreferencedServiceAccountTriggersNothing(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
@@ -422,5 +414,229 @@ func TestReconcile_DeletedUnreferencedServiceAccountTriggersNothing(t *testing.T
 	}
 	if _, ok := updated.Annotations[secretstore.TriggerReconcileAnnotation]; ok {
 		t.Errorf("store-a unexpectedly triggered, annotations = %v", updated.Annotations)
+	}
+}
+
+// TestReconcile_PatchFailureReturnsErrorForRetry verifies that a transient
+// patch failure (e.g. an API server conflict) is returned from Reconcile so
+// controller-runtime requeues the item with exponential backoff instead of
+// silently dropping the trigger.
+func TestReconcile_PatchFailureReturnsErrorForRetry(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("rrsa-sa"),
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rrsa-sa",
+			Namespace: "ns1",
+			Annotations: map[string]string{
+				RoleARNAnnotation: "acs:ram::123:role/test",
+			},
+		},
+	}
+
+	patchErr := fmt.Errorf("simulated transient patch failure (e.g. conflict)")
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, sa).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				return patchErr
+			},
+		}).
+		Build()
+	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "rrsa-sa"},
+	})
+	if err == nil {
+		t.Fatalf("Reconcile() error = nil, want the patch error so the workqueue retries with backoff")
+	}
+	if err != patchErr {
+		t.Errorf("Reconcile() error = %v, want %v", err, patchErr)
+	}
+}
+
+// TestReconcile_PatchFailureOnDeletedStoreSkipsWithoutError verifies that a
+// NotFound patch failure (the store was deleted between List and Patch) does
+// not fail Reconcile: there is nothing left to trigger, so retrying would be
+// an infinite loop against a deleted object.
+func TestReconcile_PatchFailureOnDeletedStoreSkipsWithoutError(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("rrsa-sa"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-store"},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					ServiceAccountRef: &api.ServiceAccountRef{Name: "rrsa-sa", Namespace: "ns1"},
+				},
+			},
+		},
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rrsa-sa",
+			Namespace: "ns1",
+			Annotations: map[string]string{
+				RoleARNAnnotation: "acs:ram::123:role/test",
+			},
+		},
+	}
+
+	// Simulate the stores being deleted between List and Patch: every patch
+	// fails with NotFound.
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, sa).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				return errors.NewNotFound(schema.GroupResource{Group: "alibabacloud.com", Resource: "secretstores"}, obj.GetName())
+			},
+		}).
+		Build()
+	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "rrsa-sa"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v, want nil for a deleted store", err)
+	}
+}
+
+// TestReconcile_ClusterSecretStoreSkippedWhenDisabled verifies the
+// --process-cluster-secret-store=false path: the ClusterSecretStore
+// controller is disabled, so this reconciler must not patch trigger
+// annotations onto ClusterSecretStores (nobody would clear them), while the
+// SecretStore path keeps working.
+func TestReconcile_ClusterSecretStoreSkippedWhenDisabled(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "store-a", Namespace: "ns1"},
+		Spec:       kmsStoreSpec("rrsa-sa"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{Name: "cluster-store"},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					ServiceAccountRef: &api.ServiceAccountRef{Name: "rrsa-sa", Namespace: "ns1"},
+				},
+			},
+		},
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rrsa-sa",
+			Namespace: "ns1",
+			Annotations: map[string]string{
+				RoleARNAnnotation: "acs:ram::123:role/test",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, sa).Build()
+	// ProcessClusterSecretStore left false: the flag is disabled.
+	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard()}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "rrsa-sa"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &api.SecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: "store-a"}, updated); err != nil {
+		t.Fatalf("failed to get store-a: %v", err)
+	}
+	if _, ok := updated.Annotations[secretstore.TriggerReconcileAnnotation]; !ok {
+		t.Errorf("store-a missing trigger annotation, annotations = %v", updated.Annotations)
+	}
+
+	updatedCluster := &api.ClusterSecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "cluster-store"}, updatedCluster); err != nil {
+		t.Fatalf("failed to get cluster-store: %v", err)
+	}
+	if _, ok := updatedCluster.Annotations[secretstore.TriggerReconcileAnnotation]; ok {
+		t.Errorf("cluster-store unexpectedly triggered while ClusterSecretStore processing is disabled, annotations = %v", updatedCluster.Annotations)
+	}
+}
+
+// TestReconcile_SkipsStoreWithPendingTriggerAnnotation verifies the retry-
+// amplification guard: a store that already carries a non-empty trigger
+// annotation has a pending rebuild guaranteed, so the reconciler must not
+// re-patch a fresh value (which would force another full rebuild+fan-out on
+// every whole-loop retry).
+func TestReconcile_SkipsStoreWithPendingTriggerAnnotation(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+
+	store := &api.SecretStore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "store-a", Namespace: "ns1",
+			Annotations: map[string]string{secretstore.TriggerReconcileAnnotation: "pending-value"},
+		},
+		Spec: kmsStoreSpec("rrsa-sa"),
+	}
+	clusterStore := &api.ClusterSecretStore{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:        "cluster-store",
+			Annotations: map[string]string{secretstore.TriggerReconcileAnnotation: "pending-value"},
+		},
+		Spec: api.ClusterSecretStoreSpec{
+			KMS: &api.KMSProvider{
+				KMS: &api.KMSAuth{
+					ServiceAccountRef: &api.ServiceAccountRef{Name: "rrsa-sa", Namespace: "ns1"},
+				},
+			},
+		},
+	}
+	sa := &corev1.ServiceAccount{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "rrsa-sa",
+			Namespace: "ns1",
+			Annotations: map[string]string{
+				RoleARNAnnotation: "acs:ram::123:role/test",
+			},
+		},
+	}
+
+	cl := fake.NewClientBuilder().WithScheme(scheme).WithObjects(store, clusterStore, sa).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, p client.Patch, opts ...client.PatchOption) error {
+				t.Fatalf("Patch must not be called for stores that already carry a pending trigger annotation")
+				return nil
+			},
+		}).
+		Build()
+	r := &ServiceAccountReconciler{Client: cl, Scheme: scheme, Log: logr.Discard(), ProcessClusterSecretStore: true}
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Namespace: "ns1", Name: "rrsa-sa"},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+
+	updated := &api.SecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Namespace: "ns1", Name: "store-a"}, updated); err != nil {
+		t.Fatalf("failed to get store-a: %v", err)
+	}
+	if got := updated.Annotations[secretstore.TriggerReconcileAnnotation]; got != "pending-value" {
+		t.Errorf("store-a trigger annotation = %q, want the untouched pending-value", got)
+	}
+
+	updatedCluster := &api.ClusterSecretStore{}
+	if err := cl.Get(context.Background(), types.NamespacedName{Name: "cluster-store"}, updatedCluster); err != nil {
+		t.Fatalf("failed to get cluster-store: %v", err)
+	}
+	if got := updatedCluster.Annotations[secretstore.TriggerReconcileAnnotation]; got != "pending-value" {
+		t.Errorf("cluster-store trigger annotation = %q, want the untouched pending-value", got)
 	}
 }

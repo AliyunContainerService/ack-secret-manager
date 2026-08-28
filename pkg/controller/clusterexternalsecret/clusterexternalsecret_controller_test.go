@@ -28,6 +28,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -35,21 +36,9 @@ import (
 	ctrlreconcile "sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
-
-// newTestScheme builds a runtime scheme with all types used by the tests.
-func newTestScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add corev1 to scheme: %v", err)
-	}
-	if err := api.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add alibabacloud to scheme: %v", err)
-	}
-	return scheme
-}
 
 // newTestCES builds a ClusterExternalSecret that provisions into the
 // namespaces listed in its conditions.
@@ -99,15 +88,14 @@ func getReadyCondition(t *testing.T, c client.Client, cesName string) *api.Clust
 }
 
 // TestReconcilePartialFailureReadyFalse pins that a partial provisioning
-// failure flips Ready to False with a failure summary, while the successful
+// failure flips Ready to False with a failure summary, while successful
 // namespaces stay in the provisioned ledger.
 func TestReconcilePartialFailureReadyFalse(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a", "ns-b")
 
-	// Make the apply of the ExternalSecret fail for ns-b only, and capture
-	// the apply of the successful namespace so the distributed object
-	// becomes assertable.
+	// Make the apply fail for ns-b only, and capture the successful apply so
+	// the distributed object becomes assertable.
 	applyErr := fmt.Errorf("simulated apply failure")
 	var captured []*api.ExternalSecret
 	c := fake.NewClientBuilder().
@@ -120,8 +108,8 @@ func TestReconcilePartialFailureReadyFalse(t *testing.T) {
 					if es.Namespace == "ns-b" {
 						return applyErr
 					}
-					// The fake client does not need to support server-side
-					// apply: capture the object instead of swallowing it.
+					// The fake client does not support server-side apply: capture
+					// the object instead of swallowing it.
 					captured = append(captured, es.DeepCopy())
 					return nil
 				}
@@ -178,7 +166,7 @@ func TestReconcilePartialFailureReadyFalse(t *testing.T) {
 // TestReconcileAllSuccessReadyTrue pins that a fully successful reconcile
 // reports Ready=True with an empty failure ledger.
 func TestReconcileAllSuccessReadyTrue(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a")
 
 	var captured []appliedExternalSecret
@@ -201,8 +189,8 @@ func TestReconcileAllSuccessReadyTrue(t *testing.T) {
 	if result.RequeueAfter != time.Hour || result.Requeue {
 		t.Fatalf("expected RequeueAfter=1h Requeue=false, got %+v", result)
 	}
-	// The core product of the controller is the distributed ExternalSecret:
-	// it must carry the CES content verbatim.
+	// The core product is the distributed ExternalSecret: it must carry the
+	// CES content verbatim.
 	if len(captured) != 1 {
 		t.Fatalf("expected exactly one applied ExternalSecret, got %d", len(captured))
 	}
@@ -217,11 +205,11 @@ func TestReconcileAllSuccessReadyTrue(t *testing.T) {
 	}
 }
 
-// TestReconcileListFailureKeepsProvisionedLedger pins that a namespace List
-// failure keeps the previously provisioned namespaces intact (the finalizer
-// cleanup path depends on the ledger) and only records the failure.
+// TestReconcileListFailureKeepsProvisionedLedger: a namespace List failure
+// keeps the provisioned ledger intact (finalizer cleanup depends on it) and
+// only records the failure.
 func TestReconcileListFailureKeepsProvisionedLedger(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a")
 	ces.Status.ProvisionedNamespaces = []string{"ns-a"}
 
@@ -269,11 +257,10 @@ func TestReconcileListFailureKeepsProvisionedLedger(t *testing.T) {
 	}
 }
 
-// TestStatusUpdateDebounce pins that an unchanged status does not issue a
-// status Update: two identical successful reconciles must result in exactly
-// one status write.
+// TestStatusUpdateDebounce: an unchanged status does not issue a status
+// Update -- two identical reconciles result in exactly one status write.
 func TestStatusUpdateDebounce(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a")
 
 	statusUpdates := 0
@@ -322,17 +309,101 @@ func TestStatusUpdateDebounce(t *testing.T) {
 	if err := c.Get(context.Background(), types.NamespacedName{Name: "test-ces"}, fresh); err != nil {
 		t.Fatalf("failed to re-read ClusterExternalSecret: %v", err)
 	}
-	r.updateStatusWithFailure(logr.Discard(), fresh, []api.ClusterExternalSecretNamespaceFailure{
+	if err := r.updateStatusWithFailure(logr.Discard(), fresh, fresh.Status.DeepCopy(), []api.ClusterExternalSecretNamespaceFailure{
 		{Namespace: "ns-a", Reason: "simulated"},
-	})
+	}); err != nil {
+		t.Fatalf("unexpected updateStatusWithFailure error: %v", err)
+	}
 	if statusUpdates != 2 {
 		t.Fatalf("expected a status update when the status actually changed, got %d total", statusUpdates)
 	}
 }
 
-// TestSetConditionPreservesTransitionTime pins that the LastTransitionTime is
-// kept when the condition status does not change (this is what makes the
-// DeepEqual debounce work).
+// TestStatusLedgerChangeWrittenBackWithStableReady pins the debounce
+// snapshot timing: when the Ready condition is stable (LastTransitionTime
+// preserved) but the namespace ledgers change between two reconciles, the
+// ledger change must still be written back instead of being swallowed by a
+// snapshot taken after the in-place mutation.
+func TestStatusLedgerChangeWrittenBackWithStableReady(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+	// Round one matches both namespaces.
+	ces := newTestCES("test-ces", "ns-a", "ns-b")
+
+	statusUpdates := 0
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ces, newTestNamespace("ns-a"), newTestNamespace("ns-b")).
+		WithStatusSubresource(&api.ClusterExternalSecret{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, clnt client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*api.ExternalSecret); ok {
+					return nil
+				}
+				return clnt.Patch(ctx, obj, patch, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, clnt client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" {
+					statusUpdates++
+				}
+				return clnt.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := newTestReconciler(c, scheme)
+	req := ctrlreconcile.Request{NamespacedName: types.NamespacedName{Name: "test-ces"}}
+
+	// Round 1 establishes Ready=True plus the two-namespace provisioned
+	// ledger.
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+	if statusUpdates != 1 {
+		t.Fatalf("expected exactly 1 status update after the first reconcile, got %d", statusUpdates)
+	}
+	round1 := getRefreshedCES(t, c, "test-ces")
+	if len(round1.Status.ProvisionedNamespaces) != 2 {
+		t.Fatalf("expected both namespaces in the provisioned ledger, got %v", round1.Status.ProvisionedNamespaces)
+	}
+	condition := getReadyCondition(t, c, "test-ces")
+	if condition == nil || condition.Status != corev1.ConditionTrue {
+		t.Fatalf("expected Ready=True after the first reconcile, got %v", condition)
+	}
+	firstTransition := condition.LastTransitionTime
+
+	// Round 2: the CES selector no longer names ns-b, so the provisioned
+	// ledger must shrink -- while the Ready condition itself stays True
+	// with an unchanged transition time.
+	latest := getRefreshedCES(t, c, "test-ces")
+	latest.Spec.Conditions = []api.ClusterExternalSecretCondition{{Namespaces: []string{"ns-a"}}}
+	if err := c.Update(context.Background(), latest); err != nil {
+		t.Fatalf("failed to narrow the CES selector: %v", err)
+	}
+	if _, err := r.Reconcile(context.Background(), req); err != nil {
+		t.Fatalf("unexpected reconcile error: %v", err)
+	}
+
+	refreshed := getRefreshedCES(t, c, "test-ces")
+	if len(refreshed.Status.ProvisionedNamespaces) != 1 || refreshed.Status.ProvisionedNamespaces[0] != "ns-a" {
+		t.Fatalf("expected the provisioned ledger to shrink to ns-a on the server, got %v", refreshed.Status.ProvisionedNamespaces)
+	}
+	if statusUpdates != 2 {
+		t.Fatalf("expected the ledger-only change to be written back (2 status updates), got %d", statusUpdates)
+	}
+	// The Ready condition must remain stable: no transition in round two.
+	condition = getReadyCondition(t, c, "test-ces")
+	if condition == nil || condition.Status != corev1.ConditionTrue {
+		t.Fatalf("expected Ready=True to be preserved, got %v", condition)
+	}
+	if !condition.LastTransitionTime.Equal(&firstTransition) {
+		t.Fatalf("expected LastTransitionTime to stay unchanged, got %v want %v",
+			condition.LastTransitionTime, firstTransition)
+	}
+}
+
+// TestSetConditionPreservesTransitionTime: LastTransitionTime is kept when
+// the condition status does not change (this makes the DeepEqual debounce
+// work).
 func TestSetConditionPreservesTransitionTime(t *testing.T) {
 	r := &ClusterExternalSecretReconciler{}
 	ces := &api.ClusterExternalSecret{}
@@ -404,7 +475,7 @@ type appliedExternalSecret struct {
 
 // captureExternalSecretApplies returns interceptor funcs that record every
 // ExternalSecret server-side apply instead of forwarding it to the fake
-// client, so the distributed objects become assertable.
+// client.
 func captureExternalSecretApplies(captured *[]appliedExternalSecret) interceptor.Funcs {
 	return interceptor.Funcs{
 		Patch: func(ctx context.Context, clnt client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
@@ -421,9 +492,8 @@ func captureExternalSecretApplies(captured *[]appliedExternalSecret) interceptor
 }
 
 // assertExternalSecretContent pins that an applied ExternalSecret carries
-// exactly what the ClusterExternalSecret describes: the name derived by
-// getExternalSecretName, the propagated metadata, the verbatim spec and a
-// controller ownerReference back to the CES.
+// exactly what the CES describes: the derived name, propagated metadata,
+// verbatim spec and a controller ownerReference back to the CES.
 func assertExternalSecretContent(t *testing.T, es *api.ExternalSecret, ces *api.ClusterExternalSecret, namespace string) {
 	t.Helper()
 
@@ -498,9 +568,8 @@ func getRefreshedCES(t *testing.T, c client.Client, cesName string) *api.Cluster
 }
 
 // TestReconcileAppliesExpectedExternalSecret pins the exact content the
-// controller distributes into matching namespaces: the naming rule
-// (getExternalSecretName), the propagated labels/annotations, the verbatim
-// ExternalSecretSpec, the CES ownerReference and the server-side apply type.
+// controller distributes: naming rule, propagated labels/annotations,
+// verbatim spec, CES ownerReference and the server-side apply type.
 func TestReconcileAppliesExpectedExternalSecret(t *testing.T) {
 	tests := []struct {
 		name               string
@@ -521,7 +590,7 @@ func TestReconcileAppliesExpectedExternalSecret(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme(t)
+			scheme := testutil.NewTestScheme(t)
 			ces := newTestCES("test-ces", "ns-a")
 			ces.Spec.ExternalSecretName = tt.externalSecretName
 			ces.Spec.ExternalSecretMetadata = api.ExternalSecretMetadata{
@@ -564,10 +633,9 @@ func TestReconcileAppliesExpectedExternalSecret(t *testing.T) {
 	}
 }
 
-// TestReconcileResultRequeue pins the Reconcile result contract: the result
-// requeues with the effective rotation interval, a spec-level interval
-// overrides the controller default, and DisablePolling suppresses any
-// scheduled requeue.
+// TestReconcileResultRequeue pins the Reconcile result contract: requeue
+// with the effective rotation interval, spec-level interval overrides the
+// controller default, DisablePolling suppresses the scheduled requeue.
 func TestReconcileResultRequeue(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -599,7 +667,7 @@ func TestReconcileResultRequeue(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme(t)
+			scheme := testutil.NewTestScheme(t)
 			ces := newTestCES("test-ces", "ns-a")
 			ces.Spec.RotationInterval = tt.specInterval
 
@@ -630,11 +698,11 @@ func TestReconcileResultRequeue(t *testing.T) {
 	}
 }
 
-// TestReconcileAddsFinalizer pins that a freshly created ClusterExternalSecret
-// without a finalizer gets one during its first reconcile, and that the
-// provisioning still happens in the same pass.
+// TestReconcileAddsFinalizer: a finalizer-less ClusterExternalSecret gets
+// its finalizer on the first reconcile, and provisioning still happens in
+// the same pass.
 func TestReconcileAddsFinalizer(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a")
 	ces.Finalizers = nil
 
@@ -664,10 +732,10 @@ func TestReconcileAddsFinalizer(t *testing.T) {
 }
 
 // TestReconcileHandleDeletion pins the deletion path: finalization deletes
-// every provisioned ExternalSecret, applies nothing new, and then drops the
-// finalizer so the resource can be garbage collected.
+// every provisioned ExternalSecret, applies nothing new, and drops the
+// finalizer.
 func TestReconcileHandleDeletion(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a")
 	now := metav1.Now()
 	ces.DeletionTimestamp = &now
@@ -717,11 +785,11 @@ func TestReconcileHandleDeletion(t *testing.T) {
 	}
 }
 
-// TestReconcileCleanupOrphanedExternalSecrets pins that ExternalSecrets in
-// namespaces that fell out of the selector are deleted once the namespace set
-// shrinks, while still-matching namespaces keep their objects.
+// TestReconcileCleanupOrphanedExternalSecrets: ExternalSecrets in namespaces
+// that fell out of the selector are deleted once the namespace set shrinks,
+// while still-matching namespaces keep their objects.
 func TestReconcileCleanupOrphanedExternalSecrets(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	// The selector now only matches ns-a, but the ledger still records ns-b.
 	ces := newTestCES("test-ces", "ns-a")
 	ces.Status.ProvisionedNamespaces = []string{"ns-a", "ns-b"}
@@ -763,11 +831,11 @@ func TestReconcileCleanupOrphanedExternalSecrets(t *testing.T) {
 	}
 }
 
-// TestReconcileValidateSecretStoreAccessRevoked pins that a namespace losing
-// access to the referenced ClusterSecretStore is recorded as failed and its
-// previously provisioned ExternalSecret is deleted.
+// TestReconcileValidateSecretStoreAccessRevoked: a namespace losing access
+// to the referenced ClusterSecretStore is recorded as failed and its
+// provisioned ExternalSecret is deleted.
 func TestReconcileValidateSecretStoreAccessRevoked(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	ces := newTestCES("test-ces", "ns-a", "ns-b")
 	ces.Spec.ExternalSecretSpec = api.ExternalSecretSpec{
 		Provider: "kms",
@@ -838,9 +906,9 @@ func TestReconcileValidateSecretStoreAccessRevoked(t *testing.T) {
 
 // TestReconcileNoMatchingNamespaces pins the diagnostic path when selectors
 // match nothing: every existing namespace is recorded with a reason, nothing
-// is provisioned and the resource reports Ready=False.
+// is provisioned and Ready=False.
 func TestReconcileNoMatchingNamespaces(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	// The selector names ns-x, which does not exist, so nothing matches.
 	ces := newTestCES("test-ces", "ns-x")
 
@@ -878,5 +946,74 @@ func TestReconcileNoMatchingNamespaces(t *testing.T) {
 	condition := getReadyCondition(t, c, "test-ces")
 	if condition == nil || condition.Status != corev1.ConditionFalse || !strings.Contains(condition.Message, "ns-a") {
 		t.Fatalf("expected Ready=False mentioning ns-a, got %v", condition)
+	}
+}
+
+// TestReconcileStatusUpdateConflictReturnsErrorForRetry verifies the status
+// subresource update failure path. Like secretstore's updateStatusWithReady
+// (see TestUpdateStatusConflictError), this controller's updateStatusIfNeeded
+// now returns a status-update error instead of swallowing it, so a conflict on
+// the status write propagates out of Reconcile and the workqueue retries with
+// backoff. This test pins that behavior: the status write IS attempted
+// (interceptor hit) AND the failure surfaces as a reconcile error.
+func TestReconcileStatusUpdateConflictReturnsErrorForRetry(t *testing.T) {
+	scheme := testutil.NewTestScheme(t)
+	ces := newTestCES("test-ces", "ns-a")
+
+	statusUpdateAttempts := 0
+	conflictErr := apierrors.NewConflict(
+		schema.GroupResource{Group: "alibabacloud.com", Resource: "clusterexternalsecrets"},
+		"test-ces",
+		fmt.Errorf("simulated conflict"),
+	)
+	c := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(ces, newTestNamespace("ns-a")).
+		WithStatusSubresource(&api.ClusterExternalSecret{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, clnt client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if _, ok := obj.(*api.ExternalSecret); ok {
+					return nil
+				}
+				return clnt.Patch(ctx, obj, patch, opts...)
+			},
+			SubResourceUpdate: func(ctx context.Context, clnt client.Client, subResourceName string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+				if subResourceName == "status" {
+					statusUpdateAttempts++
+					return conflictErr
+				}
+				return clnt.SubResource(subResourceName).Update(ctx, obj, opts...)
+			},
+		}).
+		Build()
+
+	r := newTestReconciler(c, scheme)
+	r.RotationInterval = time.Hour
+	result, err := r.Reconcile(context.Background(), ctrlreconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ces"},
+	})
+
+	// The ready path must have attempted exactly one status write, proving the
+	// injected conflict was actually exercised.
+	if statusUpdateAttempts != 1 {
+		t.Fatalf("expected exactly one status update attempt on the ready path, got %d", statusUpdateAttempts)
+	}
+	// NEW behavior: the conflict is returned so the workqueue retries with
+	// backoff, mirroring the secretstore controller.
+	if err == nil {
+		t.Fatalf("expected the status-update conflict to be returned for retry, got nil error")
+	}
+	if !apierrors.IsConflict(err) {
+		t.Fatalf("expected a conflict error to be returned, got %v", err)
+	}
+	// On the error path polling is still honored via Requeue: the rotation
+	// interval requeue is retained alongside the returned error.
+	if result.RequeueAfter != r.ReconciliationPeriod {
+		t.Fatalf("expected requeue on the reconciliation period after a returned status conflict, got %v", result.RequeueAfter)
+	}
+
+	// The failed write must not have persisted the Ready condition.
+	if cond := getReadyCondition(t, c, "test-ces"); cond != nil {
+		t.Errorf("status write failed, so no Ready condition should be persisted, got %+v", cond)
 	}
 }

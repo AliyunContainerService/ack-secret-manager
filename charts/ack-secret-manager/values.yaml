@@ -13,14 +13,13 @@ crds:
 command:
   reconcilePeriod: 5s
   reconcileCount: 1
-  tokenRotationPeriod: 120s
-  region:
+  region: cn-hangzhou
   kmsEndpoint:
   disablePolling: false
   pollingInterval: 120s
   maxConcurrentKmsSecretPulls: 10
   maxConcurrentOosSecretPulls: 10
-  enableWorkerRole: true
+  enableWorkerRole: false
   cleanupSecretOnFailure: false
   processClusterSecretStore: true
   processClusterExternalSecret: true
@@ -28,12 +27,16 @@ command:
   enableCrossNamespaceAuthRef: false
   aliuid:
   clusterId:
-# watchamespaces:
-# excludeamespaces:
+  # Comma-separated namespace whitelist (cache-level hard limit): only the listed namespaces are watched; events from other namespaces are invisible.
+  # Setting watchNamespaces or excludeNamespaces automatically disables the ClusterSecretStore and ClusterExternalSecret controllers.
+  watchNamespaces:
+  # Comma-separated namespace blacklist (event-level exclusion): ExternalSecret events in the listed namespaces are not processed.
+  # Must not overlap with watchNamespaces; setting either parameter automatically disables the cluster-scoped controllers.
+  excludeNamespaces:
 
+# Additional environment variables injected into the deployment pod;
+# use this to define custom env vars for your deployment.
 env:
-  WATCH_NAMESPACE:
-  OPERATOR_NAME: ack-secret-manager
 
 #envVarsFromSecret:
 #  ACCESS_KEY_ID:
@@ -55,18 +58,18 @@ env:
 #    secretKeyRef: alibaba-credentials
 #    key: oidcproviderarn
 #  ALICLOUD_REMOTE_ROLE_ARN:
-#     secretKeyRef: alibaba-credentials
-#     key: remoterolearn
+#    secretKeyRef: alibaba-credentials
+#    key: remoterolearn
 #  ALICLOUD_REMOTE_ROLE_SESSION_NAME:
-#     secretKeyRef: alibaba-credentials
-#     key: remoterolesessionname
+#    secretKeyRef: alibaba-credentials
+#    key: remoterolesessionname
 
 rbac:
   # Specifies whether RBAC resources should be created
   create: true
 
 rrsa:
-  # Specifies whether using rrsa and enalbe sa token volume projection, default is false
+  # Specifies whether using rrsa and enable sa token volume projection, default is false
   enable: false
 
 serviceAccount:
@@ -82,12 +85,12 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.6.6
+  tag: v0.6.7
   pullPolicy: IfNotPresent
 
 cleanupImage:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager-cleanup
-  tag: v0.4.1
+  tag: v0.5.0
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

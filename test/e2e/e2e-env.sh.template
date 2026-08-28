@@ -1,0 +1,53 @@
+#!/usr/bin/env bash
+# ============================================================================
+# E2E Test Environment Variables
+# ============================================================================
+# Copy this file to e2e-env.sh, fill in the values, then:
+#   source test/e2e/e2e-env.sh
+#   make test-e2e
+# ============================================================================
+
+# --------------------------------------------------------------------------
+# Required: Cluster & Account
+# --------------------------------------------------------------------------
+export ALIBABA_CLOUD_ACCOUNT_ID=""       # Alibaba Cloud main account ID
+export CLUSTER_ID=""                     # ACK cluster ID
+export REGION=""                         # Region ID (e.g. cn-hangzhou, cn-shanghai)
+
+# --------------------------------------------------------------------------
+# Required: KMS
+# --------------------------------------------------------------------------
+export KMS_KEY_ID="key-"                     # KMS symmetric key ID (for creating test credentials)
+export KMS_INSTANCE_ID="kst-"                # KMS software secret instance ID (for dedicated gateway endpoint)
+
+# --------------------------------------------------------------------------
+# Required: OpenAPI Credential (default credential chain)
+# --------------------------------------------------------------------------
+# Option A: AK/SK environment variables
+export ALIBABA_CLOUD_ACCESS_KEY_ID=""
+export ALIBABA_CLOUD_ACCESS_KEY_SECRET=""
+
+# Option B: OIDC environment variables (mutually exclusive with Option A)
+# export ALICLOUD_ROLE_ARN=""
+# export ALICLOUD_OIDC_PROVIDER_ARN=""
+# export ALICLOUD_OIDC_TOKEN_FILE=""
+
+# --------------------------------------------------------------------------
+# Optional: kubeconfig
+# --------------------------------------------------------------------------
+# export KUBECONFIG=""                   # Defaults to ~/.kube/config, then InClusterConfig
+
+# --------------------------------------------------------------------------
+# Optional: Cross-account testing
+# --------------------------------------------------------------------------
+# All three must be set for cross-account tests to run; otherwise skipped.
+# export CROSS_ACCOUNT_ID=""
+# export CROSS_ACCOUNT_ACCESS_KEY_ID=""
+# export CROSS_ACCOUNT_ACCESS_KEY_SECRET=""
+# export CROSS_ACCOUNT_KMS_KEY_ID="key-"         # Required in true cross-account mode
+# export CROSS_ACCOUNT_KMS_INSTANCE_ID="kst-"    # Required in true cross-account mode
+
+# --------------------------------------------------------------------------
+# Optional: Credential chain isolation
+# --------------------------------------------------------------------------
+# export ALIBABA_CLOUD_CLI_PROFILE_DISABLED=true  # Disable aliyun CLI profile (~/.aliyun/config.json)

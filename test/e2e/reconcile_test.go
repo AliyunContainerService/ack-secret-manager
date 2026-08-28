@@ -12,7 +12,6 @@ import (
 	k8serrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
@@ -120,7 +119,9 @@ var _ = Describe("Reconcile E2E", func() {
 				}, createdExternalSecret)
 
 				if err != nil {
-					return false
+					// NotFound means the ES disappeared (real failure);
+					// transient API errors are inconclusive, keep polling.
+					return k8serrors.IsNotFound(err)
 				}
 				if len(createdExternalSecret.Status.DataSyncResults) == 0 {
 					return false
@@ -159,14 +160,9 @@ var _ = Describe("Reconcile E2E", func() {
 			// Eventually, the ExternalSecret should reconcile and sync successfully now that SecretStore exists
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
 
-			// Register cleanup for cluster-scoped resources
-			DeferCleanup(func() {
-				// Handle complete cleanup to avoid race conditions with AfterEach
-				Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
-			})
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -263,26 +259,20 @@ var _ = Describe("Reconcile E2E", func() {
 					return "secret should be updated to the v2 value after remote credential change"
 				})
 
-			// Register cleanup for cluster-scoped resources
-			DeferCleanup(func() {
-				// Handle complete cleanup to avoid race conditions with AfterEach
-				Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
-			})
-
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
-	Context("ClusterExternalSecret creates ExternalSecrets in new namespaces", func() {
-		It("Should create ExternalSecrets in newly created namespaces that match conditions", func() {
-			// Create ClusterSecretStore
-			clusterSecretStore := &api.ClusterSecretStore{
+	Context("ExternalSecret periodic polling refreshes SynchronizationTime", func() {
+		It("Should refresh SynchronizationTime when a periodic sync round writes new data", func() {
+			secretStore := &api.SecretStore{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-cluster-store" + getRandString(),
+					Name:      "test-polling-refresh-store",
+					Namespace: testNamespace.Name,
 				},
-				Spec: api.ClusterSecretStoreSpec{
+				Spec: api.SecretStoreSpec{
 					KMS: &api.KMSProvider{
 						KMS: &api.KMSAuth{
 							RAMRoleARN:      RAMRoleArnForRRSA,
@@ -292,141 +282,90 @@ var _ = Describe("Reconcile E2E", func() {
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, clusterSecretStore)).To(Succeed())
-			// Register cleanup for cluster-scoped resources
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+
+			// Dedicated KMS secret so staging a new version never touches the
+			// shared CommonKMSSecretName used by other specs.
+			Expect(GlobalResourceManager).NotTo(BeNil())
+			dedicatedKMSSecretName, err := GlobalResourceManager.CreateKMSSecretForCredentialUpdate(ctx)
+			Expect(err).NotTo(HaveOccurred())
 			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
+				Expect(GlobalResourceManager.DeleteKMSSecret(dedicatedKMSSecretName)).To(Succeed())
 			})
 
-			// Wait for ClusterSecretStore to be ready
-			var lastClusterStoreError string
-			Eventually(func() bool {
-				createdStore := &api.ClusterSecretStore{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: clusterSecretStore.Name,
-				}, createdStore)
-				if err != nil {
-					lastClusterStoreError = fmt.Sprintf("Error getting ClusterSecretStore: %v", err)
-					return false
-				}
+			// Wait for SecretStore to be ready
+			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
 
-				if len(createdStore.Status.Conditions) == 0 {
-					lastClusterStoreError = "ClusterSecretStore has no status conditions"
-					return false
-				}
-
-				for _, condition := range createdStore.Status.Conditions {
-					if condition.Type != api.SecretStoreReady || condition.Status != corev1.ConditionTrue {
-						lastClusterStoreError = fmt.Sprintf("SecretStoreReady condition type is %s, expected Ready, status is %s, expected True, reason: %s, message: %s", condition.Type, string(condition.Status), condition.Reason, condition.Message)
-						return false
-					}
-				}
-
-				return true
-			}).WithTimeout(time.Minute*2).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastClusterStoreError != "" {
-						return fmt.Sprintf("ClusterSecretStore should eventually become ready, but: %s", lastClusterStoreError)
-					}
-					return "ClusterSecretStore should eventually become ready"
-				})
-
-			// Create ClusterExternalSecret with namespace selector
-			clusterExternalSecret := &api.ClusterExternalSecret{
+			// Short rotation so a periodic poll fires well inside the assertion window.
+			externalSecret := &api.ExternalSecret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-cluster-externalsecret" + getRandString(),
+					Name:      "test-polling-refresh-externalsecret",
+					Namespace: testNamespace.Name,
 				},
-				Spec: api.ClusterExternalSecretSpec{
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
 					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
-					NamespaceSelectors: []*metav1.LabelSelector{
+					Data: []api.DataSource{
 						{
-							MatchLabels: map[string]string{
-								"environment": "test",
-							},
-						},
-					},
-					ExternalSecretSpec: api.ExternalSecretSpec{
-						Provider: "kms",
-						Data: []api.DataSource{
-							{
-								Key:       CommonKMSSecretName,
-								Name:      "cluster-secret-key",
-								VersionId: "v1",
-								SecretStoreRef: &api.SecretStoreRef{
-									Name: clusterSecretStore.Name,
-									Kind: ResourceClusterSecretStore,
-								},
+							// No VersionId: the periodic poll fetches the latest
+							// version, so the staged remote value becomes observable.
+							Key:  dedicatedKMSSecretName,
+							Name: "test-secret-key",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
 							},
 						},
 					},
 				},
 			}
 
-			Expect(k8sClient.Create(ctx, clusterExternalSecret)).To(Succeed())
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
-			// Create a new namespace that matches the label selector
-			newTestNamespace := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "new-test-namespace-" + getRandString(),
-					Labels: map[string]string{
-						"environment": "test",
-					},
-				},
-			}
+			By("waiting for the first successful sync (non-zero SynchronizationTime)")
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+			baseline := recordExternalSecretSyncBaseline(ctx, externalSecret.Namespace, externalSecret.Name)
 
-			Expect(k8sClient.Create(ctx, newTestNamespace)).To(Succeed())
+			By("staging a new remote version that only a fresh periodic sync can observe")
+			// The changed data makes the next poll round actually write the Secret,
+			// which forces the status write and refreshes SynchronizationTime
+			// (unchanged-data polls are debounced by design and keep the old stamp).
+			Expect(GlobalResourceManager.PutSecretValueForKMSSecret(ctx, dedicatedKMSSecretName)).To(Succeed())
 
-			// Register cleanup for cluster-scoped resources
-			DeferCleanup(func() {
-				// 1. Delete the ClusterExternalSecret to trigger controller cleanup
-				Expect(k8sClient.Delete(ctx, clusterExternalSecret)).To(Succeed())
-
-				// 2. Wait for all ExternalSecrets to be cleaned up in both namespaces
-				Eventually(func() bool {
-					externalSecretList := &api.ExternalSecretList{}
-					err := k8sClient.List(ctx, externalSecretList, client.InNamespace(newTestNamespace.Name))
-					if err != nil {
-						return false
-					}
-
-					return len(externalSecretList.Items) == 0
-				}, time.Second*30, time.Second*2).Should(BeTrue(), "All ExternalSecrets should be cleaned up before namespace deletion")
-
-				// 3. Now safely delete both namespaces
-				Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
-				Expect(k8sClient.Delete(ctx, newTestNamespace)).To(Succeed())
-
-			})
-
-			// Eventually, an ExternalSecret should be created in the new namespace
-			var lastExternalSecretError string
+			By("asserting SynchronizationTime advances within a few rotation periods")
 			Eventually(func() bool {
-				externalSecret := &api.ExternalSecret{}
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      clusterExternalSecret.Name,
-					Namespace: newTestNamespace.Name,
-				}, externalSecret)
-
-				// Return true if the ExternalSecret exists, false otherwise
-				if err != nil {
-					lastExternalSecretError = fmt.Sprintf("ExternalSecret was not created in new namespace %s: %v", newTestNamespace.Name, err)
+				latest := &api.ExternalSecret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: externalSecret.Namespace,
+					Name:      externalSecret.Name,
+				}, latest); err != nil {
 					return false
 				}
-				lastExternalSecretError = ""
-				return true
-			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastExternalSecretError != "" {
-						return fmt.Sprintf("ExternalSecret should be created in new namespace that matches conditions, but: %s", lastExternalSecretError)
-					}
-					return "ExternalSecret should be created in new namespace that matches conditions"
-				})
+				return latestSyncTimeOf(latest).Time.After(baseline.Time)
+			}).WithTimeout(time.Second*90).WithPolling(time.Second*2).Should(BeTrue(),
+				"SynchronizationTime of ExternalSecret %s/%s should advance after a periodic sync round writes new data",
+				externalSecret.Namespace, externalSecret.Name)
 
-			// Verify the child ExternalSecret actually syncs successfully in the new namespace,
-			// not merely that it exists
-			validateExternalSecretSucceededAndSecretCreated(ctx, newTestNamespace.Name, clusterExternalSecret.Name, time.Second*60)
+			By("validating the synced Secret holds the staged v2 value written by the poll round")
+			Eventually(func() string {
+				currentSecret := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: externalSecret.Namespace,
+					Name:      externalSecret.Name,
+				}, currentSecret); err != nil {
+					return ""
+				}
+				return string(currentSecret.Data["test-secret-key"])
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*2).Should(Equal(`{"key1":"value1","key2":"value2"}`),
+				"synced Secret should hold the staged remote value after the periodic sync round")
+
+			// Clean up - delete resources explicitly before namespace cleanup
+			// This prevents controller from trying to create resources in terminating namespace
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
+
 
 	Context("SecretStore reconciles when credentials secret is updated", func() {
 		It("Should reconcile when accessKeyId/accessKeySecret in referenced secret is updated", func() {
@@ -588,12 +527,16 @@ var _ = Describe("Reconcile E2E", func() {
 
 			// Register cleanup for cluster-scoped resources
 			DeferCleanup(func() {
-				// Handle complete cleanup to avoid race conditions with AfterEach
-				Expect(k8sClient.Delete(ctx, testNamespace)).To(Succeed())
+				// The AfterEach safety net (deleteTestNamespace) runs BEFORE this
+				// It-level DeferCleanup in Ginkgo v2, so the namespace is usually
+				// already gone here — tolerate NotFound instead of failing.
+				if err := k8sClient.Delete(ctx, testNamespace); err != nil && !k8serrors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
 			})
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 	})
 
@@ -612,6 +555,7 @@ var _ = Describe("Reconcile E2E", func() {
 								Name:      ServiceaccountNameForSAAuth,
 								Namespace: ServiceaccountNamespaceForSAAuth.Name,
 							},
+							OIDCProviderARN: OIDCProviderARN,
 						},
 					},
 				},
@@ -741,8 +685,10 @@ var _ = Describe("Reconcile E2E", func() {
 				}, createdExternalSecret)
 
 				if err != nil {
+					// NotFound means the ES disappeared (real failure);
+					// transient API errors are inconclusive, keep polling.
 					lastInitialSAFailError = fmt.Sprintf("Failed to get ExternalSecret: %v", err)
-					return false
+					return k8serrors.IsNotFound(err)
 				}
 
 				if len(createdExternalSecret.Status.DataSyncResults) == 0 {
@@ -791,357 +737,510 @@ var _ = Describe("Reconcile E2E", func() {
 			// namespace, so it must be deleted explicitly together with the ExternalSecret
 			// to avoid leaking into other specs. The testNamespace created by BeforeEach is
 			// not used by this Context and is cleaned up by the Describe-level AfterEach.
-			CleanupExternalSecret(ctx, externalSecret)
+			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 			Expect(k8sClient.Delete(ctx, secretStore)).To(Succeed())
 		})
 	})
 
-	// Covers the ClusterExternalSecret cleanup contract implemented by
-	// handleDeletion (deleting the CES reclaims all child ExternalSecrets) and
-	// cleanupOrphanedExternalSecrets (a namespace that stops matching has its
-	// orphaned child ExternalSecret deleted) in clusterexternalsecret_controller.go.
+	// Covers the rewritten Secret/ServiceAccount controllers' ClusterSecretStore
+	// reference scan (secret_controller.go / serviceaccount_controller.go): a
+	// credential Secret or ServiceAccount change must patch the trigger
+	// annotation onto every referencing ClusterSecretStore so its backend
+	// client is rebuilt and referencing ExternalSecrets recover -- the exact
+	// cluster-scoped counterpart of the two SecretStore Contexts above.
 	//
-	// Every spec below uses a randomly valued dedicated label so the CES only
-	// matches the namespaces created inside the spec itself (the selector is
-	// cluster-wide and must not collide with other specs' namespaces).
-	Context("ClusterExternalSecret cleanup contract", func() {
-		It("Should delete all child ExternalSecrets when the ClusterExternalSecret is deleted", func() {
-			labelKey := "e2e-ces-cleanup-contract"
-			labelValue := getRandString()
+	// Design principle: every ExternalSecret pins rotationInterval to 30m
+	// (storeWatchLongInterval), so a recovery observed inside the short
+	// assertion window can only come from the Secret/SA watch -> trigger
+	// annotation -> client rebuild chain, never from the rotation poll.
+	Context("Secret and ServiceAccount watches rebuild ClusterSecretStore clients", func() {
+		It("Should recover a ClusterSecretStore-backed ExternalSecret when the referenced AK credential Secret is fixed", func() {
+			By("creating an AK Secret with invalid credentials")
+			akSecret := createAKSecret(ctx, testNamespace.Name, "css-cred-update-aksk-"+getRandString(),
+				"InvalidAccessKeyId", "InvalidAccessKeySecret")
 
-			By("creating two namespaces that match the ClusterExternalSecret selector")
-			cesNamespace1 := &corev1.Namespace{
+			By("creating a ClusterSecretStore that references the AK Secret")
+			// ClusterSecretStore is cluster-scoped, so both SecretRefs must
+			// carry an explicit namespace (validateClusterSecretStoreSpec).
+			css := &api.ClusterSecretStore{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-reconcile-cleanup1-" + getRandString(),
-					Labels: map[string]string{labelKey: labelValue},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cesNamespace1)).To(Succeed())
-			cesNamespace2 := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-reconcile-cleanup2-" + getRandString(),
-					Labels: map[string]string{labelKey: labelValue},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cesNamespace2)).To(Succeed())
-			DeferCleanup(func() {
-				// DeferCleanup runs LIFO, so this fires AFTER the CES cleanup
-				// registered below has reclaimed the child ExternalSecrets.
-				_ = k8sClient.Delete(ctx, cesNamespace1)
-				_ = k8sClient.Delete(ctx, cesNamespace2)
-			})
-
-			By("creating a ClusterExternalSecret that matches both namespaces")
-			clusterExternalSecret := &api.ClusterExternalSecret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-cleanup-delete-ces-" + getRandString(),
-				},
-				Spec: api.ClusterExternalSecretSpec{
-					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
-					ExternalSecretSpec: api.ExternalSecretSpec{
-						Provider: "kms",
-						Data: []api.DataSource{
-							{
-								Key:       CommonKMSSecretName,
-								Name:      "test-secret-key",
-								VersionId: "v1",
-							},
-						},
-					},
-					Conditions: []api.ClusterExternalSecretCondition{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{labelKey: labelValue},
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, clusterExternalSecret)).To(Succeed())
-			DeferCleanup(func() {
-				// Idempotent: the spec body already deletes the CES on the happy path.
-				if err := k8sClient.Delete(ctx, clusterExternalSecret); err != nil && !k8serrors.IsNotFound(err) {
-					GinkgoWriter.Printf("WARNING: failed to delete ClusterExternalSecret %s: %v\n", clusterExternalSecret.Name, err)
-					return
-				}
-				// Wait for all child ExternalSecrets to be reclaimed before the
-				// namespaces above are deleted.
-				Eventually(func() bool {
-					es1 := &api.ExternalSecret{}
-					err1 := k8sClient.Get(ctx, types.NamespacedName{
-						Name: clusterExternalSecret.Name, Namespace: cesNamespace1.Name,
-					}, es1)
-					es2 := &api.ExternalSecret{}
-					err2 := k8sClient.Get(ctx, types.NamespacedName{
-						Name: clusterExternalSecret.Name, Namespace: cesNamespace2.Name,
-					}, es2)
-					return k8serrors.IsNotFound(err1) && k8serrors.IsNotFound(err2)
-				}, time.Second*60, time.Second*2).Should(BeTrue(), "All child ExternalSecrets should be cleaned up before namespace deletion")
-			})
-
-			By("waiting for child ExternalSecrets to sync successfully in both namespaces")
-			validateExternalSecretSucceededAndSecretCreated(ctx, cesNamespace1.Name, clusterExternalSecret.Name, time.Second*60)
-			validateExternalSecretSucceededAndSecretCreated(ctx, cesNamespace2.Name, clusterExternalSecret.Name, time.Second*60)
-
-			By("deleting the ClusterExternalSecret")
-			Expect(k8sClient.Delete(ctx, clusterExternalSecret)).To(Succeed())
-
-			By("waiting for the ClusterExternalSecret itself to disappear (finalizer removed)")
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{Name: clusterExternalSecret.Name}, &api.ClusterExternalSecret{})
-				return k8serrors.IsNotFound(err)
-			}).WithTimeout(time.Second*60).WithPolling(time.Second*2).Should(BeTrue(),
-				"ClusterExternalSecret should be fully deleted after handleDeletion removes the finalizer")
-
-			By("waiting for all child ExternalSecrets to be reclaimed by handleDeletion")
-			Eventually(func() bool {
-				es1 := &api.ExternalSecret{}
-				err1 := k8sClient.Get(ctx, types.NamespacedName{
-					Name: clusterExternalSecret.Name, Namespace: cesNamespace1.Name,
-				}, es1)
-				es2 := &api.ExternalSecret{}
-				err2 := k8sClient.Get(ctx, types.NamespacedName{
-					Name: clusterExternalSecret.Name, Namespace: cesNamespace2.Name,
-				}, es2)
-				return k8serrors.IsNotFound(err1) && k8serrors.IsNotFound(err2)
-			}).WithTimeout(time.Second*60).WithPolling(time.Second*2).Should(BeTrue(),
-				"all child ExternalSecrets should be deleted when the ClusterExternalSecret is deleted")
-		})
-
-		It("Should delete the orphaned child ExternalSecret when a namespace no longer matches", func() {
-			labelKey := "e2e-ces-cleanup-contract"
-			labelValue := getRandString()
-
-			By("creating two namespaces that match the ClusterExternalSecret selector")
-			cesNamespace1 := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-reconcile-cleanup1-" + getRandString(),
-					Labels: map[string]string{labelKey: labelValue},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cesNamespace1)).To(Succeed())
-			cesNamespace2 := &corev1.Namespace{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:   "test-reconcile-cleanup2-" + getRandString(),
-					Labels: map[string]string{labelKey: labelValue},
-				},
-			}
-			Expect(k8sClient.Create(ctx, cesNamespace2)).To(Succeed())
-			DeferCleanup(func() {
-				// DeferCleanup runs LIFO, so this fires AFTER the CES cleanup
-				// registered below has reclaimed the remaining child ExternalSecret.
-				_ = k8sClient.Delete(ctx, cesNamespace1)
-				_ = k8sClient.Delete(ctx, cesNamespace2)
-			})
-
-			By("creating a ClusterExternalSecret that matches both namespaces")
-			clusterExternalSecret := &api.ClusterExternalSecret{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-cleanup-orphan-ces-" + getRandString(),
-				},
-				Spec: api.ClusterExternalSecretSpec{
-					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
-					ExternalSecretSpec: api.ExternalSecretSpec{
-						Provider: "kms",
-						Data: []api.DataSource{
-							{
-								Key:       CommonKMSSecretName,
-								Name:      "test-secret-key",
-								VersionId: "v1",
-							},
-						},
-					},
-					Conditions: []api.ClusterExternalSecretCondition{
-						{
-							NamespaceSelector: &metav1.LabelSelector{
-								MatchLabels: map[string]string{labelKey: labelValue},
-							},
-						},
-					},
-				},
-			}
-			Expect(k8sClient.Create(ctx, clusterExternalSecret)).To(Succeed())
-			DeferCleanup(func() {
-				// Idempotent CES deletion + wait for the surviving child
-				// ExternalSecret to be reclaimed before namespace deletion.
-				if err := k8sClient.Delete(ctx, clusterExternalSecret); err != nil && !k8serrors.IsNotFound(err) {
-					GinkgoWriter.Printf("WARNING: failed to delete ClusterExternalSecret %s: %v\n", clusterExternalSecret.Name, err)
-					return
-				}
-				Eventually(func() bool {
-					es1 := &api.ExternalSecret{}
-					err1 := k8sClient.Get(ctx, types.NamespacedName{
-						Name: clusterExternalSecret.Name, Namespace: cesNamespace1.Name,
-					}, es1)
-					es2 := &api.ExternalSecret{}
-					err2 := k8sClient.Get(ctx, types.NamespacedName{
-						Name: clusterExternalSecret.Name, Namespace: cesNamespace2.Name,
-					}, es2)
-					return k8serrors.IsNotFound(err1) && k8serrors.IsNotFound(err2)
-				}, time.Second*60, time.Second*2).Should(BeTrue(), "All child ExternalSecrets should be cleaned up before namespace deletion")
-			})
-
-			By("waiting for child ExternalSecrets to sync successfully in both namespaces")
-			validateExternalSecretSucceededAndSecretCreated(ctx, cesNamespace1.Name, clusterExternalSecret.Name, time.Second*60)
-			validateExternalSecretSucceededAndSecretCreated(ctx, cesNamespace2.Name, clusterExternalSecret.Name, time.Second*60)
-
-			By("removing the matching label from the first namespace")
-			Eventually(func() error {
-				ns := &corev1.Namespace{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: cesNamespace1.Name}, ns); err != nil {
-					return err
-				}
-				delete(ns.Labels, labelKey)
-				return k8sClient.Update(ctx, ns)
-			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(Succeed(),
-				"should remove the matching label from namespace %s", cesNamespace1.Name)
-
-			By("waiting for the orphaned child ExternalSecret to be deleted")
-			// cleanupOrphanedExternalSecrets runs on the CES's next periodic
-			// reconcile (driven by rotationInterval), so allow a generous window.
-			Eventually(func() bool {
-				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name: clusterExternalSecret.Name, Namespace: cesNamespace1.Name,
-				}, &api.ExternalSecret{})
-				return k8serrors.IsNotFound(err)
-			}).WithTimeout(time.Second*120).WithPolling(time.Second*5).Should(BeTrue(),
-				"orphaned child ExternalSecret should be deleted after the namespace stops matching")
-
-			By("verifying the child ExternalSecret in the still-matching namespace is preserved")
-			Expect(k8sClient.Get(ctx, types.NamespacedName{
-				Name: clusterExternalSecret.Name, Namespace: cesNamespace2.Name,
-			}, &api.ExternalSecret{})).To(Succeed(),
-				"child ExternalSecret in the still-matching namespace %s must not be deleted", cesNamespace2.Name)
-		})
-	})
-
-	// Covers the fail-closed namespace matching contract of
-	// IsNamespaceAllowedForClusterExternalSecret (pkg/utils/util.go): when
-	// namespaceSelectors are configured but match no namespace, the CES must
-	// NOT provision a child ExternalSecret anywhere (fail-closed), and its
-	// status must surface the non-provisioning via FailedNamespaces and
-	// Ready=False (handleNoMatchingNamespaces in clusterexternalsecret_controller.go).
-	Context("ClusterExternalSecret with selectors matching no namespace", func() {
-		It("Should not create child ExternalSecrets in non-matching namespaces and report Ready=False", func() {
-			// Create ClusterSecretStore so the negative assertion is not
-			// confounded by store-resolution failures (mirrors the positive
-			// CES spec above).
-			clusterSecretStore := &api.ClusterSecretStore{
-				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-failclosed-store-" + getRandString(),
+					Name: "test-css-cred-update-" + getRandString(),
 				},
 				Spec: api.ClusterSecretStoreSpec{
 					KMS: &api.KMSProvider{
 						KMS: &api.KMSAuth{
-							RAMRoleARN:      RAMRoleArnForRRSA,
+							AccessKey: &api.SecretRef{
+								Name:      akSecret.Name,
+								Namespace: testNamespace.Name,
+								Key:       "accessKeyId",
+							},
+							AccessKeySecret: &api.SecretRef{
+								Name:      akSecret.Name,
+								Namespace: testNamespace.Name,
+								Key:       "accessKeySecret",
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, css)).To(Succeed())
+			// Registered FIRST, runs LAST (LIFO): the cluster-scoped CSS is
+			// never cascade-deleted with the namespace, so it must be removed
+			// explicitly -- but only after the ExternalSecret is gone.
+			DeferCleanup(func() {
+				if err := k8sClient.Delete(ctx, css); err != nil && !k8serrors.IsNotFound(err) {
+					GinkgoWriter.Printf("WARNING: failed to delete ClusterSecretStore %s: %v\n", css.Name, err)
+				}
+			})
+			// An invalid AK does not fail client creation itself, so the CSS
+			// still becomes Ready (mirrors the SecretStore variant above).
+			waitForClusterSecretStoreReady(ctx, css.Name)
+
+			// ClientGeneration baseline recorded BEFORE the credential fix: the
+			// recovery chain (Secret watch -> trigger annotation -> client
+			// rebuild) must visibly bump it.
+			genBefore := recordClusterSecretStoreClientGeneration(ctx, css.Name)
+
+			By("creating an ExternalSecret with a 30m rotationInterval referencing the CSS")
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-css-cred-update-es-" + getRandString(),
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: storeWatchLongInterval},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "test-secret-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: css.Name,
+								Kind: ResourceClusterSecretStore,
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("waiting for the ExternalSecret to fail because of the invalid credentials")
+			expectExternalSecretAllResultsFailed(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+
+			By("updating the AK Secret with valid credentials")
+			Eventually(func() error {
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: akSecret.Name, Namespace: akSecret.Namespace,
+				}, akSecret); err != nil {
+					return err
+				}
+				akSecret.Data["accessKeyId"] = []byte(RAMUserAccessKeyID)
+				akSecret.Data["accessKeySecret"] = []byte(RAMUserAccessKeySecret)
+				return k8sClient.Update(ctx, akSecret)
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(Succeed(),
+				"should update the AK Secret with valid credentials")
+
+			By("observing the ExternalSecret recover and the target Secret appear")
+			// The 30m rotation rules out the poll: the recovery inside this
+			// window can only come from the Secret watch -> CSS trigger
+			// annotation -> client rebuild -> ES reverse watch chain.
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+
+			By("observing the CSS controller bump Status.ClientGeneration for the rebuilt client")
+			expectClusterSecretStoreClientGenerationAdvanced(ctx, css.Name, genBefore,
+				"the AK credential Secret fix")
+		})
+
+		It("Should recover a ClusterSecretStore-backed ExternalSecret when the referenced ServiceAccount gains the RRSA annotation", func() {
+			saName := "css-sa-update-sa-" + getRandString()
+
+			By("creating a RAM role trusting the ServiceAccount")
+			roleArn, roleName, err := GlobalResourceManager.CreateRamRoleForServiceAccount(ctx, testNamespace.Name, saName)
+			Expect(err).NotTo(HaveOccurred(), "failed to create RAM role for ServiceAccount %s/%s", testNamespace.Name, saName)
+			DeferCleanup(func() {
+				if err := GlobalResourceManager.DeleteRamRole(roleName); err != nil {
+					GinkgoWriter.Printf("WARNING: failed to delete RAM role %s: %v\n", roleName, err)
+				}
+			})
+
+			By("creating the ServiceAccount WITHOUT the role-arn annotation")
+			serviceAccount := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      saName,
+					Namespace: testNamespace.Name,
+				},
+			}
+			Expect(k8sClient.Create(ctx, serviceAccount)).To(Succeed())
+
+			By("creating a ClusterSecretStore that references the annotation-less ServiceAccount")
+			css := &api.ClusterSecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-css-sa-update-" + getRandString(),
+				},
+				Spec: api.ClusterSecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							ServiceAccountRef: &api.ServiceAccountRef{
+								Name:      saName,
+								Namespace: testNamespace.Name,
+							},
 							OIDCProviderARN: OIDCProviderARN,
 						},
 					},
 				},
 			}
-
-			Expect(k8sClient.Create(ctx, clusterSecretStore)).To(Succeed())
-			// Register cleanup for cluster-scoped resources
+			Expect(k8sClient.Create(ctx, css)).To(Succeed())
+			// Registered FIRST, runs LAST (LIFO): cluster-scoped CSS cleanup
+			// after the ExternalSecret is reclaimed.
 			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
+				if err := k8sClient.Delete(ctx, css); err != nil && !k8serrors.IsNotFound(err) {
+					GinkgoWriter.Printf("WARNING: failed to delete ClusterSecretStore %s: %v\n", css.Name, err)
+				}
 			})
 
-			// Create a ClusterExternalSecret whose namespaceSelectors point at
-			// a label that no namespace carries, so nothing may match.
-			clusterExternalSecret := &api.ClusterExternalSecret{
+			By("creating an ExternalSecret with a 30m rotationInterval referencing the CSS")
+			externalSecret := &api.ExternalSecret{
 				ObjectMeta: metav1.ObjectMeta{
-					Name: "test-failclosed-ces-" + getRandString(),
+					Name:      "test-css-sa-update-es-" + getRandString(),
+					Namespace: testNamespace.Name,
 				},
-				Spec: api.ClusterExternalSecretSpec{
-					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
-					NamespaceSelectors: []*metav1.LabelSelector{
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: storeWatchLongInterval},
+					Data: []api.DataSource{
 						{
-							MatchLabels: map[string]string{
-								"env": "nonexistent-label-xyz",
-							},
-						},
-					},
-					ExternalSecretSpec: api.ExternalSecretSpec{
-						Provider: "kms",
-						Data: []api.DataSource{
-							{
-								Key:       CommonKMSSecretName,
-								Name:      "cluster-secret-key",
-								VersionId: "v1",
-								SecretStoreRef: &api.SecretStoreRef{
-									Name: clusterSecretStore.Name,
-									Kind: ResourceClusterSecretStore,
-								},
+							Key:       CommonKMSSecretName,
+							Name:      "test-secret-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: css.Name,
+								Kind: ResourceClusterSecretStore,
 							},
 						},
 					},
 				},
 			}
-
-			Expect(k8sClient.Create(ctx, clusterExternalSecret)).To(Succeed())
-			// Register cleanup for cluster-scoped resources
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 			DeferCleanup(func() {
-				// Idempotent: the spec body already deletes the CES on the happy path.
-				if err := k8sClient.Delete(ctx, clusterExternalSecret); err != nil && !k8serrors.IsNotFound(err) {
-					GinkgoWriter.Printf("WARNING: failed to delete ClusterExternalSecret %s: %v\n", clusterExternalSecret.Name, err)
-				}
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 			})
 
-			// Wait until the CES reconciles into a non-provisioning state:
-			// Ready=False with FailedNamespaces populated. Waiting for the
-			// status first guarantees the negative assertion below cannot pass
-			// merely because the controller has not run yet.
-			var lastFailClosedError string
-			Eventually(func() bool {
-				createdCES := &api.ClusterExternalSecret{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: clusterExternalSecret.Name}, createdCES); err != nil {
-					lastFailClosedError = fmt.Sprintf("Failed to get ClusterExternalSecret: %v", err)
-					return false
-				}
-				if len(createdCES.Status.ProvisionedNamespaces) != 0 {
-					lastFailClosedError = fmt.Sprintf("ProvisionedNamespaces should be empty, got %v", createdCES.Status.ProvisionedNamespaces)
-					return false
-				}
-				if len(createdCES.Status.FailedNamespaces) == 0 {
-					lastFailClosedError = "FailedNamespaces is empty, waiting for the controller to record non-matching namespaces"
-					return false
-				}
-				for _, condition := range createdCES.Status.Conditions {
-					if condition.Type == api.ClusterExternalSecretReady && condition.Status == corev1.ConditionFalse {
-						lastFailClosedError = ""
-						return true
-					}
-				}
-				lastFailClosedError = "expected a Ready=False condition on the ClusterExternalSecret"
-				return false
-			}).WithTimeout(time.Second*60).WithPolling(time.Second*5).Should(BeTrue(),
-				func() string {
-					if lastFailClosedError != "" {
-						return fmt.Sprintf("ClusterExternalSecret should report Ready=False with FailedNamespaces when no namespace matches, but: %s", lastFailClosedError)
-					}
-					return "ClusterExternalSecret should report Ready=False with FailedNamespaces when no namespace matches"
-				})
+			By("waiting for the ExternalSecret to fail while the ServiceAccount lacks the RRSA annotation")
+			expectExternalSecretAllResultsFailed(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
 
-			// Reverse assertion: while the CES stays in the non-provisioning
-			// state, no child ExternalSecret may ever appear in the (unlabeled)
-			// test namespace.
+			// ClientGeneration baseline recorded BEFORE the annotation fix: the
+			// recovery chain (SA watch -> trigger annotation -> client rebuild)
+			// must visibly bump it.
+			genBefore := recordClusterSecretStoreClientGeneration(ctx, css.Name)
+
+			By("adding the role-arn annotation to the ServiceAccount")
+			Eventually(func() error {
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: saName, Namespace: testNamespace.Name,
+				}, serviceAccount); err != nil {
+					return err
+				}
+				if serviceAccount.Annotations == nil {
+					serviceAccount.Annotations = make(map[string]string)
+				}
+				serviceAccount.Annotations[ACKRRSAAnnotation] = roleArn
+				return k8sClient.Update(ctx, serviceAccount)
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(Succeed(),
+				"should add the role-arn annotation to the ServiceAccount")
+
+			By("observing the ExternalSecret recover and the target Secret appear")
+			// The SA watch predicate fires because the annotation appears on
+			// the new object; the 30m rotation rules out the poll, so the
+			// recovery can only come from the SA watch -> trigger annotation
+			// -> client rebuild chain.
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+
+			By("observing the CSS controller bump Status.ClientGeneration for the rebuilt client")
+			expectClusterSecretStoreClientGenerationAdvanced(ctx, css.Name, genBefore,
+				"the ServiceAccount RRSA annotation fix")
+		})
+	})
+
+
+	// Covers the --watch-namespaces/--exclude-namespaces flags of the
+	// ExternalSecret controller (v0.6.7, community-convention scoping).
+	// Semantics under test: a namespace listed in --exclude-namespaces is
+	// dropped at the watch level by the blacklist predicate, so its
+	// ExternalSecret events never reach the work queue; every other
+	// namespace stays watchable. The excluded namespace must never have
+	// its ExternalSecret synced while a non-excluded namespace keeps
+	// syncing normally; the args are restored afterwards (patch/restore).
+	Context("ExternalSecret controller honors --exclude-namespaces", func() {
+		It("Should not sync ExternalSecrets in the excluded namespace while other namespaces sync normally", func() {
+			By("creating the excluded namespace and a control namespace")
+			excludedNamespace := createTestNamespace(ctx, "test-exclude-ns-"+getRandString())
+			controlNamespace := createTestNamespace(ctx, "test-exclude-ctrl-"+getRandString())
+			DeferCleanup(func() {
+				deleteTestNamespace(ctx, controlNamespace)
+			})
+			DeferCleanup(func() {
+				deleteTestNamespace(ctx, excludedNamespace)
+			})
+
+			By("patching --exclude-namespaces=<excluded namespace> onto the controller Deployment")
+			// Register the restore BEFORE mutating (suite convention, same as
+			// cluster_store_flag_test.go): a mid-spec failure still returns
+			// the args to their pre-spec state.
+			originalArgs := getDeploymentArgs(ctx)
+			DeferCleanup(func() {
+				By("restoring Deployment args after the --exclude-namespaces spec")
+				restoreDeploymentArgs(ctx, originalArgs)
+			})
+			patchDeploymentArgs(ctx,
+				[]string{"--watch-namespaces", "--exclude-namespaces"},
+				[]string{"--exclude-namespaces=" + excludedNamespace.Name})
+
+			By("creating identical ExternalSecrets in both namespaces")
+			newExcludeProbeES := func(namespace, name string) *api.ExternalSecret {
+				return &api.ExternalSecret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+					},
+					Spec: api.ExternalSecretSpec{
+						Provider:         "kms",
+						RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+						Data: []api.DataSource{
+							{
+								Key:       CommonKMSSecretName,
+								Name:      "exclude-probe-key",
+								VersionId: "v1",
+							},
+						},
+					},
+				}
+			}
+			excludedES := newExcludeProbeES(excludedNamespace.Name, "test-exclude-probe-es")
+			Expect(k8sClient.Create(ctx, excludedES)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, excludedES)
+			})
+			controlES := newExcludeProbeES(controlNamespace.Name, "test-exclude-probe-es")
+			Expect(k8sClient.Create(ctx, controlES)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, controlES)
+			})
+
+			By("observing the control namespace ExternalSecret sync normally")
+			validateExternalSecretSucceededAndSecretCreated(ctx, controlNamespace.Name, controlES.Name, time.Second*90)
+
+			By("consistently observing the excluded namespace ExternalSecret is never synced")
+			// The blacklist predicate keeps every event of the excluded
+			// namespace out of the work queue, so no status write and no
+			// synced Secret may ever appear. The check only fails on hard
+			// evidence (a Succeeded result or an existing synced Secret),
+			// tolerating the at-most-one status write an in-flight operator
+			// restart could still land from the pre-patch pod.
 			Consistently(func() bool {
-				childExternalSecret := &api.ExternalSecret{}
+				es := &api.ExternalSecret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: excludedNamespace.Name, Name: excludedES.Name,
+				}, es); err != nil {
+					// Transient API errors are not evidence of a sync.
+					return true
+				}
+				for _, result := range es.Status.DataSyncResults {
+					if result.Status == "Succeeded" {
+						return false
+					}
+				}
+				syncedSecret := &corev1.Secret{}
 				err := k8sClient.Get(ctx, types.NamespacedName{
-					Name:      clusterExternalSecret.Name,
-					Namespace: testNamespace.Name,
-				}, childExternalSecret)
+					Namespace: excludedNamespace.Name, Name: excludedES.Name,
+				}, syncedSecret)
 				if err == nil {
 					return false
 				}
-				return k8serrors.IsNotFound(err)
-			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
-				"no child ExternalSecret should be created in a namespace that does not match the namespaceSelectors")
+				if k8serrors.IsNotFound(err) {
+					return true
+				}
+				// Transient API errors are not evidence of a sync.
+				return true
+			}).WithTimeout(time.Second*45).WithPolling(time.Second*5).Should(BeTrue(),
+				"the ExternalSecret in the excluded namespace must never sync while --exclude-namespaces is active")
+		})
+	})
 
-			// Clean up the ClusterExternalSecret explicitly; the namespaces
-			// hold no child ExternalSecrets and are cleaned by the Describe-level
-			// AfterEach / the DeferCleanup registered above.
-			Expect(k8sClient.Delete(ctx, clusterExternalSecret)).To(Succeed())
+	// Covers the include branch of the namespace scoping when
+	// --watch-namespaces and --exclude-namespaces are combined WITHOUT
+	// overlap. main.go maps every --watch-namespaces entry to true and
+	// every --exclude-namespaces entry to false; a namespace listed in
+	// BOTH flags makes the operator refuse to start (fail-fast conflict
+	// detection), so the combination under test is disjoint. include mode
+	// is active (a true entry exists): the manager cache is narrowed via
+	// DefaultNamespaces to the include list, so (a) a namespace in the
+	// include list syncs normally; (b) a namespace in the exclude list is
+	// invisible to the controller; (c) an unlisted namespace is invisible
+	// as well. For (b) and (c) no reconcile ever runs, hence no status is
+	// written and no synced Secret is ever created.
+	Context("ExternalSecret controller honors --watch-namespaces combined with --exclude-namespaces", func() {
+		It("Should sync the included namespace while the excluded and unlisted namespaces stay unwatched", func() {
+			By("creating included, excluded and unlisted probe namespaces")
+			includedNamespace := createTestNamespace(ctx, "test-watch-inc-"+getRandString())
+			excludedNamespace := createTestNamespace(ctx, "test-watch-excl-"+getRandString())
+			unlistedNamespace := createTestNamespace(ctx, "test-watch-unlisted-"+getRandString())
+			DeferCleanup(func() {
+				deleteTestNamespace(ctx, unlistedNamespace)
+			})
+			DeferCleanup(func() {
+				deleteTestNamespace(ctx, excludedNamespace)
+			})
+			DeferCleanup(func() {
+				deleteTestNamespace(ctx, includedNamespace)
+			})
+
+			By("patching --watch-namespaces (included) together with --exclude-namespaces (excluded)")
+			// Register the restore BEFORE mutating (suite convention): a
+			// mid-spec failure still returns the args to their pre-spec state.
+			originalArgs := getDeploymentArgs(ctx)
+			DeferCleanup(func() {
+				By("restoring Deployment args after the watch+exclude spec")
+				restoreDeploymentArgs(ctx, originalArgs)
+			})
+			patchDeploymentArgs(ctx,
+				[]string{"--watch-namespaces", "--exclude-namespaces"},
+				[]string{
+					"--watch-namespaces=" + includedNamespace.Name,
+					"--exclude-namespaces=" + excludedNamespace.Name,
+				})
+
+			By("creating identical ExternalSecrets in all three namespaces")
+			newWatchProbeES := func(namespace, name string) *api.ExternalSecret {
+				return &api.ExternalSecret{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      name,
+						Namespace: namespace,
+					},
+					Spec: api.ExternalSecretSpec{
+						Provider:         "kms",
+						RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+						Data: []api.DataSource{
+							{
+								Key:       CommonKMSSecretName,
+								Name:      "watch-probe-key",
+								VersionId: "v1",
+							},
+						},
+					},
+				}
+			}
+			includedES := newWatchProbeES(includedNamespace.Name, "test-watch-probe-es")
+			Expect(k8sClient.Create(ctx, includedES)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, includedES)
+			})
+			excludedES := newWatchProbeES(excludedNamespace.Name, "test-watch-probe-es")
+			Expect(k8sClient.Create(ctx, excludedES)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, excludedES)
+			})
+			unlistedES := newWatchProbeES(unlistedNamespace.Name, "test-watch-probe-es")
+			Expect(k8sClient.Create(ctx, unlistedES)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, unlistedES)
+			})
+
+			By("observing the included namespace ExternalSecret sync normally (include branch active)")
+			// Establishing the positive leg first proves the controller is
+			// live under the new args, so the negative legs below cannot pass
+			// merely because reconciliation has not run yet.
+			validateExternalSecretSucceededAndSecretCreated(ctx, includedNamespace.Name, includedES.Name, time.Second*90)
+
+			By("consistently observing that neither unwatched namespace ever gets a synced Secret")
+			// With the whitelist cache both the excluded and the unlisted
+			// namespace fall outside the manager cache entirely: their ES
+			// events never reach the controller, so the former reconcile
+			// guard's "is not in watched namespaces" status is never written
+			// either -- the only observable contract is the permanent absence
+			// of a synced Secret.
+			noSyncedSecret := func(namespace, name string) bool {
+				es := &api.ExternalSecret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: name,
+				}, es); err == nil {
+					for _, result := range es.Status.DataSyncResults {
+						if result.Status == "Succeeded" {
+							return false
+						}
+					}
+				}
+				syncedSecret := &corev1.Secret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: namespace, Name: name,
+				}, syncedSecret); err == nil {
+					return false
+				}
+				return true
+			}
+			Consistently(func() bool {
+				return noSyncedSecret(excludedNamespace.Name, excludedES.Name) &&
+					noSyncedSecret(unlistedNamespace.Name, unlistedES.Name)
+			}).WithTimeout(time.Second*45).WithPolling(time.Second*5).Should(BeTrue(),
+				"neither the excluded nor the unlisted namespace may ever sync while the watch+exclude combination is active")
 		})
 	})
 })
+
+
+
+
+// cssControllerDisabledStatusKey is the documented dataSyncResults entry the
+// ExternalSecret controller persists while consuming a ClusterSecretStore
+// with --process-cluster-secret-store=false (degraded mode: the cached
+// client is reused and a Warning notice is recorded). It is NOT a data-key
+// sync verdict, so "all results Failed" style assertions must exempt it.
+const cssControllerDisabledStatusKey = "cluster_secret_store_controller_disabled"
+
+// expectExternalSecretAllResultsFailed waits until the ExternalSecret exposes
+// a non-empty DataSyncResults slice whose every entry is Failed. Unlike
+// expectExternalSecretFailedWith it does not constrain the Reason text, so it
+// stays robust against the exact backend error wording (invalid credentials,
+// missing SA annotation, ...). The documented degraded-mode notice entry
+// (cssControllerDisabledStatusKey, Status=Warning) is exempt: it coexists
+// with the Failed data-key entries when the ClusterSecretStore controller is
+// disabled, and skipping it keeps this assertion focused on the real sync
+// verdicts.
+func expectExternalSecretAllResultsFailed(ctx context.Context, namespace, name string, timeout time.Duration) {
+	var lastCheckError string
+	Eventually(func() bool {
+		es := &api.ExternalSecret{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, es); err != nil {
+			lastCheckError = fmt.Sprintf("Failed to get ExternalSecret: %v", err)
+			return false
+		}
+		if len(es.Status.DataSyncResults) == 0 {
+			lastCheckError = "DataSyncResults is empty, waiting for sync results..."
+			return false
+		}
+		for i, result := range es.Status.DataSyncResults {
+			if result.ExternalSecretKey == cssControllerDisabledStatusKey {
+				// Documented degraded-mode notice, not a data-key verdict.
+				continue
+			}
+			if result.Status != "Failed" {
+				lastCheckError = fmt.Sprintf(
+					"DataSyncResult[%d] should have status 'Failed', got '%s'. Reason: '%s'", i, result.Status, result.Reason)
+				return false
+			}
+		}
+		lastCheckError = ""
+		return true
+	}).WithTimeout(timeout).WithPolling(time.Second*5).Should(BeTrue(),
+		func() string {
+			if lastCheckError != "" {
+				return fmt.Sprintf("ExternalSecret %s/%s should have every DataSyncResult Failed, but: %s", namespace, name, lastCheckError)
+			}
+			return fmt.Sprintf("ExternalSecret %s/%s should have every DataSyncResult Failed", namespace, name)
+		})
+}
+
+

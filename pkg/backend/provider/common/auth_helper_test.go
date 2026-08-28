@@ -2,6 +2,7 @@ package common
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -93,10 +94,9 @@ func TestBuildAuthConfigFromEnvSessionNameDefaults(t *testing.T) {
 }
 
 // TestGetAuthCredSessionNameInjection_ENVPath drives the production ENV
-// config (BuildAuthConfigFromEnv, session-name vars unset) through
-// GetAuthCred: the injected defaults keep the AK+AssumeRole tier in the
-// chain. Tier selection is pinned by config shape as in the SecretStore-path
-// counterpart (credential-type assertions are infeasible).
+// config (session-name vars unset) through GetAuthCred: the injected defaults
+// keep the AK+AssumeRole tier in the chain, with tier selection pinned by
+// config shape (credential-type assertions are infeasible).
 func TestGetAuthCredSessionNameInjection_ENVPath(t *testing.T) {
 	t.Setenv("ALICLOUD_ROLE_ARN", "acs:ram::123456789:role/env-role")
 	t.Setenv("ALICLOUD_OIDC_PROVIDER_ARN", "")
@@ -263,4 +263,61 @@ func TestBuildAuthConfig_OidcArnFromDefaultMarkedServiceAccount(t *testing.T) {
 	if cfg.ServiceAccountName != "rrsa-sa" || cfg.ServiceAccountNamespace != "default" {
 		t.Errorf("ServiceAccount fields were not merged, got %s/%s", cfg.ServiceAccountNamespace, cfg.ServiceAccountName)
 	}
+}
+
+// TestBuildAuthConfig_AKSecretReadFailureReturnsError pins the 0.6.4
+// security contract: when the AK credentials cannot be read from the
+// referenced Secret, BuildAuthConfig must fail explicitly instead of
+// silently continuing with empty credentials.
+func TestBuildAuthConfig_AKSecretReadFailureReturnsError(t *testing.T) {
+	t.Run("accessKey secret missing", func(t *testing.T) {
+		store, _ := newAKSecretStoreFixture()
+		// The fake client holds no objects at all, so the Secret referenced
+		// by accessKey does not exist.
+		kube := fake.NewClientBuilder().Build()
+
+		_, err := BuildAuthConfig(context.Background(), store, kube, newKMSAuthAdapter(""), testClusterID, testUID)
+		if err == nil {
+			t.Fatal("BuildAuthConfig must return an error when the accessKey Secret does not exist, instead of silently continuing")
+		}
+		if !strings.Contains(err.Error(), "failed to get access key from secret default/ak-secret") {
+			t.Errorf("error should identify the unreadable accessKey Secret, got %v", err)
+		}
+	})
+
+	t.Run("accessKeySecret key missing", func(t *testing.T) {
+		store, _ := newAKSecretStoreFixture()
+		// The Secret exists but lacks the "sk" key referenced by
+		// accessKeySecret.
+		partialSecret := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{Name: "ak-secret", Namespace: "default"},
+			Data: map[string][]byte{
+				"ak": []byte("test-ak"),
+			},
+		}
+		kube := fake.NewClientBuilder().WithObjects(partialSecret).Build()
+
+		_, err := BuildAuthConfig(context.Background(), store, kube, newKMSAuthAdapter(""), testClusterID, testUID)
+		if err == nil {
+			t.Fatal("BuildAuthConfig must return an error when the accessKeySecret key is missing from the Secret, instead of silently continuing")
+		}
+		if !strings.Contains(err.Error(), "failed to get access key secret from secret default/ak-secret") {
+			t.Errorf("error should identify the unreadable accessKeySecret Secret, got %v", err)
+		}
+	})
+
+	t.Run("success path reads both credentials", func(t *testing.T) {
+		// Positive control: the same construction succeeds when the Secret
+		// holds both keys, proving the error paths above are not always-true.
+		store, secret := newAKSecretStoreFixture()
+		kube := fake.NewClientBuilder().WithObjects(secret).Build()
+
+		cfg, err := BuildAuthConfig(context.Background(), store, kube, newKMSAuthAdapter(""), testClusterID, testUID)
+		if err != nil {
+			t.Fatalf("BuildAuthConfig returned error on the success path: %v", err)
+		}
+		if cfg.AccessKey != "test-ak" || cfg.AccessSecretKey != "test-sk" {
+			t.Errorf("AK credentials were not read from the Secret, got ak=%q sk=%q", cfg.AccessKey, cfg.AccessSecretKey)
+		}
+	})
 }

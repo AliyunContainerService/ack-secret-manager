@@ -13,17 +13,13 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
-// NOTE: the backoff helpers below mutate the process-global
-// utils.BACKOFF_DEFAULT_RETRY_INTERVAL, so the tests in this file rely on
-// the package's default SERIAL test execution and must never call
-// t.Parallel().
-//
-// Generic retry semantics of the underlying utils.RetryOnTransient are
-// covered by utils.TestRetryOnTransient; only FetchWithRetry's own contract
-// is kept here (fixed attempt count, classification/wrapping, cancellation).
+// NOTE: the backoff helpers mutate the process-global
+// utils.BACKOFF_DEFAULT_RETRY_INTERVAL, so tests rely on serial execution
+// and must never call t.Parallel(). Generic retry semantics are covered by
+// utils.TestRetryOnTransient; only FetchWithRetry's own contract is here.
 
-// shortenBackoff shrinks the exponential backoff interval for tests and
-// returns a restore function.
+// shortenBackoff shrinks the backoff interval for tests; returns a restore
+// function.
 func shortenBackoff(t *testing.T) func() {
 	t.Helper()
 	orig := utils.BACKOFF_DEFAULT_RETRY_INTERVAL
@@ -63,9 +59,9 @@ func errWrap(err error) error {
 	return fmt.Errorf("fetch failed: %w", err)
 }
 
-// TestFetchWithRetryDefaultMaxAttempts pins FetchWithRetry's fixed attempt
-// count: a permanent transient failure is tried exactly
-// defaultFetchMaxAttempts times and the last error is returned unchanged.
+// TestFetchWithRetryDefaultMaxAttempts pins the fixed attempt count: a
+// permanent transient failure is tried exactly defaultFetchMaxAttempts times
+// and the last error is returned unchanged.
 func TestFetchWithRetryDefaultMaxAttempts(t *testing.T) {
 	defer shortenBackoff(t)()
 
@@ -80,17 +76,16 @@ func TestFetchWithRetryDefaultMaxAttempts(t *testing.T) {
 	if calls != defaultFetchMaxAttempts {
 		t.Fatalf("expected %d attempts (defaultFetchMaxAttempts), got %d", defaultFetchMaxAttempts, calls)
 	}
-	// Error classification passes through the fetch entrypoint unchanged:
-	// the returned error is still transient/retryable.
+	// Error classification passes through unchanged: the returned error is
+	// still transient/retryable.
 	if !utils.JudgeNeedRetry(err) {
 		t.Errorf("expected last transient error to be returned, got %v", err)
 	}
 }
 
-// TestFetchWithRetryNonRetryableClassification pins the error classification
-// as seen through FetchWithRetry: a non-SDK error is not retryable and is
-// returned immediately after a single attempt. (tea.SDKError permanent
-// classification is covered by utils.TestJudgeNeedRetry.)
+// TestFetchWithRetryNonRetryableClassification: a non-SDK error is not
+// retryable and is returned immediately after a single attempt (permanent
+// tea.SDKError classification is covered by utils.TestJudgeNeedRetry).
 func TestFetchWithRetryNonRetryableClassification(t *testing.T) {
 	defer shortenBackoff(t)()
 
@@ -110,8 +105,7 @@ func TestFetchWithRetryNonRetryableClassification(t *testing.T) {
 	}
 }
 
-// TestFetchWithRetryPermanentErrorClassification pins the error
-// classification as seen through FetchWithRetry: a permanent SDK error is
+// TestFetchWithRetryPermanentErrorClassification: a permanent SDK error is
 // returned immediately after a single attempt and stays non-retryable.
 func TestFetchWithRetryPermanentErrorClassification(t *testing.T) {
 	defer shortenBackoff(t)()
@@ -132,9 +126,8 @@ func TestFetchWithRetryPermanentErrorClassification(t *testing.T) {
 	}
 }
 
-// TestFetchWithRetryWrappedTransientError pins the error-wrapping contract
-// through FetchWithRetry: transient errors wrapped via fmt.Errorf("%w") by
-// the fetch paths are still classified as transient and retried up to the
+// TestFetchWithRetryWrappedTransientError: transient errors wrapped via
+// fmt.Errorf("%w") are still classified as transient and retried up to the
 // fixed attempt count.
 func TestFetchWithRetryWrappedTransientError(t *testing.T) {
 	defer shortenBackoff(t)()
@@ -156,10 +149,9 @@ func TestFetchWithRetryWrappedTransientError(t *testing.T) {
 	}
 }
 
-// TestFetchWithRetryCtxCancelledDuringBackoff pins the cancellation contract
-// through FetchWithRetry: cancellation while waiting for the backoff returns
-// a combined error carrying both context.Canceled and the last transient
-// error.
+// TestFetchWithRetryCtxCancelledDuringBackoff: cancellation while waiting
+// for the backoff returns a combined error carrying both context.Canceled
+// and the last transient error.
 func TestFetchWithRetryCtxCancelledDuringBackoff(t *testing.T) {
 	defer lengthenBackoff(t)()
 
@@ -189,14 +181,13 @@ func TestFetchWithRetryCtxCancelledDuringBackoff(t *testing.T) {
 	}
 }
 
-// TestFetchWithRetryCtxCancelledBeforeStart covers a context that is already
-// canceled when FetchWithRetry starts: the first attempt still executes and
-// the cancellation aborts the backoff wait that follows it.
+// TestFetchWithRetryCtxCancelledBeforeStart: with an already-canceled
+// context the first attempt still executes and cancellation aborts the
+// backoff wait that follows it.
 func TestFetchWithRetryCtxCancelledBeforeStart(t *testing.T) {
-	// A LONG backoff is required here: with a shortened (~1ms) backoff the
-	// timer and ctx.Done() are both ready when the select is reached, and Go
-	// picks a ready branch at random -- making the call-count assertion
-	// flaky. See lengthenBackoff.
+	// A LONG backoff is required: with ~1ms both the timer and ctx.Done()
+	// are ready and Go picks at random, making the call-count assertion
+	// flaky (see lengthenBackoff).
 	defer lengthenBackoff(t)()
 
 	ctx, cancel := context.WithCancel(context.Background())

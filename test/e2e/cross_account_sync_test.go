@@ -109,6 +109,7 @@ var _ = Describe("Cross-account Sync E2E", func() {
 								Name:      ServiceaccountNameForSAAuth,
 								Namespace: ServiceaccountNamespaceForSAAuth.Name,
 							},
+							OIDCProviderARN:          OIDCProviderARN,
 							RemoteRAMRoleARN:         RAMRoleArnForCrossAccount,
 							RemoteRAMRoleSessionName: "crossacct-sa-session",
 						},
@@ -294,8 +295,6 @@ var _ = Describe("Cross-account Sync E2E", func() {
 	// After the test, the original Deployment spec is restored.
 	Context("WorkerRole (env-based) + cross-account sync", func() {
 		It("should sync cross-account secret using WorkerRole + remote role assumption", func() {
-			ctx := context.TODO()
-
 			if !workerRoleEnabledInDeployment(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName) {
 				Skip("WorkerRole authentication is disabled on the ack-secret-manager Deployment (--enable-worker-role=false); the WorkerRole auth provider is not part of the auth chain, so this test cannot validate it")
 			}

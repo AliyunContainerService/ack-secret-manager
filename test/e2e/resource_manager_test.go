@@ -1,4 +1,15 @@
-// test/e2e/resource_manager_test.go - Test Resource Manager for ACK Secret Manager E2E Tests
+// resource_manager_test.go - Cloud-resource test infrastructure for ACK Secret Manager E2E tests.
+//
+// This file contains NO Ginkgo Describe/It blocks. It provides helper types
+// (GlobalResourceManager, ResourceManager) and functions that manage
+// Alibaba Cloud resources (KMS secrets, OOS parameters, RAM roles/policies,
+// ACK cluster node-pool labels) used as fixtures by the spec files. It is
+// compiled as part of the e2e test binary (package e2e, *_test.go naming
+// convention) so that these helpers remain unexported but accessible to all
+// spec files in the package.
+//
+// See test/e2e/README.md for the distinction between infrastructure files
+// (suite_test.go, resource_manager_test.go, helpers_test.go) and spec files.
 package e2e
 
 import (
@@ -28,6 +39,11 @@ const (
 	PolicyType                  = "Custom"
 	ServiceaccountNameForSAAuth = "test-serviceaccount-auth"
 	ACKRRSAAnnotation           = "ack.alibabacloud.com/role-arn"
+
+	// oosWatchParamNamePrefix is the naming convention of the dedicated OOS
+	// secret parameters created by CreateOOSSecretParameterForUpdate; the
+	// AfterSuite fallback sweep deletes any leftover entry matching it.
+	oosWatchParamNamePrefix = TestResourcePrefix + "oos-watch-param-"
 )
 
 // Preset credential values created by ResourceManager. They are exported so
@@ -37,6 +53,13 @@ const (
 	CommonKMSSecretValue          = "this ia a common kms secret for testing"
 	CommonOOSSecretParameterValue = "this is an oos encrypted parameter for testing"
 )
+
+// CredentialUpdateKMSSecretInitialValue is the v1 seed value written by
+// CreateKMSSecretForCredentialUpdate. Shared so specs asserting on the
+// initial value of a dedicated credential-update KMS secret (e.g. the
+// --disable-polling Consistently leg) reference one source of truth instead
+// of duplicating the literal.
+const CredentialUpdateKMSSecretInitialValue = "initial kms secret data for reconcile update testing"
 
 const (
 	CSEndpointFormat  = "cs.%s.aliyuncs.com"
@@ -452,7 +475,7 @@ func (rm *ResourceManager) CreateKMSSecretForCredentialUpdate(ctx context.Contex
 	createSecretReq := &kms20160120.CreateSecretRequest{}
 	createSecretReq.SecretName = tea.String(secretName)
 	createSecretReq.VersionId = tea.String("v1")
-	createSecretReq.SecretData = tea.String("initial kms secret data for reconcile update testing")
+	createSecretReq.SecretData = tea.String(CredentialUpdateKMSSecretInitialValue)
 	createSecretReq.DKMSInstanceId = tea.String(rm.commonKMSInstanceID)
 	createSecretReq.EncryptionKeyId = tea.String(rm.commonKMSKeyID)
 
@@ -464,12 +487,50 @@ func (rm *ResourceManager) CreateKMSSecretForCredentialUpdate(ctx context.Contex
 	return secretName, nil
 }
 
+// CreateKMSSecretWithData creates a KMS secret dedicated to a single test
+// case whose v1 version carries the given (typically JSON) payload, so specs
+// that need specific initial document content (e.g. the zero-output guard
+// spec) never mutate the shared CommonKMSSecretName. Tests may append further
+// versions via PutKMSSecretVersion; cleanup is owned by the caller via
+// DeleteKMSSecret (mirrors CreateKMSSecretForCredentialUpdate).
+func (rm *ResourceManager) CreateKMSSecretWithData(ctx context.Context, secretData string) (string, error) {
+	secretName := TestResourcePrefix + "data-driven-secret-" + getRandString()
+
+	createSecretReq := &kms20160120.CreateSecretRequest{}
+	createSecretReq.SecretName = tea.String(secretName)
+	createSecretReq.VersionId = tea.String("v1")
+	createSecretReq.SecretData = tea.String(secretData)
+	createSecretReq.DKMSInstanceId = tea.String(rm.commonKMSInstanceID)
+	createSecretReq.EncryptionKeyId = tea.String(rm.commonKMSKeyID)
+
+	_, err := rm.kmsClient.CreateSecret(createSecretReq)
+	if err != nil {
+		return "", fmt.Errorf("failed to create dedicated KMS secret with custom data: %v", err)
+	}
+
+	return secretName, nil
+}
+
 // PutSecretValueForKMSSecret appends a new version to the given KMS secret.
 func (rm *ResourceManager) PutSecretValueForKMSSecret(ctx context.Context, secretName string) error {
 	putSecretValueReq := &kms20160120.PutSecretValueRequest{}
 	putSecretValueReq.SecretName = tea.String(secretName)
 	putSecretValueReq.VersionId = tea.String("v2")
 	putSecretValueReq.SecretData = tea.String(`{"key1":"value1","key2":"value2"}`)
+
+	_, err := rm.kmsClient.PutSecretValue(putSecretValueReq)
+	return err
+}
+
+// PutKMSSecretVersion appends a new version with the given version id and
+// value to the given KMS secret. Unlike PutSecretValueForKMSSecret (fixed
+// v2), it lets specs stage multiple successive remote values so watch-driven
+// re-syncs always have a fresh value to observe.
+func (rm *ResourceManager) PutKMSSecretVersion(ctx context.Context, secretName, versionID, value string) error {
+	putSecretValueReq := &kms20160120.PutSecretValueRequest{}
+	putSecretValueReq.SecretName = tea.String(secretName)
+	putSecretValueReq.VersionId = tea.String(versionID)
+	putSecretValueReq.SecretData = tea.String(value)
 
 	_, err := rm.kmsClient.PutSecretValue(putSecretValueReq)
 	return err
@@ -887,6 +948,89 @@ func (rm *ResourceManager) CreateCommonOOSSecretParameter(ctx context.Context) (
 	}
 
 	return oosParamName, nil
+}
+
+// CreateOOSSecretParameterForUpdate creates a DEDICATED OOS secret parameter
+// seeded with initialValue, intended for specs that stage new remote values
+// via PutOOSParameterValue. It deliberately does not touch the shared
+// CommonOOSSecretParameterName, whose value other specs (provider_test.go)
+// assert by equality.
+func (rm *ResourceManager) CreateOOSSecretParameterForUpdate(ctx context.Context, initialValue string) (string, error) {
+	oosParamName := oosWatchParamNamePrefix + getRandString()
+	createOOSSecretParamReq := &oos20190601.CreateSecretParameterRequest{}
+	createOOSSecretParamReq.RegionId = tea.String(rm.regionID)
+	createOOSSecretParamReq.Name = tea.String(oosParamName)
+	createOOSSecretParamReq.Value = tea.String(initialValue)
+
+	_, err := rm.oosClient.CreateSecretParameter(createOOSSecretParamReq)
+	if err != nil {
+		return "", err
+	}
+
+	return oosParamName, nil
+}
+
+// PutOOSParameterValue updates an OOS secret parameter to a new value; the
+// update produces a new latest parameter version that only a fresh sync round
+// can observe (OOS counterpart of PutKMSSecretVersion).
+func (rm *ResourceManager) PutOOSParameterValue(ctx context.Context, name, value string) error {
+	updateReq := &oos20190601.UpdateSecretParameterRequest{}
+	updateReq.RegionId = tea.String(rm.regionID)
+	updateReq.Name = tea.String(name)
+	updateReq.Value = tea.String(value)
+
+	_, err := rm.oosClient.UpdateSecretParameter(updateReq)
+	return err
+}
+
+// DeleteOOSSecretParameter deletes an OOS secret parameter by name
+// (OOS counterpart of DeleteKMSSecret; used by per-spec DeferCleanup).
+func (rm *ResourceManager) DeleteOOSSecretParameter(name string) error {
+	deleteReq := &oos20190601.DeleteSecretParameterRequest{}
+	deleteReq.Name = tea.String(name)
+
+	_, err := rm.oosClient.DeleteSecretParameter(deleteReq)
+	return err
+}
+
+// sweepOOSSecretParametersByPrefix is the best-effort fallback sweep of the
+// AfterSuite cleanup: it lists OOS secret parameters page by page (the Name
+// filter is a fuzzy keyword match, so every candidate is re-checked with an
+// exact prefix test) and deletes the leftovers whose name starts with the
+// given prefix (the dedicated watch parameters created via
+// CreateOOSSecretParameterForUpdate whose per-spec DeferCleanup failed or
+// never ran). Every failure is logged as a WARNING only -- the sweep must
+// never block or mask the suite result.
+func (rm *ResourceManager) sweepOOSSecretParametersByPrefix(prefix string) {
+	var nextToken *string
+	// Page cap guards against a pathological NextToken loop; 20 pages of up
+	// to 100 entries far exceeds any realistic leftover count.
+	for page := 0; page < 20; page++ {
+		listReq := &oos20190601.ListSecretParametersRequest{}
+		listReq.RegionId = tea.String(rm.regionID)
+		listReq.Name = tea.String(prefix)
+		listReq.NextToken = nextToken
+		resp, err := rm.oosClient.ListSecretParameters(listReq)
+		if err != nil || resp == nil || resp.Body == nil {
+			log.Printf("WARNING: fallback sweep could not list OOS secret parameters (prefix %s): %v", prefix, err)
+			return
+		}
+		for _, param := range resp.Body.Parameters {
+			if param == nil || param.Name == nil || !strings.HasPrefix(*param.Name, prefix) {
+				continue
+			}
+			if err := rm.DeleteOOSSecretParameter(*param.Name); err != nil {
+				log.Printf("WARNING: fallback sweep failed to delete leftover OOS secret parameter %s: %v", *param.Name, err)
+			} else {
+				log.Printf("fallback sweep deleted leftover OOS secret parameter %s", *param.Name)
+			}
+		}
+		if resp.Body.NextToken == nil || *resp.Body.NextToken == "" {
+			return
+		}
+		nextToken = resp.Body.NextToken
+	}
+	log.Printf("WARNING: fallback sweep stopped after 20 pages; leftover OOS secret parameters with prefix %s may remain", prefix)
 }
 
 func (rm *ResourceManager) CreatePolicy(policyDocument, policyNameInfix string) (string, error) {
@@ -1437,6 +1581,10 @@ func (rm *ResourceManager) CleanupAllResources(ctx context.Context) error {
 	if err != nil {
 		errs = append(errs, err)
 	}
+
+	// Best-effort fallback sweep of the dedicated watch parameters: warning-
+	// only by design, so it never contributes to the aggregated cleanup error.
+	rm.sweepOOSSecretParametersByPrefix(oosWatchParamNamePrefix)
 
 	// Clean up RAM roles
 	err = rm.deleteRamRoles()

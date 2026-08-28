@@ -79,6 +79,105 @@ var _ = Describe("Authentication E2E", func() {
 			// This prevents controller from trying to create resources in terminating namespace
 			CleanupExternalSecret(ctx, externalSecret)
 		})
+
+		// Bidirectional WorkerRole contract (negative leg first): with the
+		// default --enable-worker-role=false an ExternalSecret whose only
+		// candidate auth tier is WorkerRole must fail fail-closed with the
+		// auth-chain wording from pkg/backend/auth/auth.go GetAuthCred
+		// ("no usable authentication tier in the ENV auth chain: ..."), wrapped
+		// verbatim by the ENV client init error
+		// (externalsecret_controller.go: "generic ENV client not available
+		// ...: %w"); after explicitly enabling the flag the same
+		// ExternalSecret must recover and sync via the node's worker RAM role
+		// (the positive path also covered by the sibling spec above).
+		It("Should fail a WorkerRole-only sync while --enable-worker-role is disabled (default) and succeed after enabling it", func() {
+			// Capture the args baseline BEFORE registering cleanup, so the
+			// restore never depends on a (potentially failing) patch call.
+			originalArgs := getDeploymentArgs(ctx)
+
+			// Register BOTH restores BEFORE mutating (suite convention):
+			// Ginkgo runs cleanups in reverse registration order, so the env
+			// baseline is restored first and the args baseline second.
+			DeferCleanup(func() {
+				By("restoring the Deployment args baseline")
+				restoreDeploymentArgs(ctx, originalArgs)
+			})
+			DeferCleanup(func() {
+				By("restoring the RRSA env baseline on the Deployment")
+				restoreRRSAEnvBaseline(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+			})
+
+			By("ensuring the default --enable-worker-role=false state")
+			// Drop any explicit flag so the flag default (false) applies
+			// (cmd/manager/main.go: enable-worker-role defaults to false).
+			patchDeploymentArgs(ctx,
+				[]string{"--enable-worker-role"},
+				[]string{})
+			Expect(workerRoleEnabledInDeployment(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)).To(BeFalse(),
+				"the WorkerRole tier must be disabled for the negative leg of this spec")
+
+			By("removing the RRSA env vars so WorkerRole is the only candidate auth tier")
+			// With the globally injected ENV RRSA vars present, the ENV client
+			// would serve the storeless ExternalSecret before the chain ever
+			// reaches the WorkerRole tier.
+			removeRRSAEnvTemporarily(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+
+			By("creating a WorkerRole-only ExternalSecret (no SecretStoreRef)")
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-workerrole-default-disabled-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider: "kms",
+					// Short rotation so the recovery after enabling the flag is
+					// re-driven quickly without waiting for the default period.
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:  CommonKMSSecretName,
+							Name: "test-workerrole-default-disabled-secret",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("observing the fail-closed status carrying the empty-auth-chain wording")
+			// The chain assembles zero providers and GetAuthCred returns
+			// "no usable authentication tier in the ENV auth chain: ..."; the ENV
+			// client init wrapper exposes it via %w in the Failed reason.
+			expectExternalSecretFailedWith(ctx, externalSecret.Namespace, externalSecret.Name,
+				"no usable authentication tier", time.Second*120)
+
+			By("asserting no cluster Secret was written while the sync fails")
+			Consistently(func() bool {
+				syncedSecret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: externalSecret.Namespace, Name: externalSecret.Name,
+				}, syncedSecret)
+				if err != nil {
+					// Transient API errors are not evidence of a Secret appearing.
+					return k8serrors.IsNotFound(err)
+				}
+				return false
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
+				"no cluster Secret may be written while the WorkerRole tier is disabled")
+
+			By("enabling --enable-worker-role=true so the WorkerRole tier joins the auth chain")
+			patchDeploymentArgs(ctx,
+				[]string{"--enable-worker-role"},
+				[]string{"--enable-worker-role=true"})
+
+			By("observing the same ExternalSecret recover and sync via WorkerRole")
+			// The rollout restarted the controller, so the ENV client init
+			// cache is fresh; the WorkerRole tier now registers the client and
+			// the 10s rotation re-drives the sync.
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*180)
+		})
 	})
 
 	Context("RamRole authentication", func() {
@@ -289,6 +388,7 @@ var _ = Describe("Authentication E2E", func() {
 								Name:      ServiceaccountNameForSAAuth,
 								Namespace: ServiceaccountNamespaceForSAAuth.Name,
 							},
+							OIDCProviderARN: OIDCProviderARN,
 						},
 					},
 				},
@@ -333,6 +433,147 @@ var _ = Describe("Authentication E2E", func() {
 		})
 	})
 
+	// Test: fail-closed contract when serviceAccountRef points at a
+	// ServiceAccount that cannot serve RRSA credentials (the reachable
+	// counterpart of the "failed to create OIDC provider" contract).
+	//
+	// Verified code path (why the exact "failed to create OIDC provider"
+	// prefix from pkg/backend/auth/auth.go oidcProviderCreationErrPrefix is
+	// NOT assertable in e2e): GetAuthCred only wraps createOIDCProvider
+	// failures with that prefix, and the dynamic-token branch fails solely
+	// when the TokenRequest call fails. The apiserver issues bound tokens
+	// for EVERY existing ServiceAccount regardless of RRSA annotations, and
+	// both alternative preconditions fail EARLIER in
+	// buildServiceAccountRefAuthConfig (pkg/backend/provider/common/
+	// auth_helper.go): a missing ServiceAccount yields "failed to get
+	// ServiceAccount" and a plain ServiceAccount yields "does not have RRSA
+	// annotation" before GetAuthCred is ever reached. The remaining trigger
+	// (ServiceAccount deleted between the Get and CreateToken) is a race
+	// window, not a stable e2e contract; it is covered at unit level in
+	// pkg/backend/auth/auth_test.go via a fake clientset. This spec asserts
+	// the stably reachable fail-closed contract instead: a plain,
+	// annotation-less ServiceAccount must fail the sync with no fallback.
+	Context("ServiceAccount RRSA fail-closed contract for a non-RRSA ServiceAccount", func() {
+		It("Should fail the sync fail-closed when serviceAccountRef points at a ServiceAccount without the RRSA annotation", func() {
+			if OIDCProviderARN == "" {
+				Skip("OIDCProviderARN env baseline not configured; the store spec carries an explicit oidcProviderARN to isolate the failure to the missing RRSA annotation")
+			}
+
+			By("creating a plain ServiceAccount WITHOUT the RRSA role-arn annotation")
+			plainSA := &corev1.ServiceAccount{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-oidc-fail-plain-sa",
+					Namespace: testNamespace.Name,
+				},
+			}
+			Expect(k8sClient.Create(ctx, plainSA)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, plainSA)
+			})
+
+			By("creating a SecretStore whose serviceAccountRef points at the plain ServiceAccount")
+			// OIDCProviderARN is set explicitly so the failure is provably
+			// caused by the missing RRSA annotation, not by missing OIDC
+			// prerequisites (the annotation check in
+			// buildServiceAccountRefAuthConfig runs before any OIDC ARN
+			// resolution, so the contract cannot be masked by cluster-id/uid
+			// auto-derivation).
+			secretStore := &api.SecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-oidc-fail-store",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.SecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							ServiceAccountRef: &api.ServiceAccountRef{
+								Name:      plainSA.Name,
+								Namespace: testNamespace.Name,
+							},
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+			DeferCleanup(func() {
+				_ = k8sClient.Delete(ctx, secretStore)
+			})
+
+			By("observing the SecretStore stay NotReady with the RRSA annotation wording")
+			// BuildAuthConfig fails before GetAuthCred, so the store client
+			// is never registered and the Store controller reports
+			// Ready=False with ReasonClientCreationFailed carrying the
+			// buildServiceAccountRefAuthConfig error verbatim.
+			Eventually(func() bool {
+				store := &api.SecretStore{}
+				if err := k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: secretStore.Namespace, Name: secretStore.Name,
+				}, store); err != nil {
+					return false
+				}
+				for _, cond := range store.Status.Conditions {
+					if cond.Type == api.SecretStoreReady && cond.Status == corev1.ConditionFalse &&
+						strings.Contains(cond.Message, "does not have RRSA annotation") {
+						return true
+					}
+				}
+				return false
+			}).WithTimeout(time.Second*60).WithPolling(time.Second*2).Should(BeTrue(),
+				"SecretStore should stay NotReady because the referenced ServiceAccount lacks the RRSA annotation")
+
+			By("creating an ExternalSecret that references the broken store")
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-oidc-fail-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:  CommonKMSSecretName,
+							Name: "test-oidc-fail-secret",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: secretStore.Name,
+								Kind: ResourceSecretStore,
+							},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("observing the fail-closed Failed status carrying the RRSA annotation wording")
+			// The ExternalSecret controller rebuilds the client on its own
+			// cache miss (getOrCreateClient -> provider.NewClient ->
+			// BuildAuthConfig), so the identical fail-closed error surfaces
+			// verbatim in the per-key Failed DataSyncResults, wrapped as
+			// "init client ... failed: ServiceAccount ... does not have RRSA
+			// annotation ack.alibabacloud.com/role-arn".
+			expectExternalSecretFailedWith(ctx, externalSecret.Namespace, externalSecret.Name,
+				"does not have RRSA annotation", time.Second*120)
+
+			By("asserting no cluster Secret was written while the sync fails")
+			Consistently(func() bool {
+				syncedSecret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, client.ObjectKey{
+					Namespace: externalSecret.Namespace, Name: externalSecret.Name,
+				}, syncedSecret)
+				if err != nil {
+					// Transient API errors are not evidence of a Secret appearing.
+					return k8serrors.IsNotFound(err)
+				}
+				return false
+			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
+				"no cluster Secret may be written while the serviceAccountRef RRSA contract fails")
+		})
+	})
+
 	// Test: Environment variable RRSA authentication (Priority 1b). The cleanup
 	// MUST restore the BeforeSuite ENV baseline instead of removing the globally
 	// injected vars: removing them would silently break ENV RRSA for all
@@ -369,6 +610,116 @@ var _ = Describe("Authentication E2E", func() {
 			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
 
 			CleanupExternalSecret(ctx, externalSecret)
+		})
+	})
+
+	// Test: ENV client lazy initialization failure contract (v0.6.7).
+	//
+	// Verified code path (why a broken roleArn does NOT work here): the ENV
+	// config carries no ServiceAccountName, so createOIDCProvider takes the
+	// file-based branch (pkg/backend/auth/auth.go) whose OIDC provider is
+	// constructed lazily - only a background updater starts, no synchronous
+	// STS call - so invalid RRSA env values NEVER fail ENV client
+	// construction; the failure would surface at fetch time, or be masked
+	// entirely by the WorkerRole tier (--enable-worker-role=true) in the
+	// auth chain.
+	//
+	// The only condition that makes EnsureENVClient genuinely fail is an
+	// empty auth chain: with the RRSA env vars removed AND
+	// --enable-worker-role=false, GetAuthCred returns "no usable
+	// authentication tier in the ENV auth chain: ..." for every provider, so
+	// EnsureENVClient caches the failure and the controller reports
+	// "generic ENV client not available (key=...), lazy ENV client
+	// initialization may have failed". Restoring the baseline (env vars +
+	// args + rollout) must recover the sync (the ~60s init-failure negative
+	// cache bounds the recovery latency).
+	Context("ENV client lazy initialization failure contract", func() {
+		It("Should fail with the ENV client contract error when the auth chain has no usable tier and recover after baseline restore", func() {
+			if RAMRoleArnForRRSA == "" || OIDCProviderARN == "" {
+				Skip("RRSA env baseline not configured (RAMRoleArnForRRSA/OIDCProviderARN empty); the ENV client failure contract cannot be exercised")
+			}
+
+			// Capture the args baseline BEFORE registering cleanup, so the
+			// restore never depends on a (potentially failing) patch call.
+			originalArgs := getDeploymentArgs(ctx)
+
+			// Patch/restore: register BOTH restores BEFORE mutating, so a
+			// mid-spec failure still returns the controller to the baseline.
+			// Ginkgo runs cleanups in reverse registration order, so the env
+			// baseline is restored first and the args baseline second.
+			DeferCleanup(func() {
+				By("restoring the Deployment args baseline")
+				restoreDeploymentArgs(ctx, originalArgs)
+			})
+			DeferCleanup(func() {
+				By("restoring the RRSA env baseline on the Deployment")
+				restoreRRSAEnvBaseline(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+			})
+
+			By("ensuring the WorkerRole tier is disabled via --enable-worker-role=false")
+			// The WorkerRole/ECS-metadata tier (auth chain priority 4)
+			// would register the ENV client if enabled, and the sync could
+			// succeed via the node's worker RAM role - masking the failure
+			// this spec asserts on.
+			patchDeploymentArgs(ctx,
+				[]string{"--enable-worker-role"},
+				[]string{"--enable-worker-role=false"})
+
+			By("removing the RRSA env vars so no env-based auth tier remains")
+			// BuildAuthConfigFromEnv then yields an empty OIDC tier (RoleArn/
+			// OidcArn unset) and no AK tiers, and GetAuthCred fails with
+			// "no usable authentication tier in the ENV auth chain: ..." for
+			// every provider -> EnsureENVClient registers nothing and caches
+			// the failure (~60s negative cache). The Secret backing the env
+			// vars is deliberately left intact: deleting it would leave the
+			// secretKeyRef dangling and break Pod startup
+			// (CreateContainerConfigError).
+			removeRRSAEnvTemporarily(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+
+			By("creating an ExternalSecret without storeRef (ENV auth path)")
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-env-lazy-fail-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider: "kms",
+					// Short rotation: after the baseline restore the recovery must
+					// be observable quickly (bounded by the ~60s ENV init-failure
+					// negative cache).
+					RotationInterval: &metav1.Duration{Duration: 15 * time.Second},
+					// No SecretStoreRef: served by the lazily initialized ENV client.
+					Data: []api.DataSource{
+						{
+							Key:  CommonKMSSecretName,
+							Name: "test-env-lazy-fail-secret",
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("observing the Failed status with the ENV client contract wording")
+			// Contract at the EnsureENVClient call site
+			// (pkg/controller/externalsecret/externalsecret_controller.go):
+			// "generic ENV client not available (key=...), lazy ENV client
+			// initialization may have failed".
+			expectExternalSecretFailedWith(ctx, externalSecret.Namespace, externalSecret.Name, "ENV client", time.Second*120)
+
+			By("restoring the RRSA env baseline and the Deployment args")
+			// Restore order mirrors the DeferCleanup registrations: env
+			// baseline first (Secret values + secretKeyRef + rollout), then
+			// the args baseline (each restore rolls out only on drift).
+			restoreRRSAEnvBaseline(ctx, ackSecretManagerNamespace, ackSecretManagerDeploymentName)
+			restoreDeploymentArgs(ctx, originalArgs)
+
+			By("observing the sync recover once the lazy ENV client init succeeds again")
+			// Generous timeout: covers the ~60s init-failure negative cache plus
+			// the 15s rotation that re-drives the sync.
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*180)
 		})
 	})
 
@@ -423,6 +774,7 @@ var _ = Describe("Authentication E2E", func() {
 								Name:      serviceAccount.Name,
 								Namespace: testNamespace.Name,
 							},
+							OIDCProviderARN: OIDCProviderARN,
 							// Also configure AK (should be ignored due to SA priority)
 							AccessKey: &api.SecretRef{
 								Name:      akSecret.Name,
@@ -523,6 +875,7 @@ var _ = Describe("Authentication E2E", func() {
 								Name:      dedicatedSA.Name,
 								Namespace: testNamespace.Name,
 							},
+							OIDCProviderARN: OIDCProviderARN,
 							// Valid AK present: if any fallback/random selection reached
 							// it, the sync would succeed and this test would fail.
 							AccessKey: &api.SecretRef{

@@ -13,7 +13,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: 1.25.0
+        go-version: 1.26.6
         check-latest: true
         cache: true
     - name: golangci-lint
@@ -42,7 +42,7 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: 1.25.0
+        go-version: 1.26.6
       env:
         GOPATH: ${{ env.HOME }}
 

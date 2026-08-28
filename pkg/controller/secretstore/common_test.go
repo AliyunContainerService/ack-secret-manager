@@ -27,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -36,19 +35,8 @@ import (
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
 )
-
-func newTestScheme(t *testing.T) *runtime.Scheme {
-	t.Helper()
-	scheme := runtime.NewScheme()
-	if err := corev1.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add corev1 to scheme: %v", err)
-	}
-	if err := api.AddToScheme(scheme); err != nil {
-		t.Fatalf("failed to add api to scheme: %v", err)
-	}
-	return scheme
-}
 
 // TestSetConditionPreservesTransitionTime verifies that re-setting a condition
 // whose Type/Status/Reason/Message are all unchanged keeps the original
@@ -270,6 +258,16 @@ func TestStatusEqualIgnoresTransitionTime(t *testing.T) {
 			}(),
 			want: false,
 		},
+		{
+			name: "clientGeneration differs",
+			old:  base(t1),
+			new: func() api.SecretStoreStatus {
+				s := base(t1)
+				s.ClientGeneration = 1
+				return s
+			}(),
+			want: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -310,7 +308,7 @@ func TestStatusEqualIgnoresTransitionTime(t *testing.T) {
 // (false, nil) — not an error — when the status is already up-to-date, and
 // performs no write against the API server.
 func TestUpdateStatusUnchangedNoErrorNoWrite(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	// Truncate to seconds to match API server timestamp serialization precision.
 	oldTime := metav1.NewTime(time.Now().Add(-24 * time.Hour).Truncate(time.Second))
 
@@ -359,7 +357,7 @@ func TestUpdateStatusUnchangedNoErrorNoWrite(t *testing.T) {
 // TestUpdateStatusWritesOnTransition verifies that a real transition is
 // written and reported as (true, nil).
 func TestUpdateStatusWritesOnTransition(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 	oldTime := metav1.NewTime(time.Now().Add(-24 * time.Hour))
 
 	store := &api.SecretStore{
@@ -409,7 +407,7 @@ func TestUpdateStatusWritesOnTransition(t *testing.T) {
 // TestUpdateStatusInitializesEmptyStatus verifies that a store without any
 // conditions gets its status written on the first reconcile.
 func TestUpdateStatusInitializesEmptyStatus(t *testing.T) {
-	scheme := newTestScheme(t)
+	scheme := testutil.NewTestScheme(t)
 
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store", Namespace: "default", Generation: 1},
@@ -532,10 +530,10 @@ func (p *branchStubProvider) GetEndpoint() string  { return "" }
 func (p *branchStubProvider) GetClusterId() string { return "" }
 func (p *branchStubProvider) GetUid() string       { return "" }
 
-// TestRecreateClientBranchAlignsWithValidation verifies that the provider
-// branch selection in recreateClient uses the same inner-field criterion as
-// validateStoreSpec: a `kms: {}` block alongside a valid OOS config must
-// enter the OOS branch instead of failing on the KMS branch (and vice versa).
+// TestRecreateClientBranchAlignsWithValidation: the provider branch
+// selection in recreateClient uses the same inner-field criterion as
+// validateStoreSpec (a `kms: {}` block alongside a valid OOS config enters
+// the OOS branch, and vice versa).
 func TestRecreateClientBranchAlignsWithValidation(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -591,11 +589,10 @@ func TestRecreateClientBranchAlignsWithValidation(t *testing.T) {
 	}
 }
 
-// TestRecreateClientPrefixedCleanup verifies that recreateClient retires the
-// full client family of the store — the plain clientName client plus every
-// composite "clientName#endpoint" variant — via DeletePrefixed before the
-// bare client is rebuilt. Composite variants are re-created on demand by the
-// ExternalSecret controller with the refreshed store credentials.
+// TestRecreateClientPrefixedCleanup: recreateClient retires the full client
+// family (plain clientName plus every composite "clientName#endpoint"
+// variant) via DeletePrefixed before the bare client is rebuilt; composite
+// variants are re-created on demand with refreshed credentials.
 func TestRecreateClientPrefixedCleanup(t *testing.T) {
 	store := &api.SecretStore{
 		ObjectMeta: metav1.ObjectMeta{Name: "store", Namespace: "default", Generation: 2},
@@ -680,7 +677,10 @@ func (p *registryStubProvider) GetUid() string       { return "" }
 
 // TestNeedRecreateClient covers all decision branches: missing client,
 // generation change, initial reconcile without conditions, and the steady
-// state where no recreation is needed.
+// state where no recreation is needed. The client registry is selected by
+// the provider configured in the store spec — never by provider argument
+// order — so an OOS store whose client lives in OosClientMap must not be
+// forced into a rebuild just because KmsClientMap has no entry.
 func TestNeedRecreateClient(t *testing.T) {
 	r := &CommonReconciler{}
 	readyCond := func(gen int64) []api.SecretStoreStatusCondition {
@@ -690,9 +690,20 @@ func TestNeedRecreateClient(t *testing.T) {
 			ObservedGeneration: gen,
 		}}
 	}
+	kmsStore := func() StoreInterface {
+		return &SecretStoreWrapper{&api.SecretStore{
+			Spec: api.SecretStoreSpec{KMS: &api.KMSProvider{KMS: &api.KMSAuth{}}},
+		}}
+	}
+	oosStore := func() StoreInterface {
+		return &SecretStoreWrapper{&api.SecretStore{
+			Spec: api.SecretStoreSpec{OOS: &api.OOSProvider{OOS: &api.OOSAuth{}}},
+		}}
+	}
 
 	tests := []struct {
 		name          string
+		store         StoreInterface
 		clientPresent bool
 		useOOS        bool
 		generation    int64
@@ -701,6 +712,7 @@ func TestNeedRecreateClient(t *testing.T) {
 	}{
 		{
 			name:          "client missing with kms provider",
+			store:         kmsStore(),
 			clientPresent: false,
 			useOOS:        false,
 			generation:    1,
@@ -709,6 +721,7 @@ func TestNeedRecreateClient(t *testing.T) {
 		},
 		{
 			name:          "client missing with oos provider",
+			store:         oosStore(),
 			clientPresent: false,
 			useOOS:        true,
 			generation:    1,
@@ -717,6 +730,7 @@ func TestNeedRecreateClient(t *testing.T) {
 		},
 		{
 			name:          "generation changed forces recreation",
+			store:         kmsStore(),
 			clientPresent: true,
 			useOOS:        false,
 			generation:    2,
@@ -725,6 +739,7 @@ func TestNeedRecreateClient(t *testing.T) {
 		},
 		{
 			name:          "no conditions means initial reconcile",
+			store:         kmsStore(),
 			clientPresent: true,
 			useOOS:        false,
 			generation:    1,
@@ -733,6 +748,7 @@ func TestNeedRecreateClient(t *testing.T) {
 		},
 		{
 			name:          "client exists and generation unchanged",
+			store:         kmsStore(),
 			clientPresent: true,
 			useOOS:        false,
 			generation:    1,
@@ -741,11 +757,24 @@ func TestNeedRecreateClient(t *testing.T) {
 		},
 		{
 			name:          "oos client exists and generation unchanged",
+			store:         oosStore(),
 			clientPresent: true,
 			useOOS:        true,
 			generation:    1,
 			conditions:    readyCond(1),
 			want:          false,
+		},
+		{
+			name:          "ready condition not in first position is still honored",
+			store:         kmsStore(),
+			clientPresent: true,
+			useOOS:        false,
+			generation:    1,
+			conditions: []api.SecretStoreStatusCondition{
+				{Type: "SomeOtherType", Status: corev1.ConditionTrue, ObservedGeneration: 99},
+				{Type: api.SecretStoreReady, Status: corev1.ConditionTrue, ObservedGeneration: 1},
+			},
+			want: false,
 		},
 	}
 
@@ -760,12 +789,36 @@ func TestNeedRecreateClient(t *testing.T) {
 				kmsArg = &registryStubProvider{name: "kms", clientPresent: tt.clientPresent}
 			}
 
-			got := r.needRecreateClient("namespace/default/store", tt.generation, tt.conditions, kmsArg, oosArg)
+			got := r.needRecreateClient(tt.store, "namespace/default/store", tt.generation, tt.conditions, kmsArg, oosArg)
 			if got != tt.want {
 				t.Errorf("needRecreateClient() = %v, want %v", got, tt.want)
 			}
 		})
 	}
+
+	// Regression for the wrong-registry bug: in production BOTH provider
+	// registries are always non-nil. An OOS store whose client is registered
+	// in OosClientMap (and absent from KmsClientMap) must report false; the
+	// old code probed KmsClientMap first and forced a rebuild every round.
+	t.Run("oos client registered while both registries present", func(t *testing.T) {
+		kmsArg := &registryStubProvider{name: "kms", clientPresent: false}
+		oosArg := &registryStubProvider{name: "oos", clientPresent: true}
+		got := r.needRecreateClient(oosStore(), "namespace/default/store", 1, readyCond(1), kmsArg, oosArg)
+		if got {
+			t.Errorf("needRecreateClient() = true, want false for an OOS store whose client is registered in OosClientMap")
+		}
+	})
+
+	// Symmetric check: a KMS store whose client is only present in
+	// OosClientMap must still be recreated.
+	t.Run("kms store with client only in oos registry recreates", func(t *testing.T) {
+		kmsArg := &registryStubProvider{name: "kms", clientPresent: false}
+		oosArg := &registryStubProvider{name: "oos", clientPresent: true}
+		got := r.needRecreateClient(kmsStore(), "namespace/default/store", 1, readyCond(1), kmsArg, oosArg)
+		if !got {
+			t.Errorf("needRecreateClient() = false, want true for a KMS store missing from KmsClientMap")
+		}
+	})
 }
 
 // TestHandleDeletion verifies that the deletion path cleans up both provider
@@ -1118,7 +1171,7 @@ func TestUpdateStatusConflictError(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			scheme := newTestScheme(t)
+			scheme := testutil.NewTestScheme(t)
 			// Empty status forces shouldUpdate=true so the status write is attempted.
 			store := &api.SecretStore{
 				ObjectMeta: metav1.ObjectMeta{Name: "store", Namespace: "default", Generation: 1},

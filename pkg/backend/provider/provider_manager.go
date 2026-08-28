@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/klog/v2"
+	"k8s.io/klog"
 
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
 )
@@ -30,7 +30,7 @@ var stopTimeout = 30 * time.Second
 
 func RegisterRamProvider(clientName string, stopper provider.Stopper, m *Manager) {
 	if m == nil || m.RamLock == nil {
-		klog.Errorf("Manager init error")
+		klog.Errorf("Manager init error, clientName %v", clientName)
 		return
 	}
 	// Swap the map entry under the lock, then stop the old provider outside
@@ -48,7 +48,7 @@ func RegisterRamProvider(clientName string, stopper provider.Stopper, m *Manager
 
 func StopProvider(clientName string, m *Manager) {
 	if m == nil || m.RamLock == nil {
-		klog.Errorf("Manager init error")
+		klog.Errorf("Manager init error, clientName %v", clientName)
 		return
 	}
 	// Remove the map entry under the lock, then stop the provider outside

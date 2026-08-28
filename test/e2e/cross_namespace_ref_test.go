@@ -433,6 +433,7 @@ var _ = Describe("Cross Namespace Reference Enabled E2E", Ordered, func() {
 								Name:      serviceAccount.Name,
 								Namespace: testNamespace2.Name, // Cross namespace reference
 							},
+							OIDCProviderARN: OIDCProviderARN,
 						},
 					},
 				},

@@ -24,14 +24,14 @@ ack-secret-manager 支持以下 5 种认证方式：
 | RRSA                | 环境变量 / SecretStore | 集群级共享、快速部署     | ⭐⭐⭐⭐   | 低         |
 | AK 扮演             | 环境变量 / SecretStore | 临时凭据、权限收窄       | ⭐⭐⭐     | 中         |
 | AK                  | 环境变量 / SecretStore | 测试/开发（不推荐生产）  | ⭐         | 低         |
-| WorkerRole          | 自动（ECS 元数据）     | 简单部署场景             | ⭐⭐⭐     | 低         |
+| WorkerRole          | 显式启用（`--enable-worker-role=true`） | 简单部署场景             | ⭐⭐⭐     | 低         |
 
 > **说明**：
 >
 > - **环境变量**方式：通过 Helm values 或 helm --set 注入认证参数，组件级别统一生效，ExternalSecret 无需指定 `secretStoreRef`
 > - **SecretStore** 方式：通过 SecretStore/ClusterSecretStore CRD 配置，ExternalSecret 通过 `secretStoreRef` 引用
 > - **ServiceAccount RRSA** 仅支持 SecretStore 方式（通过 `serviceAccountRef` 引用）
-> - **WorkerRole** 自动使用节点 ECS 的 RAM Role，无需任何配置，以上均未配置时自动选用
+> - **WorkerRole** 使用节点 ECS 的 RAM Role；需显式启用（`--enable-worker-role=true` / `command.enableWorkerRole=true`），未启用且无其他可用认证时按 fail-closed 失败（报错 "no usable authentication tier"）
 
 ## 认证优先级
 
@@ -55,7 +55,7 @@ ack-secret-manager 支持以下 5 种认证方式：
 | 2 | RRSA | 环境变量 / SecretStore | 配置了 `ramRoleARN` + `oidcProviderARN` | 使用组件级 OIDC Token 获取临时凭据 |
 | 3 | AK 扮演 | 环境变量 / SecretStore | 配置了 `accessKey` + `accessKeySecret` + `ramRoleARN`（`ramRoleSessionName` 可选） | 使用 AK 登录后 AssumeRole 获取临时凭据 |
 | 4 | 纯 AK | 环境变量 / SecretStore | 仅配置 `accessKey` + `accessKeySecret` | 直接使用静态 AK/SK |
-| 5（最低） | WorkerRole | 默认 | 以上均未配置时自动选用 | 使用节点 ECS 的 RAM Role |
+| 5（最低） | WorkerRole | 显式启用 | 通过 `--enable-worker-role=true` / `command.enableWorkerRole=true` 显式启用；未启用且无其他可用认证时按 fail-closed 失败（报错 "no usable authentication tier"） | 使用节点 ECS 的 RAM Role |
 
 **重要说明**：
 
@@ -70,7 +70,7 @@ ExternalSecret 的每个 `DataSource` 根据是否配置 `secretStoreRef` 决定
 
 | `secretStoreRef` | 认证路径 | 说明 |
 | ----------------- | -------- | ---- |
-| 未配置（nil）     | 环境变量认证 | 使用组件启动时注册的全局 ENV client，所有 DataSoure 共享同一凭据 |
+| 未配置（nil）     | 环境变量认证 | 使用首次使用时惰性注册的全局 ENV client，所有 DataSource 共享同一凭据 |
 | 已配置            | SecretStore 认证 | 使用 SecretStore 中配置的认证方式，环境变量被完全忽略 |
 
 > **示例**：即使 Deployment 配置了 RRSA 环境变量（`ALICLOUD_ROLE_ARN`），同时 SecretStore 配置了 AK 认证，只要 ExternalSecret 的 `DataSource` 引用了该 SecretStore，最终生效的是 SecretStore 的 AK 认证，环境变量不参与。
@@ -206,9 +206,9 @@ AK 扮演使用 AccessKey + AssumeRole 获取临时凭据，相比纯 AK 更安�
 
 ### 5.3 command.enableWorkerRole 配置
 
-`command.enableWorkerRole` 用于控制是否启用 WorkerRole（ECS RAM Role）认证方式，配置是否默认启用与集群类型有关：
+`command.enableWorkerRole` 用于控制是否启用 WorkerRole（ECS RAM Role）认证方式，默认值为 `false`。对于 ACK 集群（托管、专有、Edge），需要显式设置为 `true` 以启用节点 RAM 角色认证：
 
-| 集群类型      | command.enableWorkerRole |
+| 集群类型      | 建议 command.enableWorkerRole |
 | ------------- | ------------------------ |
 | ACK 托管集群  | true                     |
 | ACK 专有集群  | true                     |
