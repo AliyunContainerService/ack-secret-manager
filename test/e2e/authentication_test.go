@@ -315,6 +315,67 @@ var _ = Describe("Authentication E2E", func() {
 			// This prevents controller from trying to create resources in terminating namespace
 			CleanupExternalSecret(ctx, externalSecret)
 		})
+
+		It("Should fail the ExternalSecret sync when the referenced AK/SK credentials are invalid", func() {
+			secret := createAKSecret(ctx, testNamespace.Name, "aksk-invalid-secret-"+getRandString(),
+				"invalidAccessKeyId", "invalidAccessKeySecret")
+
+			secretStore := &api.SecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-aksk-invalid-store",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.SecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							AccessKey: &api.SecretRef{
+								Name:      secret.Name,
+								Namespace: testNamespace.Name,
+								Key:       "accessKeyId",
+							},
+							AccessKeySecret: &api.SecretRef{
+								Name:      secret.Name,
+								Namespace: testNamespace.Name,
+								Key:       "accessKeySecret",
+							},
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
+
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-aksk-invalid-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "test-secret-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name:      secretStore.Name,
+								Namespace: secretStore.Namespace,
+								Kind:      ResourceSecretStore,
+							},
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			expectExternalSecretFailedWith(ctx, externalSecret.Namespace, externalSecret.Name,
+				"InvalidAccessKeyId", standardSyncTimeout)
+		})
 	})
 
 	Context("OIDC authentication", func() {
@@ -519,7 +580,7 @@ var _ = Describe("Authentication E2E", func() {
 					}
 				}
 				return false
-			}).WithTimeout(time.Second*60).WithPolling(time.Second*2).Should(BeTrue(),
+			}).WithTimeout(standardSyncTimeout).WithPolling(time.Second*2).Should(BeTrue(),
 				"SecretStore should stay NotReady because the referenced ServiceAccount lacks the RRSA annotation")
 
 			By("creating an ExternalSecret that references the broken store")
@@ -607,7 +668,7 @@ var _ = Describe("Authentication E2E", func() {
 
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, standardSyncTimeout)
 
 			CleanupExternalSecret(ctx, externalSecret)
 		})
@@ -793,7 +854,9 @@ var _ = Describe("Authentication E2E", func() {
 
 			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
 			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, secretStore)).To(Succeed())
+				if err := k8sClient.Delete(ctx, secretStore); err != nil && !k8serrors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
 			})
 
 			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
@@ -821,7 +884,7 @@ var _ = Describe("Authentication E2E", func() {
 
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, standardSyncTimeout)
 
 			// Clean up
 			CleanupExternalSecret(ctx, externalSecret)
@@ -1079,7 +1142,7 @@ var _ = Describe("Authentication E2E", func() {
 			// A successful sync proves the AK AssumeRole path was selected:
 			// the role-play user has no direct KMS permission, and the AK
 			// AssumeRole tier must preempt the auto-derived OIDC RRSA tier.
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, standardSyncTimeout)
 		})
 	})
 
@@ -1154,7 +1217,7 @@ var _ = Describe("Authentication E2E", func() {
 				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 			})
 
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*60)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, standardSyncTimeout)
 		})
 
 		It("ENV RRSA is never used as a fallback when storeRef credentials fail", func() {

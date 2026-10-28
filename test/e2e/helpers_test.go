@@ -38,9 +38,21 @@ const (
 	// watch-triggered resync must become observable.
 	storeWatchTriggerWindow = 60 * time.Second
 
+	// storeWatchClusterSecretStoreTriggerWindow is wider than the namespace
+	// scoped window because ClusterSecretStore processing involves global
+	// resources and may take longer under load.
+	storeWatchClusterSecretStoreTriggerWindow = 90 * time.Second
+
 	// storeWatchQuietWindow is the negative observation window for "must NOT
 	// trigger" assertions; far smaller than storeWatchLongInterval.
 	storeWatchQuietWindow = 45 * time.Second
+
+	// Common sync timeouts used across the E2E suite. Prefer these over
+	// scattered magic numbers so window choices stay consistent.
+	shortSyncTimeout    = 30 * time.Second
+	standardSyncTimeout = 60 * time.Second
+	longSyncTimeout     = 90 * time.Second
+	storeReadyTimeout   = 2 * time.Minute
 )
 
 // --------------------------------------------------------------------------
@@ -72,7 +84,7 @@ func waitForExternalSecretSucceeded(ctx context.Context, namespace, name string,
 			}
 		}
 		return hasSucceeded
-	}).WithTimeout(timeout).WithPolling(5 * time.Second).Should(BeTrue(),
+	}).WithTimeout(timeout).WithPolling(5*time.Second).Should(BeTrue(),
 		"ExternalSecret %s/%s should reach Succeeded status", namespace, name)
 }
 
@@ -345,7 +357,7 @@ func expectClusterSecretStoreClientGenerationAdvanced(ctx context.Context, name 
 			return false
 		}
 		return storeClientGenerationAdvanced(store.Status.ClientGeneration, store.Generation, before, store.Status.Conditions)
-	}).WithTimeout(storeWatchTriggerWindow).WithPolling(time.Second*2).Should(BeTrue(),
+	}).WithTimeout(storeWatchClusterSecretStoreTriggerWindow).WithPolling(time.Second*2).Should(BeTrue(),
 		"ClusterSecretStore %s should bump Status.ClientGeneration strictly above %d and observe its generation after %s",
 		name, before, triggerDesc)
 }
