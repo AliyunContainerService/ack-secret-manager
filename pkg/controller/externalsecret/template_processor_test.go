@@ -716,3 +716,42 @@ func TestProcessAllTemplatesWithSecretTemplateFrom(t *testing.T) {
 		t.Fatalf("expected 1 templateFrom source processed, got %d", result.Stats.TemplateFromProcessed)
 	}
 }
+
+// TestIsValidLabelAndAnnotationKey: keys follow the Kubernetes qualified-name
+// syntax, so mixed case, '_' and '.' are accepted in the name segment.
+// Annotation keys are case-insensitive, matching the API server.
+func TestIsValidLabelAndAnnotationKey(t *testing.T) {
+	stp := NewSimpleTemplateProcessor(nil)
+
+	tests := []struct {
+		key        string
+		label      bool
+		annotation bool
+	}{
+		{"app", true, true},
+		{"app.kubernetes.io/name", true, true},
+		{"istio/multiCluster", true, true},
+		{"example.com/Mixed_Case.name-1", true, true},
+		{"A", true, true},
+		{"Example.com/name", false, true},
+		{"", false, false},
+		{"/name", false, false},
+		{"prefix/", false, false},
+		{"a/b/c", false, false},
+		{"-name", false, false},
+		{"name-", false, false},
+		{"_name", false, false},
+		{"example.com/na me", false, false},
+		{"example.com/" + strings.Repeat("a", 64), false, false},
+		{"example.com/é", false, false},
+	}
+
+	for _, tt := range tests {
+		if got := stp.isValidLabelKey(tt.key); got != tt.label {
+			t.Errorf("isValidLabelKey(%q) = %v, want %v", tt.key, got, tt.label)
+		}
+		if got := stp.isValidAnnotationKey(tt.key); got != tt.annotation {
+			t.Errorf("isValidAnnotationKey(%q) = %v, want %v", tt.key, got, tt.annotation)
+		}
+	}
+}

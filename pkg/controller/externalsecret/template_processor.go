@@ -19,6 +19,7 @@ import (
 	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -665,88 +666,15 @@ func (stp *SimpleTemplateProcessor) processLiteralTemplate(
 	return result, nil
 }
 
-// isValidAnnotationKey validates annotation key format according to Kubernetes standards
+// isValidAnnotationKey mirrors apimachinery's ValidateAnnotations, which
+// lowercases the key before checking it as a qualified name.
 func (stp *SimpleTemplateProcessor) isValidAnnotationKey(key string) bool {
-	return stp.validatePrefixedKey(key, 253) // Total max 253 chars for prefixed keys (DNS_SUBDOMAIN + / + DNS_LABEL)
+	return len(validation.IsQualifiedName(strings.ToLower(key))) == 0
 }
 
-// isValidLabelKey validates label key format according to Kubernetes standards
+// isValidLabelKey mirrors apimachinery's ValidateLabelName.
 func (stp *SimpleTemplateProcessor) isValidLabelKey(key string) bool {
-	return stp.validatePrefixedKey(key, 253) // Total max 253 chars for prefixed keys (DNS_SUBDOMAIN + / + DNS_LABEL)
-}
-
-// validatePrefixedKey validates optionally-prefixed keys: prefix as DNS
-// subdomain, name as DNS label; unprefixed keys validate as DNS label.
-func (stp *SimpleTemplateProcessor) validatePrefixedKey(key string, maxLength int) bool {
-	if len(key) == 0 || len(key) > maxLength {
-		return false
-	}
-
-	if strings.Contains(key, "/") {
-		parts := strings.SplitN(key, "/", 2)
-		if len(parts) != 2 {
-			return false
-		}
-		prefix, name := parts[0], parts[1]
-
-		if !stp.isDNSSubdomain(prefix) {
-			return false
-		}
-
-		if !stp.isDNSLabel(name) {
-			return false
-		}
-	} else if !stp.isDNSLabel(key) {
-		return false
-	}
-
-	return true
-}
-
-// isDNSSubdomain validates DNS subdomain format (RFC 1123)
-func (stp *SimpleTemplateProcessor) isDNSSubdomain(name string) bool {
-	if len(name) == 0 || len(name) > 253 {
-		return false
-	}
-
-	// Alphanumeric/'-'/'.' only, must start and end with alphanumeric
-	if !unicode.IsLetter(rune(name[0])) && !unicode.IsDigit(rune(name[0])) {
-		return false
-	}
-	if !unicode.IsLetter(rune(name[len(name)-1])) && !unicode.IsDigit(rune(name[len(name)-1])) {
-		return false
-	}
-
-	for _, char := range name {
-		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '.' {
-			return false
-		}
-	}
-
-	return true
-}
-
-// isDNSLabel validates DNS label format (RFC 1123)
-func (stp *SimpleTemplateProcessor) isDNSLabel(name string) bool {
-	if len(name) == 0 || len(name) > 63 {
-		return false
-	}
-
-	// Lowercase alphanumeric/'-' only, must start and end with alphanumeric
-	if !unicode.IsLetter(rune(name[0])) && !unicode.IsDigit(rune(name[0])) {
-		return false
-	}
-	if !unicode.IsLetter(rune(name[len(name)-1])) && !unicode.IsDigit(rune(name[len(name)-1])) {
-		return false
-	}
-
-	for _, char := range name {
-		if !unicode.IsLower(char) && !unicode.IsDigit(char) && char != '-' {
-			return false
-		}
-	}
-
-	return true
+	return len(validation.IsQualifiedName(key)) == 0
 }
 
 // isValidSecretKey validates secret data key format (alphanumeric, '-', '_' or '.')
