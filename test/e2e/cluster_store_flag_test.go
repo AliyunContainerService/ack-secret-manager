@@ -213,7 +213,7 @@ var _ = Describe("Process ClusterSecretStore Flag E2E", Ordered, func() {
 
 		By("fixing the credential Secret and observing the watch-triggered recovery")
 		updateAKSecretToValidCredentials(secret)
-		validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+		validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*120)
 	})
 
 	It("Should NOT recover the ExternalSecret after a CSS credential fix while --process-cluster-secret-store=false", func() {

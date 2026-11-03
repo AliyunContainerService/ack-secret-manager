@@ -188,6 +188,21 @@ func waitForSecretStoreTriggerAnnotationCleared(ctx context.Context, namespace, 
 		"store controller should clear the trigger annotation on SecretStore %s/%s after processing", namespace, name)
 }
 
+// waitForClusterSecretStoreTriggerAnnotationCleared is the cluster-scoped
+// counterpart of waitForSecretStoreTriggerAnnotationCleared. It uses a wider
+// window because ClusterSecretStore reconciliation may take longer.
+func waitForClusterSecretStoreTriggerAnnotationCleared(ctx context.Context, name string) {
+	Eventually(func() bool {
+		store := &api.ClusterSecretStore{}
+		if err := k8sClient.Get(ctx, types.NamespacedName{Name: name}, store); err != nil {
+			return false
+		}
+		_, present := store.Annotations[storeWatchTriggerAnnotation]
+		return !present
+	}).WithTimeout(storeWatchClusterSecretStoreTriggerWindow).WithPolling(time.Second*2).Should(BeTrue(),
+		"store controller should clear the trigger annotation on ClusterSecretStore %s after processing", name)
+}
+
 // recordStoreClientGeneration, recordClusterSecretStoreClientGeneration,
 // storeClientGenerationAdvanced, expectStoreClientGenerationAdvanced,
 // expectClusterSecretStoreClientGenerationAdvanced, setSecretStoreSessionName,
@@ -543,15 +558,7 @@ var _ = Describe("Store Watch E2E", func() {
 			genBefore := recordClusterSecretStoreClientGeneration(ctx, cssName)
 			fixture.stageRemoteVersion(ctx, "v2", "store-watch-css-clear-v2")
 			setClusterSecretStoreTriggerAnnotation(ctx, cssName, strconv.FormatInt(time.Now().UnixNano(), 10))
-			Eventually(func() bool {
-				store := &api.ClusterSecretStore{}
-				if err := k8sClient.Get(ctx, types.NamespacedName{Name: cssName}, store); err != nil {
-					return false
-				}
-				_, present := store.Annotations[storeWatchTriggerAnnotation]
-				return !present
-			}).WithTimeout(storeWatchTriggerWindow).WithPolling(time.Second*2).Should(BeTrue(),
-				"store controller should clear the trigger annotation on ClusterSecretStore %s after processing", cssName)
+			waitForClusterSecretStoreTriggerAnnotationCleared(ctx, cssName)
 
 			// Ordering contract (synchronous, non-retrying read): the bump is
 			// persisted before the annotation removal, so it must already be

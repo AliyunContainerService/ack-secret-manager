@@ -79,7 +79,7 @@ var _ = Describe("Gateway E2E", func() {
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
 			// Validate ExternalSecret status update
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, shortSyncTimeout)
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -137,7 +137,7 @@ var _ = Describe("Gateway E2E", func() {
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
 			// Validate ExternalSecret status update
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*30)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, shortSyncTimeout)
 
 			// Clean up - delete resources explicitly before namespace cleanup
 			// This prevents controller from trying to create resources in terminating namespace
@@ -255,7 +255,7 @@ var _ = Describe("Gateway E2E", func() {
 				}
 				latest.Spec.Data[0].KmsEndpoint = SharedKMSEndpoint
 				return k8sClient.Update(ctx, latest)
-			}).WithTimeout(time.Second*30).WithPolling(time.Second*2).Should(Succeed(),
+			}).WithTimeout(shortSyncTimeout).WithPolling(time.Second*2).Should(Succeed(),
 				"the ExternalSecret kmsEndpoint update should be applied")
 
 			By("waiting for a fresh successful sync served by the rebuilt composite client")
@@ -403,8 +403,104 @@ var _ = Describe("Gateway E2E", func() {
 					return k8serrors.IsNotFound(err)
 				}
 				return false
-			}).WithTimeout(time.Second*30).WithPolling(time.Second*5).Should(BeTrue(),
+			}).WithTimeout(shortSyncTimeout).WithPolling(time.Second*5).Should(BeTrue(),
 				"no cluster Secret may be written when every endpoint is rejected before the KMS client is constructed")
+		})
+	})
+
+	// Test: a syntactically valid KMS endpoint that resolves to no reachable
+	// backend must still fail fail-closed. This exercises the path where
+	// endpoint_validation.go accepts the hostname but the KMS SDK cannot
+	// establish a connection, surfacing a client/network error rather than the
+	// validation wording.
+	Context("Unreachable but valid-format kmsEndpoint", func() {
+		It("Should fail the sync and write no Secret when the endpoint is valid but unreachable", func() {
+			clusterSecretStore := &api.ClusterSecretStore{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-unreachable-endpoint-store-" + getRandString(),
+				},
+				Spec: api.ClusterSecretStoreSpec{
+					KMS: &api.KMSProvider{
+						KMS: &api.KMSAuth{
+							RAMRoleARN:      RAMRoleArnForRRSA,
+							OIDCProviderARN: OIDCProviderARN,
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, clusterSecretStore)).To(Succeed())
+			DeferCleanup(func() {
+				Expect(k8sClient.Delete(ctx, clusterSecretStore)).To(Succeed())
+			})
+
+			waitForClusterSecretStoreReady(ctx, clusterSecretStore.Name)
+
+			By("creating an ExternalSecret pointing at a valid-format but non-existent region endpoint")
+			externalSecret := &api.ExternalSecret{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-unreachable-endpoint-externalsecret",
+					Namespace: testNamespace.Name,
+				},
+				Spec: api.ExternalSecretSpec{
+					Provider:         "kms",
+					RotationInterval: &metav1.Duration{Duration: 10 * time.Second},
+					Data: []api.DataSource{
+						{
+							Key:       CommonKMSSecretName,
+							Name:      "unreachable-endpoint-secret-key",
+							VersionId: "v1",
+							SecretStoreRef: &api.SecretStoreRef{
+								Name: clusterSecretStore.Name,
+								Kind: ResourceClusterSecretStore,
+							},
+							// Valid format per endpoint_validation.go, but the region does
+							// not exist so DNS resolution / TLS will fail.
+							KmsEndpoint: "kms-vpc.invalid-test-region.aliyuncs.com",
+						},
+					},
+				},
+			}
+
+			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
+			DeferCleanup(func() {
+				CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
+			})
+
+			By("observing the sync fail because the endpoint cannot be reached")
+			Eventually(func() bool {
+				es := &api.ExternalSecret{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: externalSecret.Namespace,
+					Name:      externalSecret.Name,
+				}, es); err != nil {
+					return false
+				}
+				if len(es.Status.DataSyncResults) == 0 {
+					return false
+				}
+				for _, result := range es.Status.DataSyncResults {
+					if result.Status != "Failed" {
+						return false
+					}
+				}
+				return true
+			}).WithTimeout(longSyncTimeout).WithPolling(time.Second*5).Should(BeTrue(),
+				"ExternalSecret should report Failed DataSyncResults when the KMS endpoint is unreachable")
+
+			By("consistently observing that no cluster Secret is written (fail-closed)")
+			Consistently(func() bool {
+				syncedSecret := &corev1.Secret{}
+				err := k8sClient.Get(ctx, types.NamespacedName{
+					Namespace: externalSecret.Namespace,
+					Name:      externalSecret.Name,
+				}, syncedSecret)
+				if err != nil {
+					return k8serrors.IsNotFound(err)
+				}
+				return false
+			}).WithTimeout(shortSyncTimeout).WithPolling(time.Second*5).Should(BeTrue(),
+				"no cluster Secret may be written when the KMS endpoint is unreachable")
 		})
 	})
 
@@ -468,7 +564,7 @@ var _ = Describe("Gateway E2E", func() {
 			}, 90*time.Second, 2*time.Second).Should(BeTrue(),
 				"All keys should be synced from different endpoints with the exact preset KMS value")
 
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, longSyncTimeout)
 
 			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
@@ -580,7 +676,9 @@ var _ = Describe("Gateway E2E", func() {
 
 			Expect(k8sClient.Create(ctx, secretStore)).To(Succeed())
 			DeferCleanup(func() {
-				Expect(k8sClient.Delete(ctx, secretStore)).To(Succeed())
+				if err := k8sClient.Delete(ctx, secretStore); err != nil && !k8serrors.IsNotFound(err) {
+					Expect(err).NotTo(HaveOccurred())
+				}
 			})
 
 			waitForSecretStoreReady(ctx, secretStore.Namespace, secretStore.Name)
@@ -610,7 +708,7 @@ var _ = Describe("Gateway E2E", func() {
 
 			Expect(k8sClient.Create(ctx, externalSecret)).To(Succeed())
 
-			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, time.Second*90)
+			validateExternalSecretSucceededAndSecretCreated(ctx, externalSecret.Namespace, externalSecret.Name, longSyncTimeout)
 
 			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})

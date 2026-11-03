@@ -766,7 +766,11 @@ CLIENT_SECRET={{ (parseKeyValue .data).status }}`),
 			Expect(secret).ToNot(BeNil())
 			// The secret should contain the data from the data source
 			Expect(secret.Data).To(HaveKey("key1"))
-			Expect(secret.Data["key1"]).ToNot(BeEmpty())
+			// Empty template means "do not apply template processing"; the
+			// data-source name becomes the Secret key and the raw KMS secret
+			// value (the whole key=value document) is preserved unchanged.
+			Expect(string(secret.Data["key1"])).To(Equal("key1=value1\nkey2=value2\nstatus=enabled\nname=test-app"),
+				"empty template should preserve the original source value unchanged")
 
 		})
 
@@ -1782,7 +1786,7 @@ environment={{ (.env | fromJson).environment }}`,
 			Expect(mergedRaw).NotTo(BeEmpty())
 			var merged map[string]interface{}
 			Expect(json.Unmarshal(mergedRaw, &merged)).To(Succeed())
-			Expect(strEq(merged, "myapp", "app", "name")).To(BeTrue())            // base-only key preserved
+			Expect(strEq(merged, "myapp", "app", "name")).To(BeTrue())             // base-only key preserved
 			Expect(strEq(merged, "2.0.0", "app", "version")).To(BeTrue())          // conflicting key takes override
 			Expect(strEq(merged, "production", "app", "environment")).To(BeTrue()) // override-only key merged in
 			Expect(strEq(merged, "prod-db.example.com", "database", "host")).To(BeTrue())

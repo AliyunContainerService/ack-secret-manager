@@ -6,7 +6,7 @@ WORKDIR /go/src/github.com/AliyunContainerService/ack-secret-manager
 COPY . .
 RUN make build
 
-FROM --platform=$TARGETPLATFORM alpine:3.11.6
+FROM --platform=$TARGETPLATFORM alpine:3.23
 RUN sed -i 's/dl-cdn.alpinelinux.org/mirrors.aliyun.com/g' /etc/apk/repositories
 WORKDIR /bin
 

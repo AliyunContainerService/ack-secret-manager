@@ -132,7 +132,7 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 			CleanupExternalSecretAndSyncedSecret(ctx, externalSecret)
 		})
 
-		validateExternalSecretSucceededAndSecretCreated(ctx, testNamespace.Name, esName, time.Second*90)
+		validateExternalSecretSucceededAndSecretCreated(ctx, testNamespace.Name, esName, longSyncTimeout)
 	}
 
 	secretValueIs := func(expected string) bool {
@@ -162,7 +162,7 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 		// only guards slow syncs (shortened from 90s = 6 cycles).
 		Eventually(func() bool {
 			return secretValueIs("polling-override-v2")
-		}).WithTimeout(60*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+		}).WithTimeout(standardSyncTimeout).WithPolling(5*time.Second).Should(BeTrue(),
 			"the 15s per-secret rotationInterval should override the 10m global polling interval")
 	})
 
@@ -171,6 +171,17 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 		// container (see BeforeAll); this patch chains from spec1's state.
 		By("patching Deployment to --disable-polling=true")
 		patchDeploymentArgs(ctx, []string{"--polling-interval", "--disable-polling"}, []string{"--disable-polling=true"})
+
+		By("verifying the Deployment is actually running with --disable-polling=true")
+		Eventually(func() bool {
+			for _, arg := range getDeploymentArgs(ctx) {
+				if arg == "--disable-polling=true" {
+					return true
+				}
+			}
+			return false
+		}).WithTimeout(shortSyncTimeout).WithPolling(time.Second*5).Should(BeTrue(),
+			"Deployment args must contain --disable-polling=true before asserting event-driven behavior")
 
 		By("creating an ExternalSecret without an explicit rotationInterval")
 		newPollingExternalSecret("polling-disabled-es", nil)
@@ -208,7 +219,7 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 		setSecretStoreSessionName(ctx, testNamespace.Name, pollingStore.Name, "e2e-polling-disabled-"+getRandString())
 		Eventually(func() bool {
 			return secretValueIs("polling-disabled-v2")
-		}).WithTimeout(60*time.Second).WithPolling(5*time.Second).Should(BeTrue(),
+		}).WithTimeout(standardSyncTimeout).WithPolling(5*time.Second).Should(BeTrue(),
 			"a store spec change must still resync immediately in event-driven mode")
 	})
 
@@ -271,7 +282,7 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 				return false
 			}
 			return latestSyncTimeOf(es).Time.After(baseline.Time)
-		}).WithTimeout(60*time.Second).WithPolling(2*time.Second).Should(BeTrue(),
+		}).WithTimeout(standardSyncTimeout).WithPolling(2*time.Second).Should(BeTrue(),
 			"the trigger annotation fan-out must sync the staged value and advance SynchronizationTime within 60s under --disable-polling")
 
 		By("observing the store controller bump Status.ClientGeneration for the rebuilt client")
@@ -375,7 +386,7 @@ var _ = Describe("Polling Flags E2E", Ordered, func() {
 		// semantics are covered by unit tests instead; here we only verify
 		// flag acceptance plus functional sync.
 		expectAllRateLimitKeysSynced := func(externalSecret *api.ExternalSecret) {
-			validateExternalSecretSucceededAndSecretCreated(ctx, testNamespace.Name, externalSecret.Name, time.Second*90)
+			validateExternalSecretSucceededAndSecretCreated(ctx, testNamespace.Name, externalSecret.Name, longSyncTimeout)
 			expected := make(map[string]string, 4)
 			for i := 1; i <= 4; i++ {
 				expected[fmt.Sprintf("pull-limit-key-%d", i)] = CommonKMSSecretValue

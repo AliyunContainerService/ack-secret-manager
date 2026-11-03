@@ -85,7 +85,7 @@ replicaCount: 2
 
 image:
   repository: registry-cn-hangzhou.ack.aliyuncs.com/acs/ack-secret-manager
-  tag: v0.6.7
+  tag: v0.6.8
   pullPolicy: IfNotPresent
 
 cleanupImage:
