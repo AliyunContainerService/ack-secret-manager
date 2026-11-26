@@ -170,10 +170,10 @@ func (e *safeError) Error() string { return e.message }
 func (e *safeError) Unwrap() error { return e.cause }
 func (e *safeError) Format(s fmt.State, verb rune) {
 	if verb == 'q' {
-		fmt.Fprintf(s, "%q", e.message)
+		_, _ = fmt.Fprintf(s, "%q", e.message)
 		return
 	}
-	fmt.Fprint(s, e.message)
+	_, _ = fmt.Fprint(s, e.message)
 }
 
 // SafeErrorCategory returns only fixed categories; messages, URLs, paths and

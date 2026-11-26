@@ -457,15 +457,6 @@ func extractJSONPath(data interface{}, path string) interface{} {
 	return current
 }
 
-// getMapKeys returns all keys from a map (for debug logging)
-func getMapKeys(m map[string]interface{}) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	return keys
-}
-
 // deepMerge deep-merges two maps with cycle detection
 func deepMerge(base, override map[string]interface{}) map[string]interface{} {
 	return deepMergeWithCycle(base, override, make(map[uintptr]bool))

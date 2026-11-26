@@ -201,7 +201,7 @@ func TestSecretSafetyTemplateDNS(t *testing.T) {
 		attempts.Add(1)
 		left, right := net.Pipe()
 		go func() {
-			defer right.Close()
+			defer func() { _ = right.Close() }()
 			buf := make([]byte, 4096)
 			n, _ := right.Read(buf)
 			if bytes.Contains(buf[:n], []byte(canary)) {
