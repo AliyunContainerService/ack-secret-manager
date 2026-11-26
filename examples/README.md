@@ -1,6 +1,6 @@
 # ACK Secret Manager Examples
 
-> This directory contains complete usage examples for ACK Secret Manager, organized by feature category, covering authentication, CRD resources, advanced features, template processing, and best practices.
+> This directory contains complete usage examples for ACK Secret Manager, organized by feature category, covering authentication, CRD resources, advanced features, template processing, best practices, and usage examples.
 >
 > All examples use a comment-driven style. Prerequisites, verification steps, notes, etc. are all provided as YAML comments and can be applied directly with `kubectl apply -f`.
 >
@@ -8,20 +8,22 @@
 
 ## Examples List
 
+22 files in total: 5 authentication, 5 CRD, 5 advanced, 4 template, 2 best-practice and 1 usage example.
+
 ### Authentication Examples (`auth/`)
 
 | File | Description | Related Documentation |
-|------|-------------|----------------------|
+| ------ | ------------- | ---------------------- |
 | [auth-01-serviceaccount-rrsa.yaml](auth/auth-01-serviceaccount-rrsa.yaml) | ServiceAccount RRSA authentication (recommended) | [Auth Guide §1](../docs/auth_guide.md#1-serviceaccount-rrsa-authentication-recommended) |
 | [auth-02-rrsa.yaml](auth/auth-02-rrsa.yaml) | RRSA authentication (environment variables + SecretStore) | [Auth Guide §2](../docs/auth_guide.md#2-rrsa-authentication) |
-| [auth-03-ak-assume-role.yaml](auth/auth-03-ak-assume-role.yaml) | AK AssumeRole authentication | [Auth Guide §3](../docs/auth_guide.md#3-ak-assume-role-authentication) |
+| [auth-03-ak-assume-role.yaml](auth/auth-03-ak-assume-role.yaml) | AK AssumeRole authentication | [Auth Guide §3](../docs/auth_guide.md#3-ak-assumerole-authentication) |
 | [auth-04-ak-basic.yaml](auth/auth-04-ak-basic.yaml) | AK basic authentication | [Auth Guide §4](../docs/auth_guide.md#4-ak-authentication) |
 | [auth-05-worker-role.yaml](auth/auth-05-worker-role.yaml) | WorkerRole authentication | [Auth Guide §5](../docs/auth_guide.md#5-workerrole-authentication) |
 
 ### CRD Resource Examples (`crd/`)
 
 | File | Description | Related Documentation |
-|------|-------------|----------------------|
+| ------ | ------------- | ---------------------- |
 | [crd-01-secretstore.yaml](crd/crd-01-secretstore.yaml) | SecretStore configuration example | [CRD Guide §SecretStore](../docs/crd_resources_guide.md#secretstore) |
 | [crd-02-cluster-secret-store.yaml](crd/crd-02-cluster-secret-store.yaml) | ClusterSecretStore + conditions | [CRD Guide §ClusterSecretStore](../docs/crd_resources_guide.md#clustersecretstore) |
 | [crd-03-externalsecret-basic.yaml](crd/crd-03-externalsecret-basic.yaml) | Basic ExternalSecret | [CRD Guide §ExternalSecret](../docs/crd_resources_guide.md#externalsecret) |
@@ -31,7 +33,7 @@
 ### Advanced Feature Examples (`advanced/`)
 
 | File | Description | Related Documentation |
-|------|-------------|----------------------|
+| ------ | ------------- | ---------------------- |
 | [advanced-01-jmespath-parsing.yaml](advanced/advanced-01-jmespath-parsing.yaml) | JMESPath field extraction + dataProcess.extract auto-parsing | [Advanced Usage §JSON/YAML](../docs/advanced_usage.md#jsonyaml-credential-parsing) |
 | [advanced-02-cross-account.yaml](advanced/advanced-02-cross-account.yaml) | Cross-account authentication (all methods) | [Advanced Usage §Cross-Account](../docs/advanced_usage.md#cross-account-sync) |
 | [advanced-03-kms-endpoint.yaml](advanced/advanced-03-kms-endpoint.yaml) | KMS Endpoint configuration (including dedicated instances) | [Advanced Usage §kmsEndpoint](../docs/advanced_usage.md#kmsendpoint-configuration) |
@@ -41,7 +43,7 @@
 ### Template Examples (`template/`)
 
 | File | Description | Related Documentation |
-|------|-------------|----------------------|
+| ------ | ------------- | ---------------------- |
 | [template-01-basic.yaml](template/template-01-basic.yaml) | Basic inline templates | [Template Guide](../docs/template_processing_guide.md) |
 | [template-02-template-from.yaml](template/template-02-template-from.yaml) | templateFrom usage | [Template Guide](../docs/template_processing_guide.md) |
 | [template-03-merge-policy.yaml](template/template-03-merge-policy.yaml) | mergePolicy usage | [Template Guide](../docs/template_processing_guide.md) |
@@ -50,9 +52,15 @@
 ### Best Practice Examples (`best-practices/`)
 
 | File | Description | Related Documentation |
-|------|-------------|----------------------|
+| ------ | ------------- | ---------------------- |
 | [best-practices-01-multi-tenant.yaml](best-practices/best-practices-01-multi-tenant.yaml) | Multi-tenant scenario | [Auth Guide §Best Practices](../docs/auth_guide.md) |
 | [best-practices-02-production.yaml](best-practices/best-practices-02-production.yaml) | Production environment configuration | [Auth Guide §Best Practices](../docs/auth_guide.md) |
+
+### Usage Examples (`usage/`)
+
+| File | Description | Related Docs |
+| ------ | ------------- | -------------- |
+| [usage-01-pod-consumption.yaml](usage/usage-01-pod-consumption.yaml) | Consuming the synced Secret from an application Pod (single-key env / envFrom / volume mount) and rotation behavior per method | [CRD Guide §ExternalSecret](../docs/crd_resources_guide.md#externalsecret) |
 
 ## Quick Start
 
@@ -112,7 +120,7 @@ kubectl apply -f template/template-01-basic.yaml
 ## Full Documentation
 
 | Documentation | Description |
-|---------------|-------------|
+| --------------- | ------------- |
 | [Authentication Guide](../docs/auth_guide.md) | Detailed configuration for 5 authentication methods |
 | [CRD Resource Guide](../docs/crd_resources_guide.md) | Description of 4 CRD resources |
 | [Advanced Usage Guide](../docs/advanced_usage.md) | Credential parsing, cross-account sync, kmsEndpoint, credential rotation, multi-data-source support |

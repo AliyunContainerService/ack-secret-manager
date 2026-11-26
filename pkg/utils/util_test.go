@@ -16,11 +16,16 @@ limitations under the License.
 package utils
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"flag"
 	"fmt"
+	"math"
 	"net"
 	"net/url"
+	"os"
 	"reflect"
 	"strings"
 	"syscall"
@@ -29,12 +34,262 @@ import (
 
 	"github.com/alibabacloud-go/tea/tea"
 	sdkErr "github.com/aliyun/alibaba-cloud-sdk-go/sdk/errors"
+	"github.com/jmespath/go-jmespath"
+	"gopkg.in/yaml.v3"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"k8s.io/klog"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
 )
+
+// Log capture changes global klog state, so these tests must not run in parallel.
+func captureSecretLogs(t *testing.T) *bytes.Buffer {
+	t.Helper()
+	var flags flag.FlagSet
+	klog.InitFlags(&flags)
+	previous := flags.Lookup("logtostderr").Value.String()
+	if err := flags.Set("logtostderr", "false"); err != nil {
+		t.Fatal(err)
+	}
+	buf := &bytes.Buffer{}
+	klog.SetOutput(buf)
+	t.Cleanup(func() {
+		klog.Flush()
+		klog.SetOutput(os.Stderr)
+		_ = flags.Set("logtostderr", previous)
+	})
+	return buf
+}
+
+func TestSecretSafetyErrorClassification(t *testing.T) {
+	const canary = "FAKE_ERROR_SECRET_CANARY"
+	for _, raw := range []error{
+		&url.Error{Op: "Post", URL: "https://sts.invalid/?OIDCToken=" + canary, Err: context.DeadlineExceeded},
+		&tea.SDKError{Code: tea.String(REJECTED_THROTTLING), Message: tea.String(canary)},
+		&url.Error{Op: "Post", URL: "https://sts.invalid/?SecurityToken=" + canary, Err: &net.DNSError{Err: "no such host", Name: "sts.invalid"}},
+	} {
+		err := SanitizeError(raw, "operation failed")
+		if !errors.Is(err, raw) || JudgeNeedRetry(raw) != JudgeNeedRetry(err) {
+			t.Fatal("sanitization changed error identity or retry classification")
+		}
+		for _, format := range []string{"%s", "%q", "%v", "%+v", "%#v"} {
+			if got := fmt.Sprintf(format, err); strings.Contains(got, canary) || !strings.Contains(got, "operation failed") {
+				t.Errorf("unsafe error formatting with %s", format)
+			}
+		}
+	}
+	if SanitizeError(nil, "operation failed") != nil {
+		t.Fatal("nil error must stay nil")
+	}
+}
+
+func TestSecretSafetyErrorCategories(t *testing.T) {
+	const canary = "FAKE_CATEGORY_SECRET_CANARY"
+	resource := schema.GroupResource{Resource: "secrets"}
+	var decoded interface{}
+	syntaxErr := json.Unmarshal([]byte(`{"token":`), &decoded)
+	for _, tt := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{"canceled", fmt.Errorf("%s: %w", canary, context.Canceled), "canceled"},
+		{"deadline", fmt.Errorf("%s: %w", canary, context.DeadlineExceeded), "timeout"},
+		{"forbidden", apierrors.NewForbidden(resource, canary, errors.New(canary)), "forbidden"},
+		{"unauthorized", apierrors.NewUnauthorized(canary), "unauthorized"},
+		{"conflict", apierrors.NewConflict(resource, canary, errors.New(canary)), "conflict"},
+		{"exists", apierrors.NewAlreadyExists(resource, canary), "already_exists"},
+		{"not-found", apierrors.NewNotFound(resource, canary), "not_found"},
+		{"invalid", apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, "target", field.ErrorList{field.Invalid(field.NewPath("metadata", "labels"), canary, "invalid")}), "invalid"},
+		{"bad-request", apierrors.NewBadRequest(canary), "bad_request"},
+		{"throttled", apierrors.NewTooManyRequests(canary, 1), "throttled"},
+		{"unavailable", apierrors.NewServiceUnavailable(canary), "unavailable"},
+		{"internal", apierrors.NewInternalError(errors.New(canary)), "internal"},
+		{"api-timeout", apierrors.NewTimeoutError(canary, 1), "timeout"},
+		{"api-server-timeout", apierrors.NewServerTimeout(resource, canary, 1), "timeout"},
+		{"unknown-api", &apierrors.StatusError{ErrStatus: metav1.Status{Reason: metav1.StatusReason(canary), Message: canary}}, "unknown"},
+		{"permission", &os.PathError{Op: "open", Path: canary, Err: os.ErrPermission}, "permission_denied"},
+		{"missing-file", &os.PathError{Op: "open", Path: canary, Err: os.ErrNotExist}, "not_found"},
+		{"file-io", &os.PathError{Op: "read", Path: canary, Err: errors.New(canary)}, "file_io"},
+		{"dns", &url.Error{Op: "POST", URL: "https://sts.invalid/?token=" + canary, Err: &net.DNSError{Err: canary, Name: canary}}, "dns"},
+		{"network-timeout", &net.DNSError{Err: canary, Name: canary, IsTimeout: true}, "timeout"},
+		{"url", &url.Error{Op: "POST", URL: "https://sts.invalid/?token=" + canary, Err: errors.New(canary)}, "network"},
+		{"network", &net.OpError{Op: "dial", Net: "tcp", Err: errors.New(canary)}, "network"},
+		{"sdk-throttled", &tea.SDKError{Code: tea.String(REJECTED_THROTTLING), Message: tea.String(canary)}, "throttled"},
+		{"sdk-unavailable", &tea.SDKError{Code: tea.String(SERVICE_UNAVAILABLE_TEMPORARY), Message: tea.String(canary)}, "unavailable"},
+		{"sdk-internal", &tea.SDKError{Code: tea.String(INTERNAL_FAILURE), Message: tea.String(canary)}, "internal"},
+		{"sdk-http", &tea.SDKError{Code: tea.String(canary), StatusCode: tea.Int(403), Message: tea.String(canary)}, "forbidden"},
+		{"sdk-unknown", &tea.SDKError{Code: tea.String(canary), Message: tea.String(canary)}, "unknown"},
+		{"sdk-empty", &tea.SDKError{}, "unknown"},
+		{"legacy-sdk", sdkErr.NewClientError(REJECTED_THROTTLING, canary, errors.New(canary)), "throttled"},
+		{"legacy-unknown", sdkErr.NewClientError(canary, canary, errors.New(canary)), "unknown"},
+		{"legacy-server-code", sdkErr.NewServerError(400, `{"Code":"Throttling"}`, canary), "throttled"},
+		{"legacy-server-http", sdkErr.NewServerError(503, "", canary), "unavailable"},
+		{"legacy-server-5xx", sdkErr.NewServerError(500, "", canary), "server_error"},
+		{"legacy-server-unknown", sdkErr.NewServerError(200, "", canary), "unknown"},
+		{"json-syntax", syntaxErr, "invalid_json"},
+		{"json-type", &json.UnmarshalTypeError{Value: canary, Type: reflect.TypeOf(0)}, "type_mismatch"},
+		{"yaml-type", &yaml.TypeError{Errors: []string{canary}}, "type_mismatch"},
+		{"unknown", errors.New(canary), "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, raw := range []error{tt.err, fmt.Errorf("%s: %w", canary, tt.err)} {
+				wrapped := SanitizeError(raw, "operation failed")
+				nested := SanitizeError(wrapped, "outer operation failed")
+				for _, safe := range []error{wrapped, nested} {
+					if got := SafeErrorCategory(safe); got != tt.want {
+						t.Errorf("category = %q, want %q", got, tt.want)
+					}
+					if !errors.Is(safe, raw) || JudgeNeedRetry(safe) != JudgeNeedRetry(raw) || apierrors.ReasonForError(safe) != apierrors.ReasonForError(raw) {
+						t.Error("error identity, retry behavior or API classification changed")
+					}
+					for _, format := range []string{"%s", "%q", "%v", "%+v", "%#v"} {
+						text := fmt.Sprintf(format, safe)
+						if strings.Contains(text, canary) || !strings.Contains(text, "operation failed: "+tt.want) {
+							t.Errorf("unsafe or incomplete diagnostics with %s", format)
+						}
+					}
+				}
+			}
+		})
+	}
+	if SafeErrorCategory(nil) != "none" {
+		t.Error("nil must have no error category")
+	}
+	for status, want := range map[int]string{400: "bad_request", 401: "unauthorized", 403: "forbidden", 404: "not_found", 409: "conflict", 429: "throttled", 503: "unavailable", 502: "server_error", 200: "unknown", 600: "unknown"} {
+		if got := SafeErrorCategory(&tea.SDKError{Code: tea.String(canary), StatusCode: tea.Int(status)}); got != want {
+			t.Errorf("HTTP %d: category = %q, want %q", status, got, want)
+		}
+	}
+}
+
+type secretSafetyMarshaler struct{}
+
+func (secretSafetyMarshaler) MarshalJSON() ([]byte, error) {
+	return nil, errors.New("FAKE_MARSHAL_SECRET_CANARY")
+}
+func (secretSafetyMarshaler) MarshalYAML() (interface{}, error) {
+	return nil, errors.New("FAKE_MARSHAL_SECRET_CANARY")
+}
+
+func TestSecretSafetyMarshalErrors(t *testing.T) {
+	value := secretSafetyMarshaler{}
+	if _, err := json.Marshal(value); err == nil || !strings.Contains(err.Error(), "FAKE_MARSHAL") {
+		t.Fatal("invalid JSON error fixture")
+	}
+	if _, err := yaml.Marshal(value); err == nil || !strings.Contains(err.Error(), "FAKE_MARSHAL") {
+		t.Fatal("invalid YAML error fixture")
+	}
+	logs := captureSecretLogs(t)
+	if JsonStr(value) != "" || YamlStr(value) != "" {
+		t.Fatal("serialization fallback changed")
+	}
+	klog.Flush()
+	if strings.Contains(logs.String(), "FAKE_MARSHAL") || !strings.Contains(logs.String(), "failed to marshal") {
+		t.Error("serialization log exposes raw error")
+	}
+}
+
+func TestSummarizeJMESPathErrorSyntaxClassification(t *testing.T) {
+	_, err := jmespath.Search("[?foo", map[string]interface{}{"foo": "bar"})
+	var syntaxErr jmespath.SyntaxError
+	if !errors.As(err, &syntaxErr) {
+		t.Fatalf("预期值类型 SyntaxError，实际为 %T", err)
+	}
+	if got := summarizeJMESPathError(err); got != "invalid expression syntax" {
+		t.Fatalf("语法错误摘要不符：%q", got)
+	}
+	if got := summarizeJMESPathError(errors.New("sensitive input")); got != "expression evaluation failed" {
+		t.Fatalf("求值错误摘要不符：%q", got)
+	}
+}
+
+func TestGetJsonSecretsNoSecretLeakInJMESPathTypeErrorLog(t *testing.T) {
+	const sensitiveValue = "SENSITIVE-TOKEN-ABC-9f23c4a1"
+	for _, payload := range []string{
+		fmt.Sprintf(`{"token":%q,"safe":"ok"}`, sensitiveValue),
+		"token: " + sensitiveValue + "\nsafe: ok\n",
+	} {
+		t.Run(payload[:1], func(t *testing.T) {
+			var data interface{}
+			if err := yaml.Unmarshal([]byte(payload), &data); err != nil {
+				t.Fatal(err)
+			}
+			// Verify that the fixture triggers a third-party error containing the sensitive value to avoid false positives.
+			_, probeErr := jmespath.Search("abs(token)", data)
+			if probeErr == nil || !strings.Contains(probeErr.Error(), sensitiveValue) {
+				t.Fatal("夹具未触发包含敏感值的类型错误")
+			}
+			logs := captureSecretLogs(t)
+			got, err := GetJsonSecrets([]v1alpha1.JMESPathObject{
+				{Path: "abs(token)", ObjectAlias: "bad"},
+				{Path: "safe", ObjectAlias: "good"},
+			}, payload, "my-secret-key")
+			klog.Flush()
+			if err != nil || !reflect.DeepEqual(got, map[string]string{"good": "ok"}) {
+				t.Fatalf("跳过失败项并保留成功项的行为发生变化：%v，%v", got, err)
+			}
+			for _, forbidden := range []string{sensitiveValue, "Invalid type for:", ", error:"} {
+				if strings.Contains(logs.String(), forbidden) {
+					t.Fatalf("日志包含禁止输出的内容 %q", forbidden)
+				}
+			}
+			for _, want := range []string{"jmesPath evaluation failed", "path: abs(token)", "secret key: my-secret-key", "reason: expression evaluation failed"} {
+				if !strings.Contains(logs.String(), want) {
+					t.Fatalf("日志缺少安全诊断信息 %q", want)
+				}
+			}
+		})
+	}
+}
+
+func TestGetJsonSecretsJSONMarshalFailurePartialSuccess(t *testing.T) {
+	const sensitiveValue = "SENSITIVE-ACCOUNT-PASSWORD-7c1b02"
+	const path = "map(&sum(balances), accounts)"
+	payload := fmt.Sprintf(`{"password":%q,"accounts":[{"name":"alpha","balances":[1e308,1e308]},{"name":"beta","balances":[1.5,2.5]}]}`, sensitiveValue)
+	var data interface{}
+	if err := yaml.Unmarshal([]byte(payload), &data); err != nil {
+		t.Fatal(err)
+	}
+	overflow, err := jmespath.Search(path, data)
+	if err != nil {
+		t.Fatal(err)
+	}
+	values, ok := overflow.([]interface{})
+	if !ok || len(values) == 0 {
+		t.Fatal("夹具必须产生非空数组")
+	}
+	if first, ok := values[0].(float64); !ok || !math.IsInf(first, 1) {
+		t.Fatal("夹具必须产生 +Inf 以触发 JSON 序列化失败")
+	}
+	if _, err := json.Marshal(overflow); err == nil {
+		t.Fatal("JSON 序列化应拒绝 +Inf")
+	}
+	logs := captureSecretLogs(t)
+	got, err := GetJsonSecrets([]v1alpha1.JMESPathObject{
+		{Path: path, ObjectAlias: "totals"},
+		{Path: "map(&name, accounts)", ObjectAlias: "names"},
+	}, payload, "kms-json-secret")
+	klog.Flush()
+	if err != nil || !reflect.DeepEqual(got, map[string]string{"names": `["alpha","beta"]`}) {
+		t.Fatalf("序列化失败后应保留成功项：%v，%v", got, err)
+	}
+	for _, forbidden := range []string{sensitiveValue, "alpha", "1e+308", "+Inf", ", error:"} {
+		if strings.Contains(logs.String(), forbidden) {
+			t.Fatalf("日志包含禁止输出的内容 %q", forbidden)
+		}
+	}
+	for _, want := range []string{"failed to marshal jmesPath value to JSON", "secret key: kms-json-secret", "object alias: totals", "type: []interface {}"} {
+		if !strings.Contains(logs.String(), want) {
+			t.Fatalf("日志缺少安全诊断信息 %q", want)
+		}
+	}
+}
 
 // newTeaSDKError builds a *tea.SDKError with optional Code and StatusCode.
 func newTeaSDKError(code *string, statusCode *int) *tea.SDKError {
@@ -53,6 +308,18 @@ func TestJudgeNeedRetry(t *testing.T) {
 		err, ok := sdkErr.NewClientError(code, "test client error", nil).(*sdkErr.ClientError)
 		if !ok {
 			t.Fatalf("NewClientError did not return *ClientError")
+		}
+		return err
+	}
+
+	serverErr := func(status int, code string) error {
+		content := ""
+		if code != "" {
+			content = `{"Code":"` + code + `"}`
+		}
+		err, ok := sdkErr.NewServerError(status, content, "test server error").(*sdkErr.ServerError)
+		if !ok {
+			t.Fatalf("NewServerError did not return *ServerError")
 		}
 		return err
 	}
@@ -82,6 +349,14 @@ func TestJudgeNeedRetry(t *testing.T) {
 		{name: "ClientError service unavailable temporary", err: clientErr(SERVICE_UNAVAILABLE_TEMPORARY), want: true},
 		{name: "ClientError internal failure", err: clientErr(INTERNAL_FAILURE), want: true},
 		{name: "ClientError invalid access key", err: clientErr("InvalidAccessKeyId.NotFound"), want: false},
+
+		// legacy alibaba-cloud-sdk-go ServerError cases (distinct type with
+		// the same code + 5xx/429 fallback as tea.SDKError)
+		{name: "ServerError throttling code", err: serverErr(400, REJECTED_THROTTLING), want: true},
+		{name: "ServerError 500 status fallback", err: serverErr(500, ""), want: true},
+		{name: "ServerError 429 status fallback", err: serverErr(429, "TooManyRequests"), want: true},
+		{name: "ServerError 403 permanent", err: serverErr(403, "Forbidden.RAM"), want: false},
+		{name: "wrapped ServerError 503", err: fmt.Errorf("legacy call failed: %w", serverErr(503, "")), want: true},
 
 		// other errors
 		{name: "generic error", err: errors.New("some network error"), want: false},

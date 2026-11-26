@@ -127,7 +127,21 @@ ACK Secret Manager provides over 70 template functions based on [Sprig v3](https
 
 **Regular Expressions**: `regexMatch`/`regexFind`/`regexReplaceAll`, `regexSplit`
 
-> All functions come from the standard Sprig v3 library and support pipeline operations and function composition.
+> The functions above come from Sprig v3 and support pipelines and composition. For security, `env`, `expandenv`, and `getHostByName` are disabled to prevent templates from reading Operator environment credentials or sending data through DNS. Existing templates using these functions fail parsing; use explicitly configured data sources instead. Parse and execution errors expose only their category, not the template source or Secret values.
+
+#### Restricted-function upgrade impact
+
+When data sources are healthy, a restricted function has the following effects:
+
+| Template location | Target Secret behavior |
+| --- | --- |
+| Inline `target.template.data` | Fatal parse error: no create, update or delete; an existing Secret keeps its old data and metadata |
+| `templateFrom` (ConfigMap, Secret or Literal; Data, Labels or Annotations target) | Fatal parse error: the entire round stops, including other successful templates |
+| Inline `target.template.metadata.labels` / `annotations` | Nonfatal template error: successful data and metadata can still update; the failed field retains its old value or is absent on a new Secret |
+
+`mergePolicy: Merge` does not bypass a fatal parse error. These restrictions do not change the existing precedence of data-source failures or `cleanupSecretOnFailure`; in particular, total source failure can still trigger cleanup when enabled. Template errors are recorded in `status.dataSyncResults`; the existing status for a `template_processing_warnings` entry is `Failed`, even though an inline metadata error does not abort the write.
+
+Before upgrading, inspect inline templates and referenced templates for `env`, `expandenv` and `getHostByName`. Move required values to explicit KMS/OOS data sources and render their keys (for example, `{{ .endpoint }}`) instead. Do not replace a restricted function with an empty-string fallback. After migration, verify the failure entry clears and the target data changes on the next rotation; a running Operator alone does not prove synchronization is healthy. Never place credentials in labels or annotations.
 
 ### Custom Functions
 
@@ -184,6 +198,9 @@ When using `templateAs: KeysAndValues`, data goes through **two layers of parsin
 - One key=value pair per line, separated by newlines
 - Leading/trailing whitespace on each line and around the key and value is trimmed automatically (e.g., `KEY1= value1` is parsed normally); empty lines are skipped
 - Lines without an `=` separator are ignored
+
+> This format has no escaping for multiline values. Newlines in a Secret value can create additional valid keys that also appear in the managed-keys annotation. Use inline `data` or `templateAs: Values` for multiline secrets, and keep sensitive data out of keys, labels and annotations. Invalid dynamic-key warnings report only the error category, not the key contents.
+
 
 ## Template Usage Patterns
 

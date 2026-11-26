@@ -127,7 +127,21 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 
 **正则表达式**：`regexMatch`/`regexFind`/`regexReplaceAll`、`regexSplit`
 
-> 所有函数均来自标准 Sprig v3 库，支持管道操作和函数组合使用。
+> 以上函数来自标准 Sprig v3 库，支持管道操作和函数组合使用。出于安全考虑，`env`、`expandenv`、`getHostByName` 已禁用，防止模板读取 Operator 进程环境中的凭据或通过 DNS 输出数据。使用这些函数的已有模板会解析失败，请改用显式配置的数据源。模板解析与执行错误只公开错误类别，不回显源模板或 Secret 值。
+
+#### 受限函数的升级影响
+
+当数据源正常时，模板使用受限函数会产生以下影响：
+
+| 模板位置 | 目标 Secret 行为 |
+| --- | --- |
+| 内联 `target.template.data` | 致命解析错误：不创建、更新或删除 Secret；已有 Secret 的数据和元数据保持旧值 |
+| `templateFrom`（ConfigMap、Secret 或 Literal；目标为 Data、Labels 或 Annotations） | 致命解析错误：整轮停止写入，其他成功模板也不会写入 |
+| 内联 `target.template.metadata.labels` / `annotations` | 非致命模板错误：成功的数据和元数据仍可更新；失败字段保留旧值，首次创建时不写入该字段 |
+
+`mergePolicy: Merge` 不能绕过致命解析错误。上述限制不改变既有的数据源失败优先级和 `cleanupSecretOnFailure` 规则；特别是全部数据源失败且启用清理时，仍可能删除 Secret。模板错误记录在 `status.dataSyncResults` 中；`template_processing_warnings` 条目的既有状态值为 `Failed`，但内联元数据错误不会因此中止写入。
+
+升级前，请检查内联模板及引用模板是否使用 `env`、`expandenv` 或 `getHostByName`。将所需值迁移到显式 KMS/OOS 数据源，再通过对应 key 渲染（例如 `{{ .endpoint }}`）；不要用返回空字符串的占位函数替换受限函数。迁移后应确认失败条目清除，并验证下一次轮转确实更新目标数据；仅确认 Operator 正常运行不足以证明同步正常。不要将凭据放入 label 或 annotation。
 
 ### 自定义函数
 
@@ -184,6 +198,9 @@ ACK Secret Manager 基于 [Sprig v3](https://github.com/Masterminds/sprig/) 提�
 - 每行一个 key=value 对，用换行符分隔
 - 行首尾空格以及 key/value 两侧的空格会自动去除（如 `KEY1= value1` 可正常解析），空行会被跳过
 - 不包含 `=` 分隔符的行会被忽略
+
+> 此格式不支持多行值转义。Secret 值中的换行可能产生额外的合法 key，并被记录到托管键注解中；请使用内联 `data` 或 `templateAs: Values` 保存多行敏感数据，不要将敏感数据用于 key、label 或 annotation。非法动态 key 的日志仅记录错误类别，不再输出 key 内容。
+
 
 ## 模板使用方式
 

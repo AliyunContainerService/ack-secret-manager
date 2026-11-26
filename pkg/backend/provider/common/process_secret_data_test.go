@@ -6,7 +6,49 @@ import (
 	"testing"
 
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
+	"gopkg.in/yaml.v3"
 )
+
+func TestSecretSafetyExtractDecode(t *testing.T) {
+	for _, canary := range []string{"FAKE_PASS", "FAKE_LONG_SECRET_VALUE_CANARY"} {
+		t.Run(canary, func(t *testing.T) {
+			var raw map[string]interface{}
+			rawErr := yaml.Unmarshal([]byte(canary), &raw)
+			if rawErr == nil || !strings.Contains(rawErr.Error(), "FAKE_") {
+				t.Fatal("fixture must reproduce YAML scalar disclosure")
+			}
+			logs := testutil.CaptureKlogOutput(t, func() {
+				got, err := ProcessExtractedExternalSecretData(&v1alpha1.DataProcess{Extract: &v1alpha1.DataSource{Key: "source"}}, []byte(canary))
+				if got != nil || err == nil {
+					t.Fatal("malformed extract must remain a failure")
+				}
+				if strings.Contains(err.Error(), "FAKE_") {
+					t.Error("extract error exposes scalar input")
+				}
+			})
+			if !strings.Contains(logs, "failed to parse") || strings.Contains(logs, "FAKE_") {
+				t.Error("extract diagnostic must not expose scalar input")
+			}
+		})
+	}
+}
+
+func TestSecretSafetyExtractRewrite(t *testing.T) {
+	payload := []byte(`{"FAKE_KEY_CANARY_a":"one","FAKE_KEY_CANARY_b":"two"}`)
+	logs := testutil.CaptureKlogOutput(t, func() {
+		got, err := ProcessExtractedExternalSecretData(&v1alpha1.DataProcess{
+			Extract:    &v1alpha1.DataSource{Key: "source"},
+			ReplaceKey: []v1alpha1.ReplaceRule{{Source: "_[ab]$", Target: ""}},
+		}, payload)
+		if err != nil || len(got) != 1 {
+			t.Fatal("rewrite collision overwrite semantics changed")
+		}
+	})
+	if !strings.Contains(logs, "key conflict") || strings.Contains(logs, "FAKE_KEY_CANARY") {
+		t.Error("rewrite diagnostics must not expose document keys")
+	}
+}
 
 func TestResolveTargetKey(t *testing.T) {
 	tests := []struct {

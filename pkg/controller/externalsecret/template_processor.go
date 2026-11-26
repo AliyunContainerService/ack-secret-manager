@@ -13,7 +13,6 @@ import (
 	"strconv"
 	"strings"
 	"text/template"
-	"unicode"
 
 	"github.com/Masterminds/sprig/v3"
 	"golang.org/x/crypto/bcrypt"
@@ -159,7 +158,17 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 				clear(result.Data)
 			}
 
+			// Inline templates and templateFrom share Secret key rules; invalid keys are neither rendered nor written.
 			for key, templateStr := range externalSec.Spec.Target.Template.Data {
+				if !stp.isValidSecretKey(key) {
+					klog.Warningf("data template: dropping key %q: invalid secret data key format", key)
+					// Surface the drop through the non-fatal warning channel so it
+					// reaches the ExternalSecret status, not only controller logs.
+					// The key comes from the CR spec, never from Secret values.
+					result.Stats.Errors = append(result.Stats.Errors,
+						fmt.Sprintf("data template key %s dropped: invalid secret data key format", key))
+					continue
+				}
 				processedValue, err := stp.executeTemplate(templateStr, interfaceData)
 				if err != nil {
 					if stderrors.Is(err, errTemplateParse) {
@@ -209,7 +218,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 						if stp.isValidAnnotationKey(k) {
 							result.Metadata.Annotations[k] = string(v)
 						} else {
-							klog.Warningf("templateFrom: dropping annotation key %q: invalid annotation key format", k)
+							klog.Warning("templateFrom: dropping key: invalid annotation key format")
 						}
 					}
 				case api.TemplateTargetLabels:
@@ -217,7 +226,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 						if stp.isValidLabelKey(k) {
 							result.Metadata.Labels[k] = string(v)
 						} else {
-							klog.Warningf("templateFrom: dropping label key %q: invalid label key format", k)
+							klog.Warning("templateFrom: dropping key: invalid label key format")
 						}
 					}
 				case api.TemplateTargetData, "":
@@ -229,7 +238,7 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 							result.Stats.DataTemplatesProcessed++
 							managedKeys[k] = true
 						} else {
-							klog.Warningf("templateFrom: dropping data key %q: invalid secret data key format", k)
+							klog.Warning("templateFrom: dropping key: invalid secret data key format")
 						}
 					}
 				}
@@ -305,6 +314,9 @@ func (stp *SimpleTemplateProcessor) ProcessAllTemplates(
 // createFuncMap creates the function map for template execution
 func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	funcMap := sprig.TxtFuncMap()
+	delete(funcMap, "env")
+	delete(funcMap, "expandenv")
+	delete(funcMap, "getHostByName")
 
 	// Custom functions not available in Sprig
 
@@ -316,7 +328,7 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 		}
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), hashCost)
 		if err != nil {
-			klog.Warningf("bcrypt hash generation failed: %v", err)
+			klog.Warning("bcrypt hash generation failed")
 			return ""
 		}
 		return string(hash)
@@ -336,7 +348,7 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	funcMap["jsonPath"] = func(jsonStr, path string) interface{} {
 		var data interface{}
 		if err := json.Unmarshal([]byte(jsonStr), &data); err != nil {
-			klog.Warningf("jsonPath: failed to unmarshal input json for path %s: %v", path, err)
+			klog.Warning("jsonPath: failed to unmarshal input json")
 			return ""
 		}
 		return extractJSONPath(data, path)
@@ -346,18 +358,18 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	funcMap["mergeJson"] = func(base, override string) string {
 		var baseMap, overrideMap map[string]interface{}
 		if err := json.Unmarshal([]byte(base), &baseMap); err != nil {
-			klog.Warningf("mergeJson: failed to unmarshal base json: %v", err)
+			klog.Warning("mergeJson: failed to unmarshal base json")
 			return base
 		}
 		if err := json.Unmarshal([]byte(override), &overrideMap); err != nil {
-			klog.Warningf("mergeJson: failed to unmarshal override json: %v", err)
+			klog.Warning("mergeJson: failed to unmarshal override json")
 			return base
 		}
 
 		merged := deepMerge(baseMap, overrideMap)
 		result, err := json.Marshal(merged)
 		if err != nil {
-			klog.Warningf("mergeJson: failed to marshal merged result: %v", err)
+			klog.Warning("mergeJson: failed to marshal merged result")
 			return base
 		}
 		return string(result)
@@ -397,13 +409,13 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 func (stp *SimpleTemplateProcessor) executeTemplate(templateStr string, data map[string]interface{}) ([]byte, error) {
 	tmpl, err := template.New("").Funcs(stp.funcMap).Parse(templateStr)
 	if err != nil {
-		return nil, fmt.Errorf("%w: %v", errTemplateParse, err)
+		return nil, errTemplateParse
 	}
 
 	var buf bytes.Buffer
 	// Passing the data map enables {{ .key }} syntax
 	if err := tmpl.Execute(&buf, data); err != nil {
-		return nil, fmt.Errorf("%w: %v", errTemplateExecution, err)
+		return nil, errTemplateExecution
 	}
 
 	return buf.Bytes(), nil
@@ -419,31 +431,25 @@ func extractJSONPath(data interface{}, path string) interface{} {
 	parts := strings.Split(path, ".")
 	current := data
 
-	for i, part := range parts {
+	for _, part := range parts {
 		switch v := current.(type) {
 		case map[string]interface{}:
 			if val, exists := v[part]; exists {
 				current = val
 			} else {
-				currentPath := strings.Join(parts[:i+1], ".")
-				klog.Warningf("jsonPath: key '%s' not found in map at path '%s', available keys: %v",
-					part, currentPath, getMapKeys(v))
+				klog.Warning("jsonPath: key not found in map")
 				return ""
 			}
 		case []interface{}:
 			if idx, err := strconv.Atoi(part); err == nil && idx >= 0 && idx < len(v) {
 				current = v[idx]
 			} else {
-				currentPath := strings.Join(parts[:i+1], ".")
-				klog.Warningf("jsonPath: invalid array index '%s' at path '%s', array length: %d",
-					part, currentPath, len(v))
+				klog.Warning("jsonPath: invalid array index")
 				return ""
 			}
 		default:
 			// Primitive value: cannot traverse further
-			remainingPath := strings.Join(parts[i:], ".")
-			klog.Warningf("jsonPath: cannot traverse path '%s', current value type is %T",
-				remainingPath, current)
+			klog.Warningf("jsonPath: cannot traverse primitive value of type %T", current)
 			return ""
 		}
 	}
@@ -666,28 +672,23 @@ func (stp *SimpleTemplateProcessor) processLiteralTemplate(
 	return result, nil
 }
 
-// isValidAnnotationKey mirrors apimachinery's ValidateAnnotations, which
-// lowercases the key before checking it as a qualified name.
+// isValidAnnotationKey validates annotation key format with the same rules the
+// Kubernetes API server applies in ValidateAnnotations: a qualified name
+// checked case-insensitively, so the key is lowercased before validation.
 func (stp *SimpleTemplateProcessor) isValidAnnotationKey(key string) bool {
 	return len(validation.IsQualifiedName(strings.ToLower(key))) == 0
 }
 
-// isValidLabelKey mirrors apimachinery's ValidateLabelName.
+// isValidLabelKey validates label key format with the same rules the
+// Kubernetes API server applies in ValidateLabels: a qualified name with an
+// optional lowercase DNS subdomain prefix.
 func (stp *SimpleTemplateProcessor) isValidLabelKey(key string) bool {
 	return len(validation.IsQualifiedName(key)) == 0
 }
 
-// isValidSecretKey validates secret data key format (alphanumeric, '-', '_' or '.')
+// isValidSecretKey validates secret data key format with the same rules the
+// Kubernetes API server applies to Secret data keys: [-._a-zA-Z0-9]+, at most
+// 253 characters, and no ".." prefix.
 func (stp *SimpleTemplateProcessor) isValidSecretKey(key string) bool {
-	if len(key) == 0 {
-		return false
-	}
-
-	for _, char := range key {
-		if !unicode.IsLetter(char) && !unicode.IsDigit(char) && char != '-' && char != '_' && char != '.' {
-			return false
-		}
-	}
-
-	return true
+	return len(validation.IsConfigMapKey(key)) == 0
 }
