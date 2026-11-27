@@ -338,7 +338,7 @@ func (stp *SimpleTemplateProcessor) createFuncMap() template.FuncMap {
 	funcMap["htpasswd"] = func(username, password string) string {
 		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
 		if err != nil {
-			klog.Warningf("htpasswd bcrypt hash generation failed: %v", err)
+			klog.Warning("htpasswd bcrypt hash generation failed")
 			return ""
 		}
 		return fmt.Sprintf("%s:%s\n", username, string(hash))

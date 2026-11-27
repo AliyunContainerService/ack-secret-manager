@@ -40,18 +40,14 @@ English | [中文简体](./README-zh_CN.md)
      - Click **Add Permissions** to create a custom policy with the following content (only grant the permissions required for the secret manager, adhering to the principle of least privilege):
 
      > **Note**: Only grant the minimal permissions required for KMS Secret Manager, adhering to the principle of least privilege.
-     > The statement below is valid JSON: it grants `kms:GetSecretValue` and `kms:Decrypt` for Alibaba Cloud KMS Secrets Manager, and `oos:GetSecretParameter` for Alibaba Cloud OOS Encryption Parameter.
+     > The statement below is valid JSON: `kms:GetSecretValue` is used for Alibaba Cloud KMS Secrets Manager, and `oos:GetSecretParameter` is used for Alibaba Cloud OOS Encryption Parameter. Because OOS encryption parameters are encrypted with KMS, `kms:Decrypt` is required for decryption in both scenarios.
 
      ```json
      {
          "Action": [
-           // Permission required to access Alibaba Cloud KMS Secrets Manager
            "kms:GetSecretValue",
            "kms:Decrypt",
-
-           // Permission required to access Alibaba Cloud OOS Encryption Parameter
-           "oos:GetSecretParameter",
-           "kms:GetSecretValue"
+           "oos:GetSecretParameter"
          ],
          "Resource": [
              "*"

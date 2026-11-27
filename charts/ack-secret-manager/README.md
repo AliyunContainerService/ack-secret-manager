@@ -40,18 +40,14 @@
      - 点击添加权限按钮，创建自定义权限策略，策略内容如下（仅授权同步服务需要的RAM策略即可，保证最小权限原则）：
 
      > **注意**：仅授予访问 KMS 凭据管家所需的最小权限，遵循最小权限原则。
-     > 下方语句为合法 JSON，其中 `kms:GetSecretValue`、`kms:Decrypt` 用于阿里云 KMS 凭据管家，`oos:GetSecretParameter` 用于阿里云 OOS 加密参数。
+     > 下方语句为合法 JSON，其中 `kms:GetSecretValue` 用于阿里云 KMS 凭据管家，`oos:GetSecretParameter` 用于阿里云 OOS 加密参数；由于 OOS 加密参数基于 KMS 加密，两种场景的解密都需要 `kms:Decrypt` 权限。
 
      ```json
      {
          "Action": [
-           // 阿里云KMS凭据管家所需权限
            "kms:GetSecretValue",
            "kms:Decrypt",
-
-           // 阿里云OOS加密参数所需权限
-           "oos:GetSecretParameter",
-           "kms:GetSecretValue"
+           "oos:GetSecretParameter"
          ],
          "Resource": [
              "*"
