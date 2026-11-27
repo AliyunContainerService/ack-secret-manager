@@ -4,11 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"sync"
 	"time"
 
 	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
 	sts "github.com/alibabacloud-go/sts-20150401/v2/client"
+	"github.com/alibabacloud-go/tea/dara"
 	"github.com/alibabacloud-go/tea/tea"
 	credential "github.com/aliyun/credentials-go/credentials"
 	"github.com/golang-jwt/jwt/v5"
@@ -20,6 +22,7 @@ import (
 	"github.com/AliyunContainerService/ack-ram-tool/pkg/credentials/provider"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 const (
@@ -37,6 +40,85 @@ const (
 	oidcProviderCreationErrPrefix = "failed to create OIDC provider"
 )
 
+type credentialStage uint8
+
+const (
+	chainStage credentialStage = iota
+	fileOIDCStage
+	serviceAccountOIDCStage
+	akAssumeRoleStage
+	remoteAssumeRoleStage
+	ecsMetadataStage
+)
+
+func (stage credentialStage) String() string {
+	switch stage {
+	case chainStage:
+		return "chain"
+	case fileOIDCStage:
+		return "file_oidc"
+	case serviceAccountOIDCStage:
+		return "service_account_oidc"
+	case akAssumeRoleStage:
+		return "ak_assume_role"
+	case remoteAssumeRoleStage:
+		return "remote_assume_role"
+	case ecsMetadataStage:
+		return "ecs_metadata"
+	default:
+		return "unknown"
+	}
+}
+
+func credentialErrorCategory(err error) string {
+	if provider.IsNotEnableError(err) {
+		return "provider_not_enabled"
+	}
+	if provider.IsNoAvailableProviderError(err) {
+		return "no_available_provider"
+	}
+	return utils.SafeErrorCategory(err)
+}
+
+type safeProviderLogger struct{ stage credentialStage }
+
+func (l safeProviderLogger) Info(string) {
+	klog.Infof("credential provider selection changed: stage=%s", l.stage)
+}
+func (safeProviderLogger) Debug(string) {}
+func (l safeProviderLogger) Error(err error, _ string) {
+	// Dependency messages may already contain URLs or response bodies.
+	klog.Errorf("credential provider refresh failed: stage=%s, reason=%s", l.stage, credentialErrorCategory(err))
+}
+
+type safeCredentialsProvider struct {
+	provider.CredentialsProvider
+	stage credentialStage
+}
+
+func (p *safeCredentialsProvider) Credentials(ctx context.Context) (*provider.Credentials, error) {
+	cred, err := p.CredentialsProvider.Credentials(ctx)
+	// Success is the hot path (cached credentials); skip the message
+	// formatting and error-type probes below.
+	if err == nil {
+		return cred, nil
+	}
+	message := fmt.Sprintf("credential retrieval failed (stage=%s)", p.stage)
+	if provider.IsNotEnableError(err) {
+		return cred, provider.NewNotEnableError(errors.New(message + ": provider_not_enabled"))
+	}
+	if provider.IsNoAvailableProviderError(err) {
+		return cred, provider.NewNoAvailableProviderError(errors.New(message + ": no_available_provider"))
+	}
+	return cred, utils.SanitizeError(err, message)
+}
+
+func (p *safeCredentialsProvider) Stop(ctx context.Context) {
+	if stopper, ok := p.CredentialsProvider.(provider.Stopper); ok {
+		stopper.Stop(ctx)
+	}
+}
+
 // TokenOIDCProvider implements an OIDC provider based on dynamic token
 type TokenOIDCProvider struct {
 	stsEndpoint     string
@@ -44,6 +126,10 @@ type TokenOIDCProvider struct {
 	token           string
 	roleArn         string
 	oidcProviderArn string
+	// httpClient is a test-only injection point for the secret-safety
+	// transport assertions; production leaves it nil so the SDK uses its
+	// default client.
+	httpClient dara.HttpClient
 
 	// mu serializes all reads/updates of the token/credential state below
 	mu sync.Mutex
@@ -187,6 +273,7 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 		// p.mu. Units are milliseconds.
 		ConnectTimeout: tea.Int(10 * 1000),
 		ReadTimeout:    tea.Int(30 * 1000),
+		HttpClient:     p.httpClient,
 	}
 	stsClient, err := sts.NewClient(cfg)
 	if err != nil {
@@ -200,7 +287,9 @@ func (p *TokenOIDCProvider) GetCredential() (credential.Credential, error) {
 		RoleSessionName: tea.String(p.sessionName),
 	})
 	if err != nil {
-		return nil, fmt.Errorf("failed to assume role with oidc: %v", err)
+		safeProviderLogger{stage: serviceAccountOIDCStage}.Error(err, "")
+		// Preserve the original non-unwrapping error contract for retry logic.
+		return nil, fmt.Errorf("failed to assume role with oidc: %s", utils.SafeErrorCategory(err))
 	}
 
 	config := &credential.Config{
@@ -263,6 +352,10 @@ type AuthConfig struct {
 	ServiceAccountNamespace string
 	KubeClient              kubernetes.Interface
 	TokenAudiences          []string
+	// transport is a test-only injection point (same-package tests) for the
+	// secret-safety transport assertions; production leaves it nil so every
+	// provider uses its default HTTP client.
+	transport http.RoundTripper
 }
 
 // NormalizeSessionNames fills the default role session name into empty
@@ -345,6 +438,8 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 			STSEndpoint:   provider.GetSTSEndpoint(region, true),
 			SessionName:   a.RoleSessionName,
 			RefreshPeriod: a.RefreshPeriod,
+			Transport:     a.transport,
+			Logger:        safeProviderLogger{stage: akAssumeRoleStage},
 		})
 		providers = append(providers, ramRoleProvider)
 	}
@@ -359,6 +454,8 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	if backend.EnableWorkerRole {
 		providers = append(providers, provider.NewECSMetadataProvider(provider.ECSMetadataProviderOptions{
 			RefreshPeriod: a.RefreshPeriod,
+			Transport:     a.transport,
+			Logger:        safeProviderLogger{stage: ecsMetadataStage},
 		}))
 	} else {
 		if len(providers) == 0 {
@@ -367,6 +464,7 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 	}
 
 	chainProvider := provider.NewChainProvider(providers...)
+	chainProvider.Logger = safeProviderLogger{stage: chainStage}
 	var remoteRoleProvider *provider.RoleArnProvider
 	var cred *provider.CredentialForV2SDK
 	if a.RemoteRoleArn != "" && a.RemoteRoleSessionName != "" {
@@ -374,12 +472,14 @@ func (a *AuthConfig) GetAuthCred(region string, maxConcurrentCount int, m *backe
 			STSEndpoint:   provider.GetSTSEndpoint(region, true),
 			SessionName:   a.RemoteRoleSessionName,
 			RefreshPeriod: a.RefreshPeriod,
+			Transport:     a.transport,
+			Logger:        safeProviderLogger{stage: remoteAssumeRoleStage},
 		})
-		semaphoreProvider = provider.NewSemaphoreProvider(remoteRoleProvider, provider.SemaphoreProviderOptions{
+		semaphoreProvider = provider.NewSemaphoreProvider(&safeCredentialsProvider{CredentialsProvider: remoteRoleProvider, stage: remoteAssumeRoleStage}, provider.SemaphoreProviderOptions{
 			MaxWeight: int64(maxConcurrentCount),
 		})
 	} else {
-		semaphoreProvider = provider.NewSemaphoreProvider(chainProvider, provider.SemaphoreProviderOptions{
+		semaphoreProvider = provider.NewSemaphoreProvider(&safeCredentialsProvider{CredentialsProvider: chainProvider, stage: chainStage}, provider.SemaphoreProviderOptions{
 			MaxWeight: int64(maxConcurrentCount),
 		})
 	}
@@ -456,6 +556,8 @@ func (a *AuthConfig) createOIDCProvider(region string) (provider.CredentialsProv
 		RoleArn:         a.RoleArn,
 		OIDCProviderArn: a.OidcArn,
 		RefreshPeriod:   a.RefreshPeriod,
+		Transport:       a.transport,
+		Logger:          safeProviderLogger{stage: fileOIDCStage},
 	})
 
 	return oidcProvider, nil

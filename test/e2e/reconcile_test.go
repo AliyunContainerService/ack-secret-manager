@@ -366,7 +366,6 @@ var _ = Describe("Reconcile E2E", func() {
 		})
 	})
 
-
 	Context("SecretStore reconciles when credentials secret is updated", func() {
 		It("Should reconcile when accessKeyId/accessKeySecret in referenced secret is updated", func() {
 			// Create Secret with invalid credentials first
@@ -965,7 +964,6 @@ var _ = Describe("Reconcile E2E", func() {
 		})
 	})
 
-
 	// Covers the --watch-namespaces/--exclude-namespaces flags of the
 	// ExternalSecret controller (v0.6.7, community-convention scoping).
 	// Semantics under test: a namespace listed in --exclude-namespaces is
@@ -1190,9 +1188,6 @@ var _ = Describe("Reconcile E2E", func() {
 	})
 })
 
-
-
-
 // cssControllerDisabledStatusKey is the documented dataSyncResults entry the
 // ExternalSecret controller persists while consuming a ClusterSecretStore
 // with --process-cluster-secret-store=false (degraded mode: the cached
@@ -1242,5 +1237,3 @@ func expectExternalSecretAllResultsFailed(ctx context.Context, namespace, name s
 			return fmt.Sprintf("ExternalSecret %s/%s should have every DataSyncResult Failed", namespace, name)
 		})
 }
-
-

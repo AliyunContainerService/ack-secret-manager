@@ -78,3 +78,5 @@ tags
 .idea
 temp.yaml
 *.log
+test/e2e/e2e-env.sh
+.DS_Store

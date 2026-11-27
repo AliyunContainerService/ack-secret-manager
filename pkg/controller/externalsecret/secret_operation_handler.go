@@ -4,10 +4,10 @@ package externalsecret
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -58,7 +58,7 @@ func (h *SimpleSecretOperationHandler) HandleSecretOperation(
 
 	secretExists := err == nil
 	if err != nil && !errors.IsNotFound(err) {
-		return fmt.Errorf("failed to get current secret: %w", err)
+		return utils.SanitizeError(err, "failed to get current secret")
 	}
 
 	labels := make(map[string]string)
@@ -125,7 +125,7 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 				Namespace: externalSec.Namespace,
 				Name:      secretName,
 			}, existing); getErr != nil {
-				return fmt.Errorf("secret already exists but failed to re-fetch it: %w", getErr)
+				return utils.SanitizeError(getErr, "secret already exists but failed to re-fetch it")
 			}
 			return h.updateSecretWithoutOwner(ctx, existing, secretData, labels, annotations)
 		}
@@ -135,7 +135,7 @@ func (h *SimpleSecretOperationHandler) createSecretWithoutOwner(
 				"namespace", externalSec.Namespace, "secret", secretName)
 			return nil // Gracefully handle namespace termination
 		}
-		return fmt.Errorf("failed to create secret without owner reference: %w", err)
+		return utils.SanitizeError(err, "failed to create secret without owner reference")
 	}
 
 	h.Log.Info("Created secret without owner reference", "namespace", externalSec.Namespace, "name", secretName)
@@ -158,7 +158,7 @@ func (h *SimpleSecretOperationHandler) updateSecretWithoutOwner(
 
 	// Do NOT modify owner references (preserve any existing ones)
 	if err := h.Client.Update(ctx, updatedSecret); err != nil {
-		return fmt.Errorf("failed to update secret without owner reference: %w", err)
+		return utils.SanitizeError(err, "failed to update secret without owner reference")
 	}
 
 	h.Log.Info("Updated secret without owner reference",
@@ -184,11 +184,11 @@ func (h *SimpleSecretOperationHandler) handleProviderDeletion(
 		if errors.IsNotFound(err) {
 			return nil
 		}
-		return fmt.Errorf("failed to get secret for deletion: %w", err)
+		return utils.SanitizeError(err, "failed to get secret for deletion")
 	}
 
 	if err := h.Client.Delete(ctx, secret); err != nil {
-		return fmt.Errorf("failed to delete secret: %w", err)
+		return utils.SanitizeError(err, "failed to delete secret")
 	}
 
 	h.Log.Info("Deleted secret due to provider data unavailability",

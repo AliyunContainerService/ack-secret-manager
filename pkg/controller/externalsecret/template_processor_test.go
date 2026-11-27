@@ -1,22 +1,541 @@
 package externalsecret
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	stderrors "errors"
+	"fmt"
+	"net"
+	"reflect"
 	"sort"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"text/template"
 
+	"github.com/Masterminds/sprig/v3"
+	"github.com/go-logr/logr"
 	"golang.org/x/crypto/bcrypt"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	metavalidation "k8s.io/apimachinery/pkg/apis/meta/v1/validation"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	api "github.com/AliyunContainerService/ack-secret-manager/pkg/apis/alibabacloud/v1alpha1"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider/common"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
 )
+
+func assertSafePersistedFailure(t *testing.T, es *api.ExternalSecret, err error, canary string) {
+	t.Helper()
+	if err == nil {
+		t.Fatal("expected a failure")
+	}
+	if strings.Contains(fmt.Sprintf("%v %+v %#v", err, err, err), canary) {
+		t.Error("public error exposes the canary")
+	}
+	c := fake.NewClientBuilder().WithScheme(testutil.NewTestScheme(t)).
+		WithStatusSubresource(&api.ExternalSecret{}).WithObjects(es.DeepCopy()).Build()
+	r := &ExternalSecretReconciler{Client: c, Ctx: context.Background(), Log: logr.Discard()}
+	stored := &api.ExternalSecret{}
+	key := client.ObjectKeyFromObject(es)
+	if getErr := c.Get(r.Ctx, key, stored); getErr != nil {
+		t.Fatal(getErr)
+	}
+	r.updateResourceManagementStatus(stored, "operation", err)
+	if getErr := c.Get(r.Ctx, key, stored); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if len(stored.Status.DataSyncResults) != 1 || stored.Status.DataSyncResults[0].Status != "Failed" {
+		t.Fatal("failure status was not persisted")
+	}
+	if reason := stored.Status.DataSyncResults[0].Reason; reason == "" || strings.Contains(reason, canary) {
+		t.Error("persisted status must contain a safe, nonempty failure reason")
+	}
+}
+
+func TestSecretSafetyTemplateErrors(t *testing.T) {
+	const canary = "FAKE_TEMPLATE_SECRET_CANARY"
+	data := map[string]interface{}{"password": canary}
+	for _, tt := range []struct {
+		name, source string
+		sentinel     error
+	}{
+		{"range", `{{ range .password }}{{ . }}{{ end }}`, errTemplateExecution},
+		{"fail", `{{ fail .password }}`, errTemplateExecution},
+		{"parse", `{{ ` + canary + ` }}`, errTemplateParse},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, rawErr := template.New("").Funcs(sprig.TxtFuncMap()).Parse(tt.source)
+			if rawErr == nil {
+				rawErr = raw.Execute(&bytes.Buffer{}, data)
+			}
+			if rawErr == nil || !strings.Contains(rawErr.Error(), canary) {
+				t.Fatal("fixture does not reproduce the original disclosure")
+			}
+			stp := NewSimpleTemplateProcessor(nil)
+			out, err := stp.executeTemplate(tt.source, data)
+			if len(out) != 0 || !stderrors.Is(err, tt.sentinel) {
+				t.Fatal("error classification or failed-output semantics changed")
+			}
+			assertSafePersistedFailure(t, buildTestExternalSecret(nil), err, canary)
+			es := buildTestExternalSecret(&api.ExternalSecretTemplate{Data: map[string]string{"output": tt.source}})
+			result, processErr := stp.ProcessAllTemplates(context.Background(), es, map[string][]byte{"password": []byte(canary)})
+			if result.Stats.DataTemplatesProcessed != 0 || strings.Contains(fmt.Sprint(result.Stats), canary) {
+				t.Error("template stats expose input or count failed output as success")
+			}
+			if tt.sentinel == errTemplateParse {
+				assertSafePersistedFailure(t, es, processErr, canary)
+			} else if processErr != nil || len(result.Stats.Errors) != 1 {
+				t.Error("nonfatal grading changed")
+			}
+			src := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: "default"}, Data: map[string][]byte{"config": []byte(tt.source)}}
+			stp = NewSimpleTemplateProcessor(newTemplateSourceClient(t, src))
+			_, err = stp.processSecretTemplate(context.Background(), &api.TemplateRef{Name: "source", Items: []api.TemplateRefItem{{Key: "config"}}}, "default", data)
+			assertSafePersistedFailure(t, es, err, canary)
+		})
+	}
+}
+
+func TestSecretSafetyBcryptCost(t *testing.T) {
+	const canary = "71717171"
+	if _, err := bcrypt.GenerateFromPassword([]byte("fake-password"), 71717171); err == nil || !strings.Contains(err.Error(), canary) {
+		t.Fatal("fixture must reproduce cost disclosure in the bcrypt error")
+	}
+	logs := testutil.CaptureKlogOutput(t, func() {
+		out, err := NewSimpleTemplateProcessor(nil).executeTemplate(`{{ bcrypt "fake-password" (int .pin) }}`, map[string]interface{}{"pin": canary})
+		if err != nil || len(out) != 0 {
+			t.Fatal("bcrypt failure fallback changed")
+		}
+	})
+	if !strings.Contains(logs, "bcrypt hash generation failed") || strings.Contains(logs, canary) {
+		t.Error("bcrypt log exposes Secret-derived cost")
+	}
+}
+
+func TestSecretSafetyTemplateHelpers(t *testing.T) {
+	const canary = "919191919191919191e999"
+	payload := `{"value":` + canary + `}`
+	var parsed interface{}
+	if err := json.Unmarshal([]byte(payload), &parsed); err == nil || !strings.Contains(err.Error(), canary) {
+		t.Fatal("fixture must expose the numeric token in the raw JSON error")
+	}
+	stp := NewSimpleTemplateProcessor(nil)
+	for _, tt := range []struct{ name, source, want string }{
+		{"jsonPath decode", `{{ jsonPath .payload "value" }}`, ""},
+		{"merge base", `{{ mergeJson .payload "{}" }}`, payload},
+		{"merge override", `{{ mergeJson "{}" .payload }}`, "{}"},
+		{"missing key", `{{ jsonPath .map "missing" }}`, ""},
+		{"dynamic path", `{{ jsonPath "{}" .path }}`, ""},
+		{"array index", `{{ jsonPath "[]" .path }}`, ""},
+		{"primitive path", `{{ jsonPath "1" .path }}`, ""},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			logs := testutil.CaptureKlogOutput(t, func() {
+				out, err := stp.executeTemplate(tt.source, map[string]interface{}{"payload": payload, "map": `{"` + canary + `":1}`, "path": canary})
+				if err != nil || string(out) != tt.want {
+					t.Error("helper fallback semantics changed")
+				}
+			})
+			if logs == "" || strings.Contains(logs, canary) {
+				t.Error("helper must log a safe diagnostic without Secret-derived values or keys")
+			}
+		})
+	}
+}
+
+func TestSecretSafetyDynamicTemplateKeys(t *testing.T) {
+	const canary = "FAKE_DYNAMIC_KEY_CANARY!"
+	for _, target := range []api.TemplateTarget{api.TemplateTargetData, api.TemplateTargetLabels, api.TemplateTargetAnnotations} {
+		t.Run(string(target), func(t *testing.T) {
+			src := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: "default"}, Data: map[string][]byte{"config": []byte("password={{ .password }}")}}
+			es := buildTestExternalSecret(&api.ExternalSecretTemplate{TemplateFrom: []api.TemplateFrom{{Target: target, Secret: &api.TemplateRef{Name: "source", Items: []api.TemplateRefItem{{Key: "config", TemplateAs: api.TemplateScopeKeysAndValues}}}}}})
+			logs := testutil.CaptureKlogOutput(t, func() {
+				_, err := NewSimpleTemplateProcessor(newTemplateSourceClient(t, src)).ProcessAllTemplates(context.Background(), es, map[string][]byte{"password": []byte("ok\n" + canary + "=x")})
+				if err != nil {
+					t.Fatal(err)
+				}
+			})
+			if !strings.Contains(logs, "invalid") || strings.Contains(logs, canary) {
+				t.Error("invalid dynamic key must be dropped without being logged")
+			}
+		})
+	}
+}
+
+func TestSecretSafetyTemplateEnvironment(t *testing.T) {
+	const name, canary = "ACK_TEST_FAKE_CREDENTIAL", "FAKE_ENV_SECRET_CANARY"
+	t.Setenv(name, canary)
+	for _, source := range []string{`{{ env "` + name + `" }}`, `{{ expandenv "$` + name + `" }}`} {
+		raw := template.Must(template.New("").Funcs(sprig.TxtFuncMap()).Parse(source))
+		var buf bytes.Buffer
+		if err := raw.Execute(&buf, nil); err != nil || buf.String() != canary {
+			t.Fatal("fixture must demonstrate access to the process environment")
+		}
+		out, err := NewSimpleTemplateProcessor(nil).executeTemplate(source, nil)
+		if len(out) != 0 || !stderrors.Is(err, errTemplateParse) {
+			t.Error("environment-reading template functions must be unavailable")
+		}
+	}
+	if _, allowed := NewSimpleTemplateProcessor(nil).funcMap["getHostByName"]; allowed {
+		t.Error("templates must not have a DNS exfiltration function")
+	}
+}
+
+func TestSecretSafetyTemplateDNS(t *testing.T) {
+	const canary = "fake-dns-secret-canary"
+	var attempts atomic.Int32
+	var disclosed atomic.Bool
+	previous := net.DefaultResolver
+	net.DefaultResolver = &net.Resolver{PreferGo: true, Dial: func(context.Context, string, string) (net.Conn, error) {
+		attempts.Add(1)
+		left, right := net.Pipe()
+		go func() {
+			defer func() { _ = right.Close() }()
+			buf := make([]byte, 4096)
+			n, _ := right.Read(buf)
+			if bytes.Contains(buf[:n], []byte(canary)) {
+				disclosed.Store(true)
+			}
+		}()
+		return left, nil
+	}}
+	t.Cleanup(func() { net.DefaultResolver = previous })
+	source := `{{ getHostByName .password }}`
+	data := map[string]interface{}{"password": canary + ".invalid."}
+	raw := template.Must(template.New("").Funcs(sprig.TxtFuncMap()).Parse(source))
+	_ = raw.Execute(&bytes.Buffer{}, data)
+	if attempts.Load() == 0 || !disclosed.Load() {
+		t.Fatal("fixture must put the canary in a DNS query captured locally")
+	}
+	attempts.Store(0)
+	_, err := NewSimpleTemplateProcessor(nil).executeTemplate(source, data)
+	if !stderrors.Is(err, errTemplateParse) || attempts.Load() != 0 {
+		t.Fatal("restricted function must fail before any DNS request")
+	}
+}
+
+func TestSecretSafetyExtractStatus(t *testing.T) {
+	_, err := common.ProcessExtractedExternalSecretData(&api.DataProcess{Extract: &api.DataSource{Key: "source"}}, []byte("FAKE_PASS"))
+	es := buildTestExternalSecret(nil)
+	assertSafePersistedFailure(t, es, err, "FAKE_PASS")
+	c := fake.NewClientBuilder().WithScheme(testutil.NewTestScheme(t)).WithStatusSubresource(&api.ExternalSecret{}).WithObjects(es).Build()
+	r := &ExternalSecretReconciler{Client: c, Ctx: context.Background()}
+	r.updateExternalSecretStatus(es, nil, map[string]error{"source": err}, nil, nil, nil, true, true)
+	stored := &api.ExternalSecret{}
+	if getErr := c.Get(r.Ctx, client.ObjectKeyFromObject(es), stored); getErr != nil {
+		t.Fatal(getErr)
+	}
+	if len(stored.Status.DataSyncResults) != 1 || stored.Status.DataSyncResults[0].Status != "Failed" || strings.Contains(stored.Status.DataSyncResults[0].Reason, "FAKE_") {
+		t.Fatal("extract failure must persist without scalar disclosure")
+	}
+}
+
+func TestSecretSafetyAPIValidation(t *testing.T) {
+	const canary = "FAKE_LABEL_SECRET_CANARY!"
+	for _, update := range []bool{false, true} {
+		t.Run(fmt.Sprintf("update=%v", update), func(t *testing.T) {
+			es := buildTestExternalSecret(nil)
+			calls := 0
+			validate := func(obj client.Object) error {
+				calls++
+				problems := metavalidation.ValidateLabels(obj.GetLabels(), field.NewPath("metadata", "labels"))
+				err := apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, obj.GetName(), problems)
+				if len(problems) == 0 || !strings.Contains(err.Error(), canary) {
+					t.Fatal("validation fixture must disclose BadValue")
+				}
+				return err
+			}
+			builder := fake.NewClientBuilder().WithScheme(testutil.NewTestScheme(t)).WithInterceptorFuncs(interceptor.Funcs{
+				Create: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.CreateOption) error {
+					return validate(obj)
+				},
+				Update: func(_ context.Context, _ client.WithWatch, obj client.Object, _ ...client.UpdateOption) error {
+					return validate(obj)
+				},
+			})
+			if update {
+				builder.WithObjects(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: es.Spec.Target.Name, Namespace: es.Namespace}})
+			}
+			handler := NewSimpleSecretOperationHandler(builder.Build(), false, logr.Discard())
+			err := handler.HandleSecretOperation(context.Background(), es, map[string][]byte{"password": []byte(canary)}, nil, map[string]map[string]string{"labels": {"value": canary}})
+			if calls != 1 || !apierrors.IsInvalid(err) {
+				t.Fatal("API error classification or write behavior changed")
+			}
+			assertSafePersistedFailure(t, es, err, canary)
+		})
+	}
+}
+
+type secretSafetyWriteClient struct {
+	client.Client
+	target client.ObjectKey
+	writes [3]int
+	reject func(*corev1.Secret) error
+}
+
+func (c *secretSafetyWriteClient) attempt(obj client.Object, operation int) error {
+	if secret, ok := obj.(*corev1.Secret); ok && client.ObjectKeyFromObject(secret) == c.target {
+		c.writes[operation]++
+		if c.reject != nil && operation < 2 {
+			return c.reject(secret)
+		}
+	}
+	return nil
+}
+
+func (c *secretSafetyWriteClient) Create(ctx context.Context, obj client.Object, opts ...client.CreateOption) error {
+	if err := c.attempt(obj, 0); err != nil {
+		return err
+	}
+	return c.Client.Create(ctx, obj, opts...)
+}
+
+func (c *secretSafetyWriteClient) Update(ctx context.Context, obj client.Object, opts ...client.UpdateOption) error {
+	if err := c.attempt(obj, 1); err != nil {
+		return err
+	}
+	return c.Client.Update(ctx, obj, opts...)
+}
+
+func (c *secretSafetyWriteClient) Delete(ctx context.Context, obj client.Object, opts ...client.DeleteOption) error {
+	if err := c.attempt(obj, 2); err != nil {
+		return err
+	}
+	return c.Client.Delete(ctx, obj, opts...)
+}
+
+func TestSecretSafetyRestrictedFunctionsReconcile(t *testing.T) {
+	const canary = "FAKE_TEMPLATE_UPGRADE_CANARY"
+	for _, function := range []string{"env", "expandenv", "getHostByName"} {
+		for _, location := range []string{"data", "labels", "annotations", "configmap-Data", "configmap-Labels", "configmap-Annotations", "secret-Data", "secret-Labels", "secret-Annotations", "literal-Data", "literal-Labels", "literal-Annotations"} {
+			for _, policy := range []api.TemplateMergePolicy{api.MergePolicyReplace, api.MergePolicyMerge} {
+				for _, existing := range []bool{false, true} {
+					for _, cleanup := range []bool{false, true} {
+						t.Run(fmt.Sprintf("%s/%s/%s/existing=%t/cleanup=%t", function, location, policy, existing, cleanup), func(t *testing.T) {
+							tmpl := &api.ExternalSecretTemplate{
+								MergePolicy: policy, Data: map[string]string{"output": "{{ .token }}"},
+								Metadata: &api.ExternalSecretTemplateMetadata{Labels: map[string]string{"healthy": "ok"}, Annotations: map[string]string{"healthy": "ok"}},
+							}
+							disabled := fmt.Sprintf("{{ %s %q }}", function, canary)
+							var source client.Object
+							configure := func(tmpl *api.ExternalSecretTemplate, text string) {
+								switch location {
+								case "data":
+									tmpl.Data["output"] = text
+								case "labels":
+									tmpl.Metadata.Labels["blocked"] = text
+								case "annotations":
+									tmpl.Metadata.Annotations["blocked"] = text
+								default:
+									parts := strings.SplitN(location, "-", 2)
+									ref := &api.TemplateRef{Name: "template-source", Items: []api.TemplateRefItem{{Key: "rendered", TemplateAs: api.TemplateScopeValues}}}
+									from := api.TemplateFrom{Target: api.TemplateTarget(parts[1])}
+									meta := metav1.ObjectMeta{Name: ref.Name, Namespace: "default"}
+									switch parts[0] {
+									case "configmap":
+										from.ConfigMap = ref
+										source = &corev1.ConfigMap{ObjectMeta: meta, Data: map[string]string{"rendered": text}}
+									case "secret":
+										from.Secret = ref
+										source = &corev1.Secret{ObjectMeta: meta, Data: map[string][]byte{"rendered": []byte(text)}}
+									case "literal":
+										from.Literal = &text
+									}
+									tmpl.TemplateFrom = []api.TemplateFrom{from}
+								}
+							}
+							configure(tmpl, disabled)
+							es := buildTestExternalSecret(tmpl)
+							es.Finalizers = []string{secretFinalizer}
+							es.Spec.Provider = "kms"
+							es.Spec.Data = []api.DataSource{{Key: "token"}}
+							objs := []client.Object{es, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: es.Namespace}}}
+							if source != nil {
+								objs = append(objs, source)
+							}
+							old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: es.Spec.Target.Name, Namespace: es.Namespace, Labels: map[string]string{"blocked": "old", "healthy": "old"}, Annotations: map[string]string{"blocked": "old", "healthy": "old"}}, Data: map[string][]byte{"output": []byte("old"), "legacy": []byte("keep-on-failure")}}
+							if existing {
+								objs = append(objs, old)
+							}
+							sc := &fakeSecretClient{dataByKey: map[string]map[string][]byte{"token": {"token": []byte(canary)}}}
+							r := newTestReconciler(t, cleanup, sc, objs...)
+							writes := &secretSafetyWriteClient{Client: r.Client, target: client.ObjectKeyFromObject(old)}
+							r.Client = writes
+							var logs bytes.Buffer
+							r.Log = zap.New(zap.WriteTo(&logs))
+							req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(es)}
+							fatal := location != "labels" && location != "annotations"
+							_, err := r.Reconcile(context.Background(), req)
+							if (err != nil) != fatal {
+								t.Fatalf("fatal grading changed: %v", err)
+							}
+							got := getTestSecret(t, r, es.Namespace, es.Spec.Target.Name)
+							statusKey := "template_processing_warnings"
+							if fatal {
+								statusKey = "template_processing_fatal"
+								if writes.writes != [3]int{} || (got != nil) != existing {
+									t.Fatal("fatal parse error must not create, update or delete the Secret")
+								}
+								if existing && (!reflect.DeepEqual(got.Data, old.Data) || !reflect.DeepEqual(got.Labels, old.Labels) || !reflect.DeepEqual(got.Annotations, old.Annotations)) {
+									t.Fatal("fatal parse error changed the existing Secret")
+								}
+							} else {
+								wantWrites := [3]int{1, 0, 0}
+								if existing {
+									wantWrites = [3]int{0, 1, 0}
+								}
+								if got == nil || writes.writes != wantWrites || string(got.Data["output"]) != canary || got.Labels["healthy"] != "ok" || got.Annotations["healthy"] != "ok" {
+									t.Fatal("inline metadata failure must allow successful data and metadata writes")
+								}
+								values := got.Labels
+								if location == "annotations" {
+									values = got.Annotations
+								}
+								value, present := values["blocked"]
+								if present != existing || (existing && value != "old") {
+									t.Fatal("failed metadata must retain old values or remain absent on creation")
+								}
+							}
+							stored := &api.ExternalSecret{}
+							if getErr := r.Get(r.Ctx, req.NamespacedName, stored); getErr != nil {
+								t.Fatal(getErr)
+							}
+							found := false
+							for _, result := range stored.Status.DataSyncResults {
+								if result.ExternalSecretKey == statusKey && result.Status == "Failed" && strings.Contains(result.Reason, "failed to parse template") {
+									found = true
+								}
+							}
+							if !found || strings.Contains(fmt.Sprint(stored.Status, err, logs.String()), canary) {
+								t.Fatal("reconcile must persist safe parse diagnostics")
+							}
+							configure(stored.Spec.Target.Template, "{{ .token }}")
+							if source != nil {
+								current := source.DeepCopyObject().(client.Object)
+								if err := r.Get(r.Ctx, client.ObjectKeyFromObject(source), current); err != nil {
+									t.Fatal(err)
+								}
+								source.SetResourceVersion(current.GetResourceVersion())
+								if err := r.Update(r.Ctx, source); err != nil {
+									t.Fatal(err)
+								}
+							}
+							if err := r.Update(r.Ctx, stored); err != nil {
+								t.Fatal(err)
+							}
+							writes.writes = [3]int{}
+							if _, err := r.Reconcile(context.Background(), req); err != nil {
+								t.Fatal(err)
+							}
+							got = getTestSecret(t, r, es.Namespace, es.Spec.Target.Name)
+							wantData := map[string][]byte{"output": []byte(canary)}
+							if policy == api.MergePolicyMerge {
+								wantData["token"] = []byte(canary)
+							}
+							if strings.HasSuffix(location, "-Data") {
+								key := "rendered"
+								if strings.HasPrefix(location, "literal-") {
+									key = "literal"
+								}
+								wantData[key] = []byte(canary)
+							}
+							if got == nil || !reflect.DeepEqual(got.Data, wantData) || writes.writes[0]+writes.writes[1] != 1 || writes.writes[2] != 0 {
+								t.Fatal("explicit data-source migration must restore writes with the original merge policy")
+							}
+							if err := r.Get(r.Ctx, req.NamespacedName, stored); err != nil {
+								t.Fatal(err)
+							}
+							if len(stored.Status.DataSyncResults) == 0 {
+								t.Fatal("recovery must persist successful synchronization")
+							}
+							for _, result := range stored.Status.DataSyncResults {
+								if result.Status != "Succeeded" {
+									t.Fatal("recovery must clear the previous template failure")
+								}
+							}
+						})
+					}
+				}
+			}
+		}
+	}
+}
+
+func TestSecretSafetyAPIReconcileDiagnostics(t *testing.T) {
+	const canary = "FAKE_API_SECRET_CANARY!"
+	for _, category := range []string{"invalid", "forbidden", "conflict"} {
+		for _, existing := range []bool{false, true} {
+			t.Run(fmt.Sprintf("%s/existing=%t", category, existing), func(t *testing.T) {
+				es := buildTestExternalSecret(&api.ExternalSecretTemplate{Metadata: &api.ExternalSecretTemplateMetadata{Labels: map[string]string{"value": "{{ .token }}"}}})
+				es.Finalizers = []string{secretFinalizer}
+				es.Spec.Provider = "kms"
+				es.Spec.Data = []api.DataSource{{Key: "token"}}
+				objs := []client.Object{es, &corev1.Namespace{ObjectMeta: metav1.ObjectMeta{Name: es.Namespace}}}
+				old := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Name: es.Spec.Target.Name, Namespace: es.Namespace}, Data: map[string][]byte{"token": []byte("old")}}
+				if existing {
+					objs = append(objs, old)
+				}
+				r := newTestReconciler(t, false, &fakeSecretClient{dataByKey: map[string]map[string][]byte{"token": {"token": []byte(canary)}}}, objs...)
+				var raw error
+				writes := &secretSafetyWriteClient{Client: r.Client, target: client.ObjectKeyFromObject(old), reject: func(secret *corev1.Secret) error {
+					switch category {
+					case "invalid":
+						problems := metavalidation.ValidateLabels(secret.Labels, field.NewPath("metadata", "labels"))
+						raw = apierrors.NewInvalid(schema.GroupKind{Kind: "Secret"}, secret.Name, problems)
+					case "forbidden":
+						raw = apierrors.NewForbidden(schema.GroupResource{Resource: "secrets"}, secret.Name, stderrors.New(canary))
+					case "conflict":
+						raw = apierrors.NewConflict(schema.GroupResource{Resource: "secrets"}, secret.Name, stderrors.New(canary))
+					}
+					if !strings.Contains(raw.Error(), canary) {
+						t.Fatal("raw API fixture must contain the canary")
+					}
+					return raw
+				}}
+				r.Client = writes
+				var logs bytes.Buffer
+				r.Log = zap.New(zap.WriteTo(&logs))
+				req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(es)}
+				_, err := r.Reconcile(context.Background(), req)
+				if err == nil || raw == nil || !stderrors.Is(err, raw) || apierrors.ReasonForError(err) != apierrors.ReasonForError(raw) {
+					t.Fatal("reconcile must preserve the API failure classification")
+				}
+				stored := &api.ExternalSecret{}
+				if err := r.Get(r.Ctx, req.NamespacedName, stored); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, result := range stored.Status.DataSyncResults {
+					if result.ExternalSecretKey == "update_operation" && result.Status == "Failed" && strings.HasSuffix(result.Reason, ": "+category) {
+						found = true
+					}
+				}
+				if !found || !strings.Contains(logs.String(), ": "+category) || strings.Contains(fmt.Sprint(stored.Status, err, logs.String()), canary) {
+					t.Fatal("actual reconcile logs and status must preserve only safe diagnostics")
+				}
+				got := getTestSecret(t, r, es.Namespace, es.Spec.Target.Name)
+				wantWrites := [3]int{1, 0, 0}
+				if existing {
+					wantWrites = [3]int{0, 1, 0}
+				}
+				if writes.writes != wantWrites || (got != nil) != existing || (existing && !reflect.DeepEqual(got.Data, old.Data)) {
+					t.Fatal("failed API write must not replace existing data or delete the Secret")
+				}
+			})
+		}
+	}
+}
 
 // TestBcryptFunction tests the bcrypt password hashing function
 func TestBcryptFunction(t *testing.T) {
@@ -717,41 +1236,126 @@ func TestProcessAllTemplatesWithSecretTemplateFrom(t *testing.T) {
 	}
 }
 
-// TestIsValidLabelAndAnnotationKey: keys follow the Kubernetes qualified-name
-// syntax, so mixed case, '_' and '.' are accepted in the name segment.
-// Annotation keys are case-insensitive, matching the API server.
-func TestIsValidLabelAndAnnotationKey(t *testing.T) {
+// TestIsValidLabelKey: label keys follow the Kubernetes qualified-name syntax
+// enforced by the API server, so mixed case, '_' and '.' are accepted in the
+// name segment while the prefix must be a lowercase DNS subdomain.
+func TestIsValidLabelKey(t *testing.T) {
 	stp := NewSimpleTemplateProcessor(nil)
 
 	tests := []struct {
-		key        string
-		label      bool
-		annotation bool
+		key  string
+		want bool
 	}{
-		{"app", true, true},
-		{"app.kubernetes.io/name", true, true},
-		{"istio/multiCluster", true, true},
-		{"example.com/Mixed_Case.name-1", true, true},
-		{"A", true, true},
-		{"Example.com/name", false, true},
-		{"", false, false},
-		{"/name", false, false},
-		{"prefix/", false, false},
-		{"a/b/c", false, false},
-		{"-name", false, false},
-		{"name-", false, false},
-		{"_name", false, false},
-		{"example.com/na me", false, false},
-		{"example.com/" + strings.Repeat("a", 64), false, false},
-		{"example.com/é", false, false},
+		{"app", true},
+		{"app.kubernetes.io/name", true},
+		{"istio/multiCluster", true},
+		{"example.com/Mixed_Case.name-1", true},
+		{"A", true},
+		{"", false},
+		{"/name", false},
+		{"prefix/", false},
+		{"a/b/c", false},
+		{"-name", false},
+		{"name-", false},
+		{"_name", false},
+		{"Example.com/name", false},
+		{"example.com/na me", false},
+		{"example.com/" + strings.Repeat("a", 64), false},
+		{"example.com/é", false},
 	}
 
 	for _, tt := range tests {
-		if got := stp.isValidLabelKey(tt.key); got != tt.label {
-			t.Errorf("isValidLabelKey(%q) = %v, want %v", tt.key, got, tt.label)
+		if got := stp.isValidLabelKey(tt.key); got != tt.want {
+			t.Errorf("isValidLabelKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
-		if got := stp.isValidAnnotationKey(tt.key); got != tt.annotation {
-			t.Errorf("isValidAnnotationKey(%q) = %v, want %v", tt.key, got, tt.annotation)
+	}
+}
+
+// TestIsValidAnnotationKey: the Kubernetes API server validates annotation
+// keys as case-insensitive qualified names (strings.ToLower before
+// IsQualifiedName), so uppercase prefixes and names are accepted.
+func TestIsValidAnnotationKey(t *testing.T) {
+	stp := NewSimpleTemplateProcessor(nil)
+
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"app", true},
+		{"app.kubernetes.io/name", true},
+		{"Example.com/name", true},
+		{"EXAMPLE.COM/NAME", true},
+		{"example.com/Mixed_Case.name-1", true},
+		{"", false},
+		{"/name", false},
+		{"prefix/", false},
+		{"a/b/c", false},
+		{"example.com/na me", false},
+		{"example.com/" + strings.Repeat("a", 64), false},
+		{"example.com/é", false},
+	}
+
+	for _, tt := range tests {
+		if got := stp.isValidAnnotationKey(tt.key); got != tt.want {
+			t.Errorf("isValidAnnotationKey(%q) = %v, want %v", tt.key, got, tt.want)
 		}
+	}
+}
+
+// TestIsValidSecretKey: secret data keys follow the Kubernetes IsConfigMapKey
+// rules, so keys may start and end with '-', '_' or '.' and must stay within
+// 253 characters without a ".." prefix.
+func TestIsValidSecretKey(t *testing.T) {
+	stp := NewSimpleTemplateProcessor(nil)
+
+	tests := []struct {
+		key  string
+		want bool
+	}{
+		{"key", true},
+		{"key.name_1-x", true},
+		{".dotfile", true},
+		{"trailing.", true},
+		{"_underscore", true},
+		{"-dash", true},
+		{"", false},
+		{"..dotdot", false},
+		{"key name", false},
+		{"key/name", false},
+		{"café", false},
+		{strings.Repeat("a", 254), false},
+	}
+
+	for _, tt := range tests {
+		if got := stp.isValidSecretKey(tt.key); got != tt.want {
+			t.Errorf("isValidSecretKey(%q) = %v, want %v", tt.key, got, tt.want)
+		}
+	}
+}
+
+// TestInlineTemplateDataKeyDropFeedback pins that dropping an invalid inline
+// data key stays non-fatal AND is recorded in Stats.Errors (the channel the
+// controller persists as template_processing_warnings), so the drop is
+// visible in the ExternalSecret status instead of only controller logs.
+func TestInlineTemplateDataKeyDropFeedback(t *testing.T) {
+	stp := NewSimpleTemplateProcessor(nil)
+	es := buildTestExternalSecret(&api.ExternalSecretTemplate{
+		Data: map[string]string{
+			"good":    "{{ .raw }}",
+			"bad key": "static", // invalid key with a valid template: dropped before rendering
+		},
+	})
+	result, err := stp.ProcessAllTemplates(context.Background(), es, map[string][]byte{"raw": []byte("v")})
+	if err != nil {
+		t.Fatalf("invalid-key drop must stay non-fatal, got %v", err)
+	}
+	if string(result.Data["good"]) != "v" {
+		t.Fatalf("valid key must still render, got %v", result.Data)
+	}
+	if _, ok := result.Data["bad key"]; ok {
+		t.Fatal("invalid key must not be written")
+	}
+	if len(result.Stats.Errors) != 1 || !strings.Contains(result.Stats.Errors[0], "bad key") {
+		t.Fatalf("drop must be recorded in Stats.Errors with the key name, got %+v", result.Stats.Errors)
 	}
 }

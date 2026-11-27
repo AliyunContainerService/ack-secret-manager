@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 	"regexp"
 	"strconv"
 	"syscall"
@@ -160,6 +161,140 @@ func GetConfigFromSecret(ctx context.Context, r client.Client, secretRef *v1alph
 	return data, nil
 }
 
+type safeError struct {
+	message string
+	cause   error
+}
+
+func (e *safeError) Error() string { return e.message }
+func (e *safeError) Unwrap() error { return e.cause }
+func (e *safeError) Format(s fmt.State, verb rune) {
+	if verb == 'q' {
+		_, _ = fmt.Fprintf(s, "%q", e.message)
+		return
+	}
+	_, _ = fmt.Fprint(s, e.message)
+}
+
+// SafeErrorCategory returns only fixed categories; messages, URLs, paths and
+// arbitrary SDK codes must never be copied into public diagnostics. This is
+// diagnostic classification only and does not change retry decisions.
+func SafeErrorCategory(err error) string {
+	switch {
+	case err == nil:
+		return "none"
+	case errors.Is(err, context.Canceled):
+		return "canceled"
+	case errors.Is(err, context.DeadlineExceeded), apierrors.IsTimeout(err), apierrors.IsServerTimeout(err):
+		return "timeout"
+	case apierrors.IsForbidden(err):
+		return "forbidden"
+	case apierrors.IsUnauthorized(err):
+		return "unauthorized"
+	case apierrors.IsConflict(err):
+		return "conflict"
+	case apierrors.IsAlreadyExists(err):
+		return "already_exists"
+	case apierrors.IsNotFound(err), errors.Is(err, os.ErrNotExist):
+		return "not_found"
+	case apierrors.IsInvalid(err):
+		return "invalid"
+	case apierrors.IsBadRequest(err):
+		return "bad_request"
+	case apierrors.IsTooManyRequests(err):
+		return "throttled"
+	case apierrors.IsServiceUnavailable(err):
+		return "unavailable"
+	case apierrors.IsInternalError(err):
+		return "internal"
+	case errors.Is(err, os.ErrPermission):
+		return "permission_denied"
+	}
+
+	var sdkError *tea.SDKError
+	if errors.As(err, &sdkError) && sdkError != nil {
+		return safeSDKErrorCategory(tea.StringValue(sdkError.Code), tea.IntValue(sdkError.StatusCode))
+	}
+	var clientError *sdkErr.ClientError
+	if errors.As(err, &clientError) && clientError != nil {
+		return safeSDKErrorCategory(clientError.ErrorCode(), 0)
+	}
+	// ServerError is a separate legacy SDK type (it does not embed
+	// ClientError), so it needs its own errors.As branch to keep the
+	// status-code classification.
+	var serverError *sdkErr.ServerError
+	if errors.As(err, &serverError) && serverError != nil {
+		return safeSDKErrorCategory(serverError.ErrorCode(), serverError.HttpStatus())
+	}
+	var netError net.Error
+	if errors.As(err, &netError) && netError.Timeout() {
+		return "timeout"
+	}
+	var dnsError *net.DNSError
+	if errors.As(err, &dnsError) {
+		return "dns"
+	}
+	var urlError *url.Error
+	var opError *net.OpError
+	if errors.As(err, &urlError) || errors.As(err, &opError) {
+		return "network"
+	}
+	var pathError *os.PathError
+	if errors.As(err, &pathError) {
+		return "file_io"
+	}
+	var syntaxError *json.SyntaxError
+	if errors.As(err, &syntaxError) {
+		return "invalid_json"
+	}
+	var jsonTypeError *json.UnmarshalTypeError
+	var yamlTypeError *yaml.TypeError
+	if errors.As(err, &jsonTypeError) || errors.As(err, &yamlTypeError) {
+		return "type_mismatch"
+	}
+	return "unknown"
+}
+
+func safeSDKErrorCategory(code string, status int) string {
+	switch code {
+	case REJECTED_THROTTLING, "Throttling", "Throttling.User", "Throttling.Api":
+		return "throttled"
+	case SERVICE_UNAVAILABLE_TEMPORARY:
+		return "unavailable"
+	case INTERNAL_FAILURE:
+		return "internal"
+	}
+	switch status {
+	case http.StatusBadRequest:
+		return "bad_request"
+	case http.StatusUnauthorized:
+		return "unauthorized"
+	case http.StatusForbidden:
+		return "forbidden"
+	case http.StatusNotFound:
+		return "not_found"
+	case http.StatusConflict:
+		return "conflict"
+	case http.StatusTooManyRequests:
+		return "throttled"
+	case http.StatusServiceUnavailable:
+		return "unavailable"
+	}
+	if status >= 500 && status <= 599 {
+		return "server_error"
+	}
+	return "unknown"
+}
+
+// SanitizeError preserves the cause for classification, not for logging.
+// The operation message must be safe; callers must not log the unwrapped cause.
+func SanitizeError(err error, message string) error {
+	if err == nil {
+		return nil
+	}
+	return &safeError{message: message + ": " + SafeErrorCategory(err), cause: err}
+}
+
 func JsonStr(o interface{}) string {
 	temp, ok := o.(string)
 	if ok {
@@ -167,7 +302,7 @@ func JsonStr(o interface{}) string {
 	}
 	str, err := json.Marshal(o)
 	if err != nil {
-		klog.Errorf("failed to marshal %T to json: %v", o, err)
+		klog.Errorf("failed to marshal %T to json", o)
 		return ""
 	}
 	return string(str)
@@ -180,7 +315,7 @@ func YamlStr(o interface{}) string {
 	}
 	str, err := yaml.Marshal(o)
 	if err != nil {
-		klog.Errorf("failed to marshal %T to yaml: %v", o, err)
+		klog.Errorf("failed to marshal %T to yaml", o)
 		return ""
 	}
 	return string(str)
@@ -208,6 +343,15 @@ func IsValidJSON(data []byte) bool {
 	return json.Unmarshal(data, &js) == nil
 }
 
+// summarizeJMESPathError returns fixed summaries so evaluator errors cannot expose Secret values.
+func summarizeJMESPathError(err error) string {
+	var syntaxErr jmespath.SyntaxError
+	if errors.As(err, &syntaxErr) {
+		return "invalid expression syntax"
+	}
+	return "expression evaluation failed"
+}
+
 // GetJsonSecrets evaluates jmesPath expressions against the fetched secret
 // value (JSON or YAML). Per-expression failures are logged and skipped; the
 // only returned error is a structurally invalid secret value.
@@ -227,7 +371,7 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 	for _, jmesPathEntry := range jmesObj {
 		jsonSecret, err := jmespath.Search(jmesPathEntry.Path, data)
 		if err != nil {
-			klog.Errorf("invalid JMES Path: %s, secret key: %s, err = %s", jmesPathEntry.Path, key, err.Error())
+			klog.Errorf("jmesPath evaluation failed, path: %s, secret key: %s, reason: %s", jmesPathEntry.Path, key, summarizeJMESPathError(err))
 			continue
 		}
 
@@ -248,14 +392,14 @@ func GetJsonSecrets(jmesObj []v1alpha1.JMESPathObject, secretValue, key string) 
 			if marshalToYaml {
 				yamlData, err := yaml.Marshal(v)
 				if err != nil {
-					klog.Errorf("failed to marshal jmesPath value to YAML, secret key: %s, object alias: %v, type: %T, error: %v", key, jmesPathEntry.ObjectAlias, v, err)
+					klog.Errorf("failed to marshal jmesPath value to YAML, secret key: %s, object alias: %v, type: %T", key, jmesPathEntry.ObjectAlias, v)
 					continue
 				}
 				strValue = string(yamlData)
 			} else {
 				jsonData, err := json.Marshal(v)
 				if err != nil {
-					klog.Errorf("failed to marshal jmesPath value to JSON, secret key: %s, object alias: %v, type: %T, error: %v", key, jmesPathEntry.ObjectAlias, v, err)
+					klog.Errorf("failed to marshal jmesPath value to JSON, secret key: %s, object alias: %v, type: %T", key, jmesPathEntry.ObjectAlias, v)
 					continue
 				}
 				strValue = string(jsonData)
@@ -292,8 +436,7 @@ func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[st
 		newKey := re.ReplaceAllString(key, operation.Target)
 		if _, exists := out[newKey]; exists {
 			// Key collision: keep overwrite semantics but surface the data loss
-			klog.Warningf("key conflict after regex rewrite: source %q and a previous key both rewrite to %q (source pattern %q), overwriting",
-				key, newKey, operation.Source)
+			klog.Warning("key conflict after regex rewrite: multiple source keys map to the same output key, overwriting")
 		}
 		out[newKey] = value
 	}
@@ -302,10 +445,10 @@ func RewriteRegexp(operation v1alpha1.ReplaceRule, in map[string]string) (map[st
 
 // JudgeNeedRetry reports whether err is transient and worth retrying:
 // throttling/unavailability/internal-failure codes, 5xx/429 statuses (legacy
-// ClientError by code, tea.SDKError by status fallback), and transient
-// network errors (timeouts, resets, broken pipes). Permanent errors
-// (403/404, DNS failures, invalid parameters) are NOT retryable; wrapped
-// errors are matched via errors.As.
+// ClientError by code, legacy ServerError and tea.SDKError with a status
+// fallback), and transient network errors (timeouts, resets, broken pipes).
+// Permanent errors (403/404, DNS failures, invalid parameters) are NOT
+// retryable; wrapped errors are matched via errors.As.
 func JudgeNeedRetry(err error) bool {
 	if err == nil {
 		return false
@@ -315,6 +458,17 @@ func JudgeNeedRetry(err error) bool {
 	var clientErr *sdkErr.ClientError
 	if errors.As(err, &clientErr) {
 		return isRetryableErrorCode(clientErr.ErrorCode())
+	}
+
+	// Legacy ServerError is a distinct type carrying the HTTP status, so it
+	// gets the same code + 5xx/429 fallback as tea.SDKError below.
+	var serverErr *sdkErr.ServerError
+	if errors.As(err, &serverErr) {
+		if isRetryableErrorCode(serverErr.ErrorCode()) {
+			return true
+		}
+		status := serverErr.HttpStatus()
+		return status >= http.StatusInternalServerError || status == http.StatusTooManyRequests
 	}
 
 	// New darabonba SDK error type; all fields are pointers and may be nil

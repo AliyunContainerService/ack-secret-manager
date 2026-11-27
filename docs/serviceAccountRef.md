@@ -39,7 +39,7 @@ metadata:
    | Conditions             | - `oidc:iss`: Keep the default value. <br>- `oidc:aud`: Keep the default value. <br>- `oidc:sub`: You must manually add this condition.<br>　　- **Condition Key**: Select `oidc:sub`. <br>　　- **Operator**: Select `StringEquals`.<br>　　- **Condition Value**: Enter `system:serviceaccount:<namespace>:<serviceAccountName>`. <br>　　　　- `<namespace>` is the namespace of the designated ServiceAccount.<br>　　　　- `<serviceAccountName>` is the name of the ServiceAccount.<br><br>**Note**: The `namespace` and `serviceAccountName` here refer to the dedicated ServiceAccounts used by different tenants to access KMS Secrets Manager. |
 
 4. Create a custom permission policy and attach it to the RAM role created in the previous step.
-    - Create a custom policy granting the necessary permissions to retrieve KMS secrets. Example policy content is shown below. For detailed steps, see [Create custom polices](https://www.alibabacloud.com/help/en/ram/create-a-custom-policy).
+    - Create a custom policy granting the necessary permissions to retrieve KMS secrets. Example policy content is shown below (`Resource` is the ARN of the specified KMS secret). For detailed steps, see [Create custom polices](https://www.alibabacloud.com/help/en/ram/create-a-custom-policy).
 
    ```json
    {
@@ -50,7 +50,7 @@ metadata:
         "kms:GetSecretValue",
         "kms:Decrypt"
       ],
-      "Resource": "acs:kms:<regionId>:<aliuid>:secret/xxxx",  # The specified KMS credential ARN
+      "Resource": "acs:kms:<regionId>:<aliuid>:secret/xxxx",
       "Effect": "Allow"
     }
     ]

@@ -68,8 +68,8 @@ func ProcessExtractedExternalSecretData(data *v1alpha1.DataProcess, externalData
 	}
 
 	if err != nil {
-		klog.Errorf("extract secret error: failed to parse data, key %v, err %v", data.Extract.Key, err)
-		return nil, err
+		klog.Errorf("extract secret error: failed to parse data, key %v", data.Extract.Key)
+		return nil, utils.SanitizeError(err, "extract secret error: failed to parse data")
 	}
 
 	// Serialize in the input format

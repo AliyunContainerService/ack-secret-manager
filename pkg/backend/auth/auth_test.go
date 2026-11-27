@@ -1,9 +1,16 @@
 package auth
 
 import (
+	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +19,8 @@ import (
 	"testing"
 	"time"
 
+	openapi "github.com/alibabacloud-go/darabonba-openapi/v2/client"
+	sts "github.com/alibabacloud-go/sts-20150401/v2/client"
 	"github.com/alibabacloud-go/tea/tea"
 	credential "github.com/aliyun/credentials-go/credentials"
 	"k8s.io/client-go/kubernetes/fake"
@@ -20,10 +29,200 @@ import (
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/backend"
 	backendp "github.com/AliyunContainerService/ack-secret-manager/pkg/backend/provider"
 	"github.com/AliyunContainerService/ack-secret-manager/pkg/testutil"
+	"github.com/AliyunContainerService/ack-secret-manager/pkg/utils"
 )
 
 // NOTE: tests mutate package-global state (backend.EnableWorkerRole) and
 // share caches, so they rely on serial execution and must never call t.Parallel().
+
+type secretSafetyHTTP func(*http.Request) (*http.Response, error)
+
+func (f secretSafetyHTTP) Call(req *http.Request, _ *http.Transport) (*http.Response, error) {
+	return f(req)
+}
+func (f secretSafetyHTTP) RoundTrip(req *http.Request) (*http.Response, error) { return f(req) }
+
+type secretSafetyCredentials struct{ token string }
+
+func (p secretSafetyCredentials) Credentials(context.Context) (*ramprovider.Credentials, error) {
+	return &ramprovider.Credentials{AccessKeyId: "fake-ak", AccessKeySecret: "fake-sk", SecurityToken: p.token}, nil
+}
+
+type secretSafetyLifecycleProvider struct {
+	cred    *ramprovider.Credentials
+	err     error
+	stopped bool
+}
+
+func (p *secretSafetyLifecycleProvider) Credentials(context.Context) (*ramprovider.Credentials, error) {
+	return p.cred, p.err
+}
+func (p *secretSafetyLifecycleProvider) Stop(context.Context) { p.stopped = true }
+
+func TestSecretSafetyCredentialBoundary(t *testing.T) {
+	const canary = "FAKE_PROVIDER_SECRET_CANARY"
+	original := &secretSafetyLifecycleProvider{cred: &ramprovider.Credentials{AccessKeyId: "fake-ak", AccessKeySecret: canary}}
+	wrapped := &safeCredentialsProvider{CredentialsProvider: original, stage: chainStage}
+	cred, err := wrapped.Credentials(context.Background())
+	if err != nil || cred != original.cred {
+		t.Fatal("successful credentials must pass through unchanged")
+	}
+	for _, raw := range []error{
+		&url.Error{Op: "Post", URL: "https://sts.invalid/?SecurityToken=" + canary, Err: context.DeadlineExceeded},
+		ramprovider.NewNotEnableError(errors.New(canary)),
+		*ramprovider.NewNotEnableError(errors.New(canary)),
+		ramprovider.NewNoAvailableProviderError(errors.New(canary)),
+		*ramprovider.NewNoAvailableProviderError(errors.New(canary)),
+	} {
+		original.cred, original.err = nil, raw
+		_, err = wrapped.Credentials(context.Background())
+		if ramprovider.IsNotEnableError(raw) != ramprovider.IsNotEnableError(err) || ramprovider.IsNoAvailableProviderError(raw) != ramprovider.IsNoAvailableProviderError(err) || utils.JudgeNeedRetry(raw) != utils.JudgeNeedRetry(err) {
+			t.Fatal("credential error classification changed")
+		}
+		if !ramprovider.IsNotEnableError(raw) && !ramprovider.IsNoAvailableProviderError(raw) && !errors.Is(err, raw) {
+			t.Fatal("ordinary credential error identity was lost")
+		}
+		if strings.Contains(fmt.Sprintf("%v %+v %#v", err, err, err), canary) {
+			t.Error("credential error exposes input")
+		}
+		if !strings.Contains(err.Error(), "stage=chain") || !strings.Contains(err.Error(), credentialErrorCategory(raw)) {
+			t.Error("credential error lost its safe stage or category")
+		}
+	}
+	ramprovider.NewSemaphoreProvider(wrapped, ramprovider.SemaphoreProviderOptions{}).Stop(context.Background())
+	if !original.stopped {
+		t.Fatal("registered provider lifecycle was not forwarded")
+	}
+	logs := testutil.CaptureKlogOutput(t, func() {
+		logger := safeProviderLogger{}
+		logger.Info(canary)
+		logger.Debug(canary)
+		logger.Error(errors.New(canary), canary)
+	})
+	if strings.Contains(logs, canary) || !strings.Contains(logs, "credential provider refresh failed") {
+		t.Error("unsafe dependency logger output")
+	}
+}
+
+func TestSecretSafetyCredentialDiagnostics(t *testing.T) {
+	const canary = "FAKE_DIAGNOSTIC_SECRET_CANARY"
+	for _, tt := range []struct {
+		stage credentialStage
+		name  string
+	}{
+		{chainStage, "chain"}, {fileOIDCStage, "file_oidc"},
+		{serviceAccountOIDCStage, "service_account_oidc"}, {akAssumeRoleStage, "ak_assume_role"},
+		{remoteAssumeRoleStage, "remote_assume_role"}, {ecsMetadataStage, "ecs_metadata"},
+		{credentialStage(255), "unknown"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, failure := range []struct {
+				err    error
+				reason string
+			}{
+				{&url.Error{Op: "POST", URL: "https://sts.invalid/?token=" + canary, Err: context.DeadlineExceeded}, "timeout"},
+				{ramprovider.NewNotEnableError(errors.New(canary)), "provider_not_enabled"},
+				{ramprovider.NewNoAvailableProviderError(errors.New(canary)), "no_available_provider"},
+				{errors.New(canary), "unknown"},
+			} {
+				logs := testutil.CaptureKlogOutput(t, func() {
+					logger := safeProviderLogger{stage: tt.stage}
+					logger.Info(canary)
+					logger.Debug(canary)
+					logger.Error(failure.err, canary)
+				})
+				if strings.Contains(logs, canary) || !strings.Contains(logs, "stage="+tt.name) || !strings.Contains(logs, "reason="+failure.reason) {
+					t.Error("credential diagnostics lost safe context or exposed input")
+				}
+			}
+		})
+	}
+}
+
+func TestSecretSafetyOIDCNetworkError(t *testing.T) {
+	const canary = "FAKE_OIDC_TOKEN_CANARY"
+	calls := 0
+	transport := secretSafetyHTTP(func(req *http.Request) (*http.Response, error) {
+		calls++
+		if req.URL.Query().Get("OIDCToken") != canary {
+			t.Fatal("SDK request must contain the fake OIDC token in its query")
+		}
+		return nil, &url.Error{Op: "Post", URL: req.URL.String(), Err: errors.New("synthetic network failure")}
+	})
+	raw, err := sts.NewClient(&openapi.Config{Endpoint: tea.String("sts.invalid"), HttpClient: transport})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = raw.AssumeRoleWithOIDC(&sts.AssumeRoleWithOIDCRequest{OIDCToken: tea.String(canary), RoleArn: tea.String("fake-role"), OIDCProviderArn: tea.String("fake-provider"), RoleSessionName: tea.String("fake-session")})
+	if err == nil || !strings.Contains(err.Error(), canary) {
+		t.Fatal("fixture must reproduce disclosure by the real STS SDK")
+	}
+	p := NewTokenOIDCProvider("sts.invalid", "fake-session", canary, "fake-role", "fake-provider")
+	p.httpClient = transport
+	logs := testutil.CaptureKlogOutput(t, func() {
+		_, err = p.GetCredential()
+	})
+	if strings.Contains(logs, canary) || !strings.Contains(logs, "stage=service_account_oidc, reason=network") {
+		t.Error("OIDC diagnostics lost safe stage/category or exposed token")
+	}
+	if utils.JudgeNeedRetry(err) {
+		t.Error("OIDC error retry behavior changed")
+	}
+	if err == nil || !strings.Contains(err.Error(), "failed to assume role with oidc: network") || strings.Contains(err.Error(), canary) {
+		t.Error("OIDC public error must retain a safe operation summary and category")
+	}
+	if calls < 2 {
+		t.Fatal("production provider did not call the SDK")
+	}
+}
+
+func TestSecretSafetyRemoteRoleErrors(t *testing.T) {
+	const canary = "FAKE_SESSION_TOKEN_CANARY"
+	var stdLogs bytes.Buffer
+	previous := log.Writer()
+	log.SetOutput(&stdLogs)
+	defer log.SetOutput(previous)
+	transport := secretSafetyHTTP(func(req *http.Request) (*http.Response, error) {
+		if req.URL.Query().Get("Action") == "AssumeRoleWithOIDC" {
+			body := fmt.Sprintf(`{"Credentials":{"AccessKeyId":"fake-ak","AccessKeySecret":"fake-sk","SecurityToken":%q,"Expiration":%q}}`, canary, time.Now().Add(time.Hour).UTC().Format("2006-01-02T15:04:05Z"))
+			return &http.Response{StatusCode: http.StatusOK, Header: http.Header{}, Body: io.NopCloser(strings.NewReader(body))}, nil
+		}
+		if req.URL.Query().Get("SecurityToken") != canary {
+			t.Fatal("AssumeRole query must contain the fake session token")
+		}
+		return nil, errors.New("synthetic network failure")
+	})
+	raw := ramprovider.NewRoleArnProvider(secretSafetyCredentials{canary}, "fake-role", ramprovider.RoleArnProviderOptions{Transport: transport})
+	_, rawErr := raw.Credentials(context.Background())
+	raw.Stop(context.Background())
+	if rawErr == nil || !strings.Contains(rawErr.Error(), canary) || !strings.Contains(stdLogs.String(), canary) {
+		t.Fatal("fixture must reproduce both dependency error and updater log disclosure")
+	}
+	stdLogs.Reset()
+	path := filepath.Join(t.TempDir(), "fake-token")
+	if err := os.WriteFile(path, []byte("fake-oidc-token"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &AuthConfig{ClientName: "secret-safety", RoleArn: "fake-role", OidcArn: "fake-provider", RemoteRoleArn: "fake-remote", TokenFilePath: path, transport: transport}
+	m := newTestManager()
+	logs := testutil.CaptureKlogOutput(t, func() {
+		cred, err := cfg.GetAuthCred("cn-hangzhou", 10, m)
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer m.RamProvider[cfg.ClientName].Stop(context.Background())
+		_, err = cred.GetCredential()
+		if err == nil || strings.Contains(fmt.Sprintf("%v %+v %#v", err, err, err), canary) {
+			t.Error("credential adapter exposes session token")
+		}
+	})
+	if strings.Contains(logs+stdLogs.String(), canary) {
+		t.Error("credential provider logs expose session token")
+	}
+	if !strings.Contains(logs, "stage=remote_assume_role, reason=network") {
+		t.Error("authentication failures must retain safe stage and category")
+	}
+}
 
 func newTestManager() *backendp.Manager {
 	return &backendp.Manager{

@@ -38,7 +38,7 @@ metadata:
 | **条件**           | - `oidc:iss`：保持默认。<br>- `oidc:aud`：保持默认。<br>- `oidc:sub`：需手动添加该条件。<br>　　- **条件键**：选择 `oidc:sub`。<br>　　- **运算符**：选择 `StringEquals`。<br>　　- **条件值**：输入 `system:serviceaccount:<namespace>:<serviceAccountName>`。<br>　　　　- `<namespace>` 为指定 ServiceAccount 的命名空间。<br>　　　　- `<serviceAccountName>` 为服务账户的名称。<br><br>**说明**：这里的 `namespace` 和 `serviceAccountName` 是指不同租户用于访问 KMS 凭据管家的独立 ServiceAccount。 |
 
 4. 创建自定义权限策略并为上一步创建的RAM角色授权。
-    - 创建指定导入KMS凭据时所需的权限策略。策略内容如下。具体操作，请参见[创建自定义权限策略](https://help.aliyun.com/zh/ram/create-a-custom-policy)。
+    - 创建指定导入KMS凭据时所需的权限策略。策略内容如下（`Resource` 为指定的KMS凭据ARN）。具体操作，请参见[创建自定义权限策略](https://help.aliyun.com/zh/ram/create-a-custom-policy)。
    ```json
    {
     "Version": "1",
@@ -48,7 +48,7 @@ metadata:
         "kms:GetSecretValue",
         "kms:Decrypt"
       ],
-      "Resource": "acs:kms:<regionId>:<aliuid>:secret/xxxx",  #指定的KMS凭据ARN
+      "Resource": "acs:kms:<regionId>:<aliuid>:secret/xxxx",
       "Effect": "Allow"
     }
     ]
